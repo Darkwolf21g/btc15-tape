@@ -255,7 +255,12 @@ function normCdf(z) {      // Abramowitz-Stegun 7.1.26 on erf, accurate to about
 // normal curve allows. The chance of Up uses a Student-t curve with four degrees of freedom, so a
 // "sure thing" is shown as about 98%, not 99.9%.
 function tailCdf(z) { return 0.5 + z * (z * z + 6) / (2 * Math.pow(z * z + 4, 1.5)); }
+// `sd` is used as the curve's scale, which makes its actual standard deviation sd*sqrt(2): a
+// deliberate margin for volatility the last minutes did not show. The alternative, the curve
+// scaled so that its standard deviation is exactly `sd`, is recorded and scored alongside (see
+// the Record), so the data can decide which is better calibrated.
 const chance = (mean, sd, tgt) => tailCdf((mean - (tgt - 0.005)) / sd);
+const chanceMatched = (mean, sd, tgt) => tailCdf((mean - (tgt - 0.005)) / (sd / Math.SQRT2));
 const ET_PARTS = new Intl.DateTimeFormat("en-US", {timeZone: "America/New_York", year: "2-digit", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23"});
 const ET_CLOCK = new Intl.DateTimeFormat("en-US", {timeZone: "America/New_York", hour: "numeric", minute: "2-digit"});
 function etParts(ts) { const o = {}; for (const p of ET_PARTS.formatToParts(new Date(ts * 1000))) o[p.type] = p.value; return o; }
@@ -843,7 +848,7 @@ function project(now, close, x, vols, drifts) {
   // every settlement second after it, so it counts (how many of those there are) squared.
   let variance = 0;
   if (m) {
-    const vs = vols.s * vols.s, vl = vols.l * vols.l, dmax = ahead[m - 1];
+    const vs = vols.s * vols.s, vl = vols.l * vols.l, dmax = Math.ceil(ahead[m - 1]);
     let c = m, j = 0;
     for (let u = 1; u <= dmax; u++) {
       while (j < m && ahead[j] < u - 0.5) { j++; c--; }
@@ -1161,7 +1166,7 @@ function saveRecord() {
   if (record.windows.length > 300) record.windows.splice(0, record.windows.length - 300);
   store.set("record", record.windows);
 }
-function keepRecord(mk, close, left, tgt, p, km, vUp, vDown, upC, downC, typed) {
+function keepRecord(mk, close, left, tgt, p, p2, km, vUp, vDown, upC, downC, typed) {
   let r = record.cur;
   if (!r || r.mk !== mk) {
     if (r) settleWindow(r);
@@ -1172,7 +1177,7 @@ function keepRecord(mk, close, left, tgt, p, km, vUp, vDown, upC, downC, typed) 
   if (tgt != null) r.tgt = tgt;
   // a checkpoint waits up to 5 s for a Kalshi quote, so the market is scored on the same moment
   if (p != null) for (const c of CHECKS) if (left <= c && left > c - 20 && !r.checks[c] && (km || left <= c - 5)) {
-    r.checks[c] = {p: +p.toFixed(3), ask: km ? km.ask : null, bid: km ? km.bid : null};
+    r.checks[c] = {p: +p.toFixed(3), p2: p2 != null ? +p2.toFixed(3) : null, ask: km ? km.ask : null, bid: km ? km.bid : null};
     saveRecord();
   }
   for (const [side, v, price] of [["Up", vUp, upC], ["Down", vDown, downC]]) {
@@ -1201,14 +1206,15 @@ record.windows.filter(w => w.src !== "kalshi" && Date.now() / 1000 - w.close > 9
 function scoreRecord() {
   const settled = record.windows.filter(w => w.result);
   const brier = c => {                              // model against the market's mid, where both were seen
-    let n = 0, sm = 0, sk = 0;
+    let n = 0, sm = 0, sm2 = 0, n2 = 0, sk = 0;
     for (const w of settled) {
       const k = w.checks[c];
       if (!k || k.ask == null || k.bid == null) continue;
       const y = w.result === "yes" ? 1 : 0, mid = (k.ask + k.bid) / 2;
       n++; sm += (k.p - y) ** 2; sk += (mid - y) ** 2;
+      if (k.p2 != null) { n2++; sm2 += (k.p2 - y) ** 2; }
     }
-    return n ? {n, model: sm / n, market: sk / n} : null;
+    return n ? {n, model: sm / n, market: sk / n, matched: n2 ? sm2 / n2 : null} : null;
   };
   const buys = [];
   for (const w of settled) for (const b of w.buys) {
@@ -1228,8 +1234,9 @@ function recordLine() {
 }
 function recordText() {
   const s = scoreRecord(), lines = [];
-  for (const c of CHECKS) { const b = s.briers[c]; lines.push(`${String(c / 60).padStart(2)} min to go: ` + (b ? `model ${b.model.toFixed(3)} vs market ${b.market.toFixed(3)} over ${b.n} windows` : "nothing scored yet")); }
+  for (const c of CHECKS) { const b = s.briers[c]; lines.push(`${String(c / 60).padStart(2)} min to go: ` + (b ? `model ${b.model.toFixed(3)}` + (b.matched != null ? ` (variance-matched ${b.matched.toFixed(3)})` : "") + ` vs market ${b.market.toFixed(3)} over ${b.n} windows` : "nothing scored yet")); }
   lines.push(`Brier score: mean squared error of the chance, 0 is perfect, 0.25 is a coin flip. Settled ${s.settled} of ${s.total} watched. Buy calls are scored as one contract held to settlement, fees off.`);
+  lines.push(`"Variance-matched" is the same model with its curve narrowed by 1.41 (the chance shown keeps that margin). If it scores better over a few dozen windows, the shown chance should switch to it.`);
   lines.push("");
   for (const w of record.windows.slice(-25).reverse()) {
     const when = ET_CLOCK.format(new Date((w.close - WINDOW) * 1000));
@@ -1372,7 +1379,7 @@ function render() {
   const typedUp = $("rhUp").value ? parseFloat($("rhUp").value) : null, typedDown = $("rhDown").value ? parseFloat($("rhDown").value) : null;
   const vUp = verdict($("vUp"), p, band && band.lo, typedUp != null ? typedUp : upC);
   const vDown = verdict($("vDown"), p == null ? null : 1 - p, band && 1 - band.hi, typedDown != null ? typedDown : downC);
-  keepRecord(mk, close, left, tgt, p, km, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, typedUp != null || typedDown != null);
+  keepRecord(mk, close, left, tgt, p, proj && tgt != null ? chanceMatched(proj.mean, proj.sd, tgt) : null, km, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, typedUp != null || typedDown != null);
 
   // sounds: a sharp move as it starts, a buy call on Kalshi's own prices once it has held for a few
   // seconds, and the start of the settlement minute
