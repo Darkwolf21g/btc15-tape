@@ -48,6 +48,26 @@ FAKE = r"""
       this.url = url; this.readyState = 0;
       const k = this.k = venueOf(url);
       window.__sockets = (window.__sockets || 0) + 1;
+      if (url.includes("/feed")) {                 // the relay's stream of Kalshi's own data, when window.__stream is set
+        this.k = "feed";
+        if (!window.__stream) { setTimeout(() => { this.readyState = 3; this.onclose && this.onclose({}); }, 30); return; }
+        setTimeout(() => { this.readyState = 1; this.onopen && this.onopen(); this.emit({type: "relay", msg: {state: "open", hasKey: true}}); }, 50);
+        const emit = msg => { if (this.readyState !== 1) return; this.onmessage && this.onmessage({data: JSON.stringify(msg)}); };
+        this.emit = emit;
+        const brti = () => price + 2.0;             // the official index sits $2 above the sim's Coinbase price
+        this.timer = setInterval(() => emit({type: "cfbenchmarks_value_5hz", msg: {index_id: "BRTI", value_usd: brti().toFixed(2), source_ts_ms: Date.now() - 150, received_at: Date.now()}}), 200);
+        this.hb = setInterval(() => {
+          const now = Date.now(), closeMs = (Math.floor(now / 900000) + 1) * 900000;
+          const win = (from, to) => { const v = hist.filter(h => h[0] > from && h[0] <= to).map(h => h[1] + 2.0); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : brti(); };
+          const msg = {index_id: "BRTI", received_at: now, data: JSON.stringify({type: "value", id: "BRTI", time: now, value: brti().toFixed(2)}),
+                       avg_60s_data: {value: win(now - 60000, now).toFixed(8), window_size: 60, window_start_ts_ms: now - 60000, window_end_ts_exclusive: now}};
+          const into = Math.floor((now - (closeMs - 60000)) / 1000);
+          if (into >= 1 && into <= 60) msg.last_60s_windowed_average_15min = {value: win(closeMs - 60000, now).toFixed(8), window_size: into, window_start_ts_ms: closeMs - 60000, window_end_ts_exclusive: closeMs};
+          emit({type: "cfbenchmarks_value", msg});
+        }, 1000);
+        this.ttimer = setInterval(() => { if (window.__kalshi) emit({type: "ticker", msg: {market_ticker: window.__curTicker ? window.__curTicker() : "", yes_bid_dollars: String(window.__kBid), yes_ask_dollars: String(window.__kAsk), ts: Math.floor(Date.now() / 1000)}}); }, 2000);
+        return;
+      }
       if (k === "binance") { setTimeout(() => { this.readyState = 3; this.onerror && this.onerror({}); this.onclose && this.onclose({}); }, 30); return; }
       setTimeout(() => { this.readyState = 1; this.onopen && this.onopen(); }, 50);
       const emit = msg => { if (this.readyState !== 1) return; window.__frames[k] = (window.__frames[k] || 0) + 1; this.onmessage && this.onmessage({data: typeof msg === "string" ? msg : JSON.stringify(msg)}); };
@@ -98,6 +118,7 @@ FAKE = r"""
     }
     send(s) {
       window.__sent[this.k] = (window.__sent[this.k] || []).concat([s]).slice(-6);
+      if (this.k === "feed") { if (s === "ping") this.emit && this.emit({type: "pong"}); return; }
       let d; try { d = JSON.parse(s); } catch (e) { return; }
       if (d.method === "subscribe" && this.k === "cryptocom") {
         this.sub = true;

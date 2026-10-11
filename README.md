@@ -22,6 +22,16 @@ Browsers are not allowed to read Kalshi directly, so on its own the page estimat
 
 `public/index.html` is the page the Worker serves; the copy at the repo root is what GitHub Pages serves. Keep them identical.
 
+## Kalshi's own stream (optional, recommended)
+
+With an API key the Worker also streams Kalshi's own data to the page: the official BRTI index up to five times a second, the official trailing 60-second average, the settlement average as Kalshi accumulates it in the final minute, and the market's bid/ask the moment they change. The page then shows "official" readings with their age instead of the exchange estimate, and buy calls use the real settlement average.
+
+1. On Kalshi: profile settings → **API Keys** → **Create New API Key**, Ed25519 (the default). Save the downloaded key file; the private key is shown once. Note the key ID.
+2. On Cloudflare: the `btc15-tape` Worker → **Settings → Variables and Secrets** → add secrets `KALSHI_KEY_ID` (the key ID) and `KALSHI_PRIVATE_KEY` (the whole key file, including the BEGIN/END lines). Optionally `FEED_TOKEN`: any password; then enter it in the page under *Target and calibration → Stream token*.
+3. Reload the page. The Market chips show `BRTI official 0.3 s` when the stream is live, or why it is not (no key, Kalshi refused, connecting).
+
+The key is only used to sign the WebSocket handshake; the Worker subscribes to the index and the two current market tickers and nothing else. One Durable Object holds the single upstream connection and shares it with every open page; it closes a minute after the last page leaves. Never paste the key anywhere but the Cloudflare secret.
+
 ## Settlement and data completeness
 
 The projection follows Kalshi's documented final-minute helper convention: `(close - 60 seconds, close]`. The start-boundary sample is excluded and the closing sample is included. With an 8:30 close, the second-indexed observations run from 8:29:01 through 8:30:00.
