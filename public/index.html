@@ -1,0 +1,865 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>BTC 15 Tape</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: one column for a phone on a dash mount; countdown and P(Up) first, the tape below, sources last.
+   Deliberately dark only: it is read at night, next to Robinhood's dark screen. */
+:root {
+  color-scheme: dark;
+  --ground: #0a0f1c;
+  --panel: #111a2c;
+  --line: #22304d;
+  --ink: #e6ebf5;
+  --dim: #8592ad;
+  --spot: #e6ebf5;      /* exchange spot, the fast line */
+  --avg: #78a0ff;       /* the 60-second average: Robinhood's big number */
+  --target: #ffc857;
+  --up: #2fd17c;        /* Robinhood's Up green */
+  --down: #ff6a3d;      /* Robinhood's Down orange */
+  --warn: #ffb020;
+  --lead: #c792ea;      /* the perpetual future: often moves first */
+  --display: "Barlow Condensed", "Arial Narrow", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; background: var(--ground); color: var(--ink); }
+body {
+  font: 14px/1.4 var(--mono);
+  padding-inline: max(16px, env(safe-area-inset-left, 0px));
+  padding-block: calc(10px + env(safe-area-inset-top, 0px)) calc(24px + env(safe-area-inset-bottom, 0px));
+  max-width: 920px; margin-inline: auto;
+  font-variant-numeric: tabular-nums;
+}
+.label { font: 600 12px/1 var(--display); letter-spacing: .09em; text-transform: uppercase; color: var(--dim); }
+header { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.win { display: grid; gap: 4px; }
+.win b { font: 600 20px/1 var(--display); letter-spacing: .02em; }
+.win small { color: var(--dim); font-size: 11px; }
+.clock { font: 700 56px/0.9 var(--display); letter-spacing: .01em; }
+.clock.settling { color: var(--target); }
+
+.hero { display: grid; grid-template-columns: auto 1fr; gap: 6px 18px; align-items: center; margin-block: 14px 10px; }
+.p { font: 700 84px/0.85 var(--display); }
+.p.up { color: var(--up); } .p.down { color: var(--down); } .p.none { color: var(--dim); }
+.split { display: grid; gap: 6px; min-width: 0; }
+.bar { height: 10px; border-radius: 5px; background: var(--down); overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--up); width: 50%; transition: width .25s; }
+.fair { display: flex; justify-content: space-between; font-size: 13px; }
+.fair .u { color: var(--up); } .fair .d { color: var(--down); }
+.why { grid-column: 1 / -1; color: var(--dim); font-size: 12px; }
+.ask { grid-column: 1 / -1; display: flex; gap: 8px; }
+.ask input { flex: 1 1 auto; min-width: 0; background: var(--panel); border: 1px solid var(--target); border-radius: 6px; color: var(--ink); font: 16px var(--mono); padding: 9px 10px; }
+
+.edge { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+.edge label { display: grid; gap: 5px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.edge input { width: 100%; background: transparent; border: 0; color: var(--ink); font: 600 22px var(--mono); outline: none; }
+.edge input::placeholder { color: #44506c; }
+.edge .verdict { font-size: 12px; min-height: 1.4em; }
+.good { color: var(--up); } .bad { color: var(--down); } .meh { color: var(--dim); }
+
+.levels { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+@media (max-width: 560px) { .levels { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.lv { border-top: 2px solid var(--line); padding-top: 6px; display: grid; gap: 4px; min-width: 0; }
+.lv b { font: 600 18px/1.1 var(--mono); overflow-wrap: anywhere; }
+.lv small { color: var(--dim); font-size: 11px; }
+.lv.spot { border-color: var(--spot); } .lv.avg { border-color: var(--avg); }
+.lv.tgt { border-color: var(--target); cursor: pointer; } .lv.proj { border-color: var(--dim); }
+.lv.spot.thin b { color: var(--dim); }
+
+.chart { position: relative; margin-top: 14px; }
+canvas { display: block; width: 100%; }
+#main { height: 300px; } #prob { height: 110px; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--dim); margin-top: 6px; }
+.legend i { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 5px; border-radius: 2px; }
+
+.sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+.chip { font-size: 11px; padding: 4px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim); display: flex; gap: 6px; align-items: center; }
+.chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #44506c; }
+.chip.ok::before { background: var(--up); } .chip.slow::before { background: var(--warn); } .chip.off::before { background: var(--down); }
+.chip.ok { color: var(--ink); }
+
+details { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
+summary { cursor: pointer; font: 600 14px var(--display); letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
+.set { display: grid; gap: 10px; margin-top: 10px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.row input { flex: 1 1 150px; min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; color: var(--ink); font: 15px var(--mono); padding: 8px 10px; }
+button { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; font: 600 14px var(--display); letter-spacing: .06em; text-transform: uppercase; padding: 9px 12px; cursor: pointer; }
+button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--avg); outline-offset: 2px; }
+.notes { color: var(--dim); font-size: 12px; display: grid; gap: 6px; max-width: 65ch; }
+.notes p { margin: 0; }
+@media (prefers-reduced-motion: reduce) { .bar i { transition: none; } }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="win">
+    <span class="label">BTC 15 min · window</span>
+    <b id="winLabel">–</b>
+    <small id="ticker">–</small>
+  </div>
+  <div class="clock" id="clock" aria-live="off">–:––</div>
+</header>
+
+<section class="hero" aria-label="Chance of Up">
+  <div class="p none" id="pBig">–</div>
+  <div class="split">
+    <span class="label">Chance of Up · fair price</span>
+    <div class="bar"><i id="pBar"></i></div>
+    <div class="fair"><span class="u" id="fairUp">Up –</span><span class="d" id="fairDown">Down –</span></div>
+  </div>
+  <div class="why" id="why">Connecting to exchanges…</div>
+  <div class="ask" id="ask" hidden>
+    <input id="askIn" inputmode="decimal" placeholder="Target from Robinhood, e.g. 82913.71" autocomplete="off">
+    <button id="askSet" type="button">Set target</button>
+  </div>
+</section>
+
+<section class="edge" aria-label="Compare with Robinhood">
+  <div class="label" style="grid-column:1/-1" id="edgeHead">Type what Robinhood's buttons say to see your edge</div>
+  <label for="rhUp"><span class="label">Up button ¢</span>
+    <input id="rhUp" inputmode="numeric" placeholder="type" autocomplete="off">
+    <span class="verdict" id="vUp"></span></label>
+  <label for="rhDown"><span class="label">Down button ¢</span>
+    <input id="rhDown" inputmode="numeric" placeholder="type" autocomplete="off">
+    <span class="verdict" id="vDown"></span></label>
+</section>
+
+<section class="levels">
+  <div class="lv spot"><span class="label">Spot now</span><b id="lvSpot">–</b><small id="lvSpotNote">median of BRTI exchanges</small></div>
+  <div class="lv avg"><span class="label">60-s average</span><b id="lvAvg">–</b><small id="lvAvgNote">Robinhood's big number</small></div>
+  <div class="lv tgt" role="button" tabindex="0"><span class="label">Target · tap to edit</span><b id="lvTgt">–</b><small id="lvTgtNote">–</small></div>
+  <div class="lv proj"><span class="label">Closing avg, projected</span><b id="lvProj">–</b><small id="lvProjNote">–</small></div>
+</section>
+
+<div class="chart"><canvas id="main" aria-label="Price this window"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--spot)"></i>Spot</span>
+    <span><i style="background:var(--avg)"></i>60-s average (settles on this)</span>
+    <span><i style="background:var(--target)"></i>Target</span>
+    <span><i style="background:var(--dim)"></i>Where the closing average is heading, ±1 and ±2 sd</span>
+    <span id="leadLegend" hidden><i style="background:var(--lead)"></i>Perpetual future (Hyperliquid), often first to move</span>
+  </div>
+</div>
+<div class="chart"><canvas id="prob" aria-label="Chance of Up through the window"></canvas>
+  <div class="legend"><span><i style="background:var(--up)"></i>Chance of Up</span><span id="mktLegend" hidden><i style="background:var(--ink)"></i>Market Up price (Kalshi)</span></div>
+</div>
+
+<div class="sources" id="sources"></div>
+
+<details id="diag">
+  <summary>Diagnostics</summary>
+  <pre id="diagOut" class="notes" style="white-space:pre-wrap;margin:10px 0 0"></pre>
+</details>
+
+<details id="setup">
+  <summary>Target and calibration</summary>
+  <div class="set">
+    <div class="row">
+      <input id="tgtIn" inputmode="decimal" placeholder="Target from Robinhood, e.g. 82913.71" autocomplete="off">
+      <button id="tgtSet" type="button">Set target</button>
+    </div>
+    <div class="row">
+      <input id="syncIn" inputmode="decimal" placeholder="Robinhood's big number right now" autocomplete="off">
+      <button id="syncSet" type="button">Sync</button>
+    </div>
+    <div class="row">
+      <input id="relayIn" inputmode="url" placeholder="Kalshi relay address (optional, see README)" autocomplete="off">
+      <button id="relaySet" type="button">Use relay</button>
+    </div>
+    <div class="row"><button id="wake" type="button">Keep screen on</button><span class="notes" id="wakeNote"></span></div>
+    <div class="notes">
+      <p><b>Target.</b> Exact when Kalshi can be reached (through a relay). Otherwise it is estimated from the page's own prices over the minute before the open, and the exchanges here sit a few dollars from the official index. Type one target from Robinhood, in either box, and that difference is measured and applied to every window after it. It holds for hours.</p>
+      <p><b>Sync.</b> Another way to measure the same difference: type Robinhood's big number while it is showing.</p>
+      <p><b>Why Robinhood looks late.</b> Its big number is the average of the last 60 seconds, the same quantity the contract settles on. When price moves, it trails spot by about 30 seconds. The fast line here is spot. The blue line is that average.</p>
+      <p><b>Relay.</b> Browsers are not allowed to read Kalshi directly. A small relay of your own (a free Cloudflare Worker; the code is in the README) lets this page read the exact target, the official 60-second average and Kalshi's own Up price. Paste its address here once.</p>
+      <p><b>Fees.</b> The edge figures take off Robinhood's commission and Kalshi's 1¢ fee, about 2¢ a contract in the middle of the range.</p>
+      <p>The chance shown is a model: a random walk from spot with recently measured volatility. It is an estimate, not advice.</p>
+    </div>
+  </div>
+</details>
+
+<script>
+"use strict";
+// ---------------------------------------------------------------- settings
+const KALSHI = ["https://external-api.kalshi.com/trade-api/v2", "https://api.elections.kalshi.com/trade-api/v2"];
+const WINDOW = 900, SETTLE = 60;
+const ALIVE_MS = 20000;         // an exchange that has sent nothing (not even a heartbeat) for this long is down
+const FROZEN_MS = 120000;       // a quote unchanged this long is not trusted, however alive the socket looks
+const MAX_DEV = 0.0005, MIN_LIVE = 2;
+const VOL_HALFLIVES = [120, 900], VOL_STEP = 5;
+
+// ---------------------------------------------------------------- small helpers
+const $ = id => document.getElementById(id);
+const money = x => x == null || !isFinite(x) ? "–" : "$" + x.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const signed = x => (x >= 0 ? "+" : "−") + Math.abs(x).toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const median = a => { const s = [...a].sort((x, y) => x - y), n = s.length; return n ? (n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2) : null; };
+const store = {
+  get(k) { try { return JSON.parse(localStorage.getItem("btc15tape." + k)); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem("btc15tape." + k, JSON.stringify(v)); } catch (e) {} },
+};
+function normCdf(z) {      // Abramowitz-Stegun 7.1.26 on erf, accurate to about 1e-7
+  const t = 1 / (1 + 0.3275911 * Math.abs(z) / Math.SQRT2);
+  const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-z * z / 2);
+  return z >= 0 ? (1 + y) / 2 : (1 - y) / 2;
+}
+const ET_PARTS = new Intl.DateTimeFormat("en-US", {timeZone: "America/New_York", year: "2-digit", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23"});
+const ET_CLOCK = new Intl.DateTimeFormat("en-US", {timeZone: "America/New_York", hour: "numeric", minute: "2-digit"});
+function etParts(ts) { const o = {}; for (const p of ET_PARTS.formatToParts(new Date(ts * 1000))) o[p.type] = p.value; return o; }
+function tickers(closeTs) {          // KXBTC15M-26OCT102015 / KXBTC15M-26OCT102015-15 (close time, US Eastern)
+  const p = etParts(closeTs);
+  const ev = `KXBTC15M-${p.year}${p.month.toUpperCase()}${p.day}${p.hour === "24" ? "00" : p.hour}${p.minute}`;
+  return [ev, `${ev}-${p.minute}`];
+}
+const bounds = now => { const close = (Math.floor(now / WINDOW) + 1) * WINDOW; return [close - WINDOW, close]; };
+function feeCents(price) {            // Robinhood commission (10% x p x (1-p), max 1c) + Kalshi 1c, per contract
+  return 100 * (Math.min(0.01, 0.10 * price * (1 - price)) + 0.01);
+}
+
+// ---------------------------------------------------------------- exchanges (all BRTI constituents)
+const VENUES = {
+  coinbase: {name: "Coinbase", url: "wss://ws-feed.exchange.coinbase.com",
+    open: ws => ws.send(JSON.stringify({type: "subscribe", product_ids: ["BTC-USD"], channels: ["ticker", "heartbeat"]})),
+    msg: (d, q) => { if (d.type === "ticker" && d.best_bid) q(+d.best_bid, +d.best_ask); }},
+  kraken: {name: "Kraken", url: "wss://ws.kraken.com/v2",
+    open: ws => ws.send(JSON.stringify({method: "subscribe", params: {channel: "ticker", symbol: ["BTC/USD"], event_trigger: "bbo"}})),
+    msg: (d, q) => { if (d.channel === "ticker" && Array.isArray(d.data)) for (const r of d.data) if (r.bid) q(+r.bid, +r.ask); }},
+  bitstamp: {name: "Bitstamp", url: "wss://ws.bitstamp.net",
+    open: ws => ws.send(JSON.stringify({event: "bts:subscribe", data: {channel: "order_book_btcusd"}})),
+    ping: ws => ws.send(JSON.stringify({event: "bts:heartbeat"})),
+    msg: (d, q, ws) => {
+      if (d.event === "bts:request_reconnect") ws.close();
+      else if (d.event === "data" && d.data && d.data.bids && d.data.bids.length && d.data.asks.length) q(+d.data.bids[0][0], +d.data.asks[0][0]);
+    }},
+  gemini: {name: "Gemini", url: "wss://api.gemini.com/v1/marketdata/BTCUSD?top_of_book=true&trades=false&heartbeat=true",
+    open: () => {},
+    msg: (d, q, ws, st) => {
+      if (d.type !== "update" || !d.events) return;
+      for (const e of d.events) if (e.type === "change" && +e.remaining > 0) st[e.side] = +e.price;
+      if (st.bid && st.ask) q(st.bid, st.ask);
+    }},
+  cryptocom: {name: "Crypto.com", url: "wss://stream.crypto.com/exchange/v1/market",
+    open: ws => setTimeout(() => { if (ws.readyState === 1) ws.send(JSON.stringify({id: 1, method: "subscribe", params: {channels: ["ticker.BTC_USD"]}, nonce: Date.now()})); }, 1000),
+    msg: (d, q, ws) => {
+      if (d.method === "public/heartbeat") { ws.send(JSON.stringify({id: d.id, method: "public/respond-heartbeat"})); return; }
+      const r = d.result;
+      if (r && r.channel === "ticker" && Array.isArray(r.data)) for (const x of r.data) if (x.b && x.k) q(+x.b, +x.k);
+    }},
+  // Not part of the index. The perpetual future often moves a moment before spot, so it is drawn
+  // as a lead line and never used for the price itself.
+  hyperliquid: {name: "HL perp", lead: true, url: "wss://api.hyperliquid.xyz/ws",
+    open: ws => ws.send(JSON.stringify({method: "subscribe", subscription: {type: "bbo", coin: "BTC"}})),
+    ping: ws => ws.send(JSON.stringify({method: "ping"})),
+    msg: (d, q) => {
+      const b = d && d.channel === "bbo" && d.data && d.data.bbo;
+      if (b && b[0] && b[1]) q(+b[0].px, +b[1].px);
+    }},
+};
+const venue = {};   // name -> {mid, at (last message), quoteAt, changedAt, offset, n, state, ws, backoff, timer}
+
+// Exchanges only send a quote when it changes. In a quiet market that can be many seconds apart, so a
+// quote stays valid until a newer one arrives, as long as the connection is alive (heartbeats count).
+function connect(key) {
+  const v = venue[key] || (venue[key] = {mid: null, at: 0, quoteAt: 0, changedAt: 0, offset: 0, n: 0,
+                                         state: "connecting", backoff: 1000, timer: null});
+  if (v.timer) { clearTimeout(v.timer); v.timer = null; }
+  if (v.ws && v.ws.readyState <= 1) return;           // already connecting or open
+  const spec = VENUES[key], st = {};
+  let ws;
+  try { ws = new WebSocket(spec.url); } catch (e) { v.state = "off"; return retry(key); }
+  v.ws = ws; v.state = "connecting";
+  ws.onopen = () => { v.state = "waiting"; v.at = Date.now(); try { spec.open(ws); } catch (e) {} };
+  ws.onmessage = ev => {
+    v.at = Date.now();
+    let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+    spec.msg(d, (bid, ask) => {
+      if (!(bid > 0 && ask >= bid && (ask - bid) / ask < 0.005)) return;
+      const mid = (bid + ask) / 2, t = Date.now();
+      if (mid !== v.mid || !v.changedAt) v.changedAt = t;
+      v.mid = mid; v.quoteAt = t; v.state = "live"; v.backoff = 1000;
+    }, ws, st);
+  };
+  ws.onerror = () => {};
+  ws.onclose = () => { if (v.ws === ws) { v.state = "off"; retry(key); } };
+}
+function retry(key, now) {
+  const v = venue[key];
+  if (v.timer) clearTimeout(v.timer);
+  v.timer = setTimeout(() => { v.timer = null; connect(key); }, now ? 0 : v.backoff);
+  v.backoff = Math.min(15000, v.backoff * 2);
+}
+function reconnectAll() {                            // after the phone comes back to this page
+  for (const [k, v] of Object.entries(venue)) {
+    v.backoff = 1000;
+    if (!v.ws || v.ws.readyState > 1) retry(k, true);
+    else if (Date.now() - v.at > ALIVE_MS) v.ws.close();
+  }
+}
+setInterval(() => {                                  // watchdog: pings, and a silent socket is a dead one
+  const t = Date.now();
+  for (const [k, v] of Object.entries(venue)) {
+    const ws = v.ws;
+    if (ws && ws.readyState === 1) {
+      if (t - v.at > ALIVE_MS) { v.state = "off"; ws.close(); }
+      else if (VENUES[k].ping) { try { VENUES[k].ping(ws); } catch (e) {} }
+    } else if ((!ws || ws.readyState === 3) && !v.timer) retry(k, true);
+  }
+}, 5000);
+const isLive = (v, t) => v.mid != null && t - v.at < ALIVE_MS && t - v.changedAt < FROZEN_MS && v.ws && v.ws.readyState === 1;
+
+// One price from the exchanges that are fresh and agree. Each exchange's usual distance from the
+// others is learned and taken off first, so one dropping out or coming back does not move the price.
+let spot = null, nLive = 0;
+// In a quiet market an exchange's best bid and ask can sit unchanged for a minute while another's
+// move, so the exchanges that changed most recently carry the most weight. A median would stick
+// to whichever exchanges happen to be idle.
+function consensus() {
+  const t = Date.now();
+  const live = Object.entries(venue).filter(([k, v]) => !VENUES[k].lead && isLive(v, t));
+  const centre = median(live.map(([, v]) => v.mid - v.offset));
+  const kept = centre == null ? [] : live.filter(([, v]) => Math.abs(v.mid - v.offset - centre) <= MAX_DEV * centre);
+  nLive = kept.length;
+  if (kept.length < MIN_LIVE) return null;
+  let sum = 0, wsum = 0;
+  for (const [, v] of kept) {
+    const w = 0.05 + Math.exp(-(t - v.changedAt) / 10000);     // changed just now: ~1; a minute ago: ~0.05
+    sum += w * (v.mid - v.offset); wsum += w;
+  }
+  return sum / wsum;
+}
+function leadPrice() {                // the perpetual future, on the same footing as spot
+  const t = Date.now(), v = venue.hyperliquid;
+  return v && isLive(v, t) && v.n > 10 ? v.mid - v.offset : null;
+}
+function learnOffsets(px) {          // once a second
+  const t = Date.now(), steady = 1 - Math.pow(0.5, 1 / 120);
+  for (const v of Object.values(venue)) {
+    if (!isLive(v, t)) continue;
+    v.offset += (v.n < 10 ? 1 / (v.n + 1) : steady) * (v.mid - px - v.offset);   // quick start, then slow
+    v.n++;
+  }
+}
+
+// ---------------------------------------------------------------- per-second record
+const samples = new Map();      // second -> spot (exchange consensus, before the basis)
+const backfill = new Map();     // second -> Coinbase trade price, for seconds the page did not see itself
+const leadTape = [];            // [{t, p}] the perpetual future, for drawing
+const tape = [];                // [{t (ms), p}] several per second, for drawing
+const vol = VOL_HALFLIVES.map(() => [0, 0]);
+let volN = 0;
+function sampleAt(sec) {
+  const own = samples.get(sec);
+  return own != null ? own : backfill.has(sec) ? backfill.get(sec) : null;
+}
+function avgAt(sec) {           // trailing 60-s average of spot ending at `sec`, if enough seconds are in hand
+  let s = 0, n = 0;
+  for (let k = sec - SETTLE + 1; k <= sec; k++) { const p = sampleAt(k); if (p != null) { s += p; n++; } }
+  return n >= 54 ? s / n : null;
+}
+function addVol(px, back) {
+  const r2 = (px - back) ** 2 / VOL_STEP;
+  VOL_HALFLIVES.forEach((h, i) => { const k = Math.pow(0.5, 1 / h); vol[i][0] = vol[i][0] * k + r2; vol[i][1] = vol[i][1] * k + 1; });
+  volN++;
+}
+let lastSampleSec = 0;
+function onSecond(sec) {
+  const px = consensus();
+  if (px == null) return;
+  samples.set(sec, px); lastSampleSec = sec;
+  learnOffsets(px);
+  const back = sampleAt(sec - VOL_STEP);
+  if (back != null) addVol(px, back);
+  for (const k of samples.keys()) if (k < sec - 4000) samples.delete(k);
+  for (const k of backfill.keys()) if (k < sec - 4000) backfill.delete(k);
+}
+// The minute the page did not see (just opened, or back from another app) comes from Coinbase's
+// public trade list: the last trade in each second, carried forward through seconds without one.
+let backfilling = false, backfilledAt = 0, backfillNote = "not needed";
+async function fetchBackfill(force, backTo) {
+  const sec = Math.floor(Date.now() / 1000);
+  if (backfilling || sec - backfilledAt < 30 || (!force && avgAt(sec - 1) != null)) return;
+  const cb = venue.coinbase;
+  if (!cb || cb.n < 3) { backfillNote = "waiting for Coinbase"; return; }   // its level against the others first
+  backfilling = true;
+  try {
+    // Pages of 1000 trades, newest first, older pages through the `after` cursor, until `backTo`.
+    const rows = [];
+    let cursor = null;
+    for (let page = 0; page < 8; page++) {
+      const r = await fetch("https://api.exchange.coinbase.com/products/BTC-USD/trades?limit=1000" + (cursor ? "&after=" + cursor : ""),
+                            {cache: "no-store"});
+      if (!r.ok) break;
+      const part = await r.json();
+      if (!Array.isArray(part) || !part.length) break;
+      rows.push(...part);
+      const oldest = Math.floor(Date.parse(part[part.length - 1].time) / 1000);
+      cursor = (r.headers && r.headers.get("cb-after")) || part[part.length - 1].trade_id;
+      if (backTo == null || oldest <= backTo || !cursor) break;
+    }
+    if (rows.length) {
+      const bySec = new Map();
+      for (const t of rows) { const s = Math.floor(Date.parse(t.time) / 1000); if (!bySec.has(s)) bySec.set(s, +t.price); }
+      const secs = [...bySec.keys()].sort((a, b) => a - b);
+      if (secs.length) {
+        let last = null;
+        const offset = cb.offset;             // Coinbase's distance from the consensus, fixed at this moment
+        for (let s = secs[0]; s <= sec; s++) {
+          if (bySec.has(s)) last = bySec.get(s);
+          if (last != null && !samples.has(s)) backfill.set(s, last - offset);
+        }
+        backfillNote = `${rows.length} trades, ${sec - secs[0]} s back`;
+        if (backTo != null && secs[0] > backTo) backfillNote += " (not as far as the open)";
+        if (volN < 30) for (let s = Math.max(secs[0] + VOL_STEP, sec - 180); s <= sec && volN < 60; s++) {
+          const a = sampleAt(s), b = sampleAt(s - VOL_STEP);
+          if (a != null && b != null) addVol(a, b);
+        }
+        backfilledAt = sec;
+      }
+    }
+  } catch (e) { backfillNote = "Coinbase trade list not reachable"; }
+  backfilling = false;
+}
+function sigma() {              // dollars per sqrt(second); a blend of the quick and the slower estimate
+  if (volN < 30) return null;
+  const vars = vol.map(([a, w]) => a / w);
+  return Math.max(0.5, Math.sqrt(vars.reduce((x, y) => x + y, 0) / vars.length));
+}
+
+// ---------------------------------------------------------------- level: basis to the official index
+let basis = 0, basisSrc = "raw", basisAt = 0;     // official index minus exchange consensus
+const synced = store.get("basis");
+if (synced && Date.now() - synced.at < 6 * 3600 * 1000) { basis = synced.value; basisSrc = synced.via || "synced"; basisAt = synced.at; }
+function setBasis(value, via) {
+  basis = value; basisSrc = via; basisAt = Date.now();
+  store.set("basis", {value, at: basisAt, via});
+}
+
+// ---------------------------------------------------------------- Kalshi, if the browser may reach it
+const PUBLIC_RELAY = u => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u + "?_=" + Math.floor(Date.now() / 2000));
+const kalshi = {ok: null, base: null, via: null, market: null, feed: new Map(), checked: 0, hist: new Map(),
+                relay: (store.get("relay") || "").replace(/\/+$/, "")};
+// When this page is served by its own Cloudflare Worker, that Worker is the relay: same address, no setup.
+const SAME_SITE = location.protocol === "https:" && !/github\.io$/.test(location.hostname) ? location.origin : null;
+async function kalshiGet(path) {
+  // Your own relay if you set one; else the site itself; else Kalshi directly (browsers are normally refused);
+  // else a public relay.
+  const tries = kalshi.relay ? [["relay", kalshi.relay + path]]
+    : kalshi.base ? [[kalshi.via, kalshi.base === "public" ? PUBLIC_RELAY(KALSHI[0] + path) : kalshi.base + path]]
+    : (SAME_SITE ? [["site", SAME_SITE + path]] : []).concat(KALSHI.map(b => ["direct", b + path]), [["public", PUBLIC_RELAY(KALSHI[0] + path)]]);
+  for (const [via, url] of tries) {
+    try {
+      const r = await fetch(url, {cache: "no-store"});
+      if (r.ok) {
+        const d = await r.json();
+        if (d && typeof d === "object") { kalshi.base = kalshi.relay ? kalshi.relay : via === "public" ? "public" : url.slice(0, url.indexOf(path)); kalshi.via = via; return d; }
+      }
+    } catch (e) { /* refused by the browser, or offline */ }
+  }
+  kalshi.base = null;
+  return null;
+}
+async function pollKalshi() {
+  const now = Date.now() / 1000, [, close] = bounds(now), [ev, mk] = tickers(close);
+  const d = await kalshiGet("/markets/" + mk);
+  if (!d || !d.market) { kalshi.ok = false; kalshi.market = null; setTimeout(pollKalshi, kalshi.relay ? 10000 : 45000); return; }
+  const m = d.market;
+  kalshi.ok = true;
+  let tgt = m.floor_strike != null ? +m.floor_strike : null;
+  if (!(tgt > 0)) { const t = /\$?([\d,]+\.\d\d)/.exec(m.yes_sub_title || m.subtitle || ""); tgt = t ? +t[1].replace(/,/g, "") : null; }
+  kalshi.market = {ticker: mk, close, target: tgt > 0 ? tgt : null, status: m.status,
+                   bid: +m.yes_bid_dollars || null, ask: +m.yes_ask_dollars || null, at: Date.now()};
+  if (kalshi.market.bid && kalshi.market.ask) kalshi.hist.set(Math.floor(now), (kalshi.market.bid + kalshi.market.ask) / 2);
+  if (now - kalshi.checked > 15) {
+    kalshi.checked = now;
+    const f = await kalshiGet("/live_data/events/" + ev);
+    const pts = f && f.live_data && f.live_data.details && f.live_data.details.timeseries;
+    if (Array.isArray(pts)) {
+      for (const p of pts) if (p && p.v > 0) kalshi.feed.set(Math.round(p.t / 1000), +p.v);
+      // The feed is the official 60-s average. Its distance from this page's own average is the basis.
+      const diffs = [];
+      for (const [s, v] of kalshi.feed) if (s > now - 180) { const a = avgAt(s); if (a != null) diffs.push(v - a); }
+      if (diffs.length >= 20) setBasis(median(diffs), "kalshi");
+      for (const k of kalshi.feed.keys()) if (k < now - 5000) kalshi.feed.delete(k);
+    }
+  }
+  setTimeout(pollKalshi, kalshi.via === "public" ? 8000 : 2000);
+}
+
+// ---------------------------------------------------------------- target
+// If the page opened after the window started, the minute before the open is rebuilt from
+// Coinbase's public one-minute candle: the average of its open, high, low and close.
+const typedTarget = {};
+const candle = {open: null, value: null, busy: false};
+async function fetchCandle(open) {
+  if (candle.busy || candle.open === open) return;
+  candle.busy = true;
+  try {
+    const iso = t => new Date(t * 1000).toISOString();
+    const r = await fetch(`https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=60&start=${iso(open - 60)}&end=${iso(open - 60)}`, {cache: "no-store"});
+    if (r.ok) {
+      const rows = await r.json();            // [time, low, high, open, close, volume]
+      const row = Array.isArray(rows) && rows.find(x => x[0] === open - 60);
+      if (row) { candle.open = open; candle.value = (row[1] + row[2] + row[3] + row[4]) / 4; }
+    }
+  } catch (e) { /* blocked or offline: ask for the target instead */ }
+  candle.busy = false;
+}
+const r2 = x => Math.round(x * 100) / 100;
+function target(open, mk) {
+  if (kalshi.market && kalshi.market.ticker === mk && kalshi.market.target) return [kalshi.market.target, "from Kalshi" + (kalshi.via === "public" ? " (public relay)" : "")];
+  const typed = typedTarget[mk] || store.get("target." + mk);
+  if (typed) return [typed, "as you entered it"];
+  const f = kalshi.feed.get(open - 1);
+  if (f) return [r2(f), "from Kalshi's feed"];
+  const level = basisSrc === "raw" ? "level not calibrated: tap to correct" : "level calibrated " + Math.round((Date.now() - basisAt) / 60000) + " min ago";
+  const a = avgAt(open - 1);                        // the page's own minute before the open, or Coinbase's
+  if (a != null) return [r2(a + basis), "estimated; " + level];
+  if (candle.open === open) {
+    const cb = venue.coinbase ? venue.coinbase.offset : 0;
+    return [r2(candle.value - cb + basis), "rough, from a Coinbase candle; " + level];
+  }
+  fetchCandle(open);
+  if (!backfill.has(open - 1)) fetchBackfill(true, open - 60);
+  return [null, "tap to enter it"];
+}
+
+// ---------------------------------------------------------------- model
+// The settlement value is the mean of the index at the 60 whole seconds before the close.
+// Seconds already past are known; the rest follow a driftless random walk from spot.
+function project(now, close, x, sig) {
+  let known = 0; const ahead = [];
+  for (let s = close - SETTLE; s < close; s++) {
+    if (s <= now) { const p = sampleAt(s); known += p != null ? p + basis : x; }
+    else ahead.push(s - now);
+  }
+  const m = ahead.length;
+  let walk = 0;
+  ahead.forEach((d, j) => { walk += d * (2 * (m - (j + 1)) + 1); });
+  const mean = (known + m * x) / SETTLE;
+  const levelSd = basisSrc === "kalshi" ? 1.5 : basisSrc === "target" ? 2.5 : basisSrc === "synced" ? 3 : 6;
+  const sd = Math.sqrt(sig * sig * walk / (SETTLE * SETTLE) + levelSd * levelSd);
+  return {mean, sd};
+}
+
+// ---------------------------------------------------------------- drawing
+function setupCanvas(c) {
+  const r = c.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+  const g = c.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return [g, r.width, r.height];
+}
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function niceStep(range, target) {
+  const raw = range / target, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  for (const f of [1, 2, 2.5, 5, 10]) if (f * mag >= raw) return f * mag;
+  return 10 * mag;
+}
+
+function drawMain(open, close, now, tgt, proj) {
+  const [g, W, H] = setupCanvas($("main"));
+  const L = 8, R = 74, T = 10, B = 22;
+  g.clearRect(0, 0, W, H);
+  const t0 = open - 60, t1 = close;
+  const X = t => L + (t - t0) / (t1 - t0) * (W - L - R);
+  const pts = tape.filter(p => p.t / 1000 >= t0);
+  const avgPts = [];
+  for (let s = Math.ceil(t0); s <= Math.floor(now); s++) { const a = avgAt(s); if (a != null) avgPts.push([s, a + basis]); }
+  const ys = pts.map(p => p.p + basis).concat(avgPts.map(p => p[1]));
+  if (tgt != null) ys.push(tgt);
+  if (proj) ys.push(proj.mean - 2 * proj.sd, proj.mean + 2 * proj.sd);
+  if (!ys.length) return;
+  let lo = Math.min(...ys), hi = Math.max(...ys);
+  if (hi - lo < 20) { const c = (hi + lo) / 2; lo = c - 10; hi = c + 10; }
+  const pad = (hi - lo) * 0.08; lo -= pad; hi += pad;
+  const Y = v => T + (hi - v) / (hi - lo) * (H - T - B);
+
+  // settlement minute
+  g.fillStyle = "rgba(255,200,87,0.07)";
+  g.fillRect(X(close - SETTLE), T, X(close) - X(close - SETTLE), H - T - B);
+  // grid and price labels
+  g.font = "11px " + css("--mono"); g.textBaseline = "middle";
+  const step = niceStep(hi - lo, 5);
+  g.strokeStyle = css("--line"); g.lineWidth = 1; g.fillStyle = css("--dim");
+  for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+    g.beginPath(); g.moveTo(L, Y(v)); g.lineTo(W - R, Y(v)); g.stroke();
+    g.fillText(v.toLocaleString("en-US", {maximumFractionDigits: step < 1 ? 1 : 0}), W - R + 6, Y(v));
+  }
+  // time labels: open, every 5 minutes, close
+  g.textBaseline = "alphabetic"; g.textAlign = "center";
+  for (let t = open; t <= close; t += 300) g.fillText(ET_CLOCK.format(new Date(t * 1000)).replace(/ [AP]M/, ""), X(t), H - 6);
+  g.textAlign = "left";
+  // open marker
+  g.strokeStyle = css("--line"); g.beginPath(); g.moveTo(X(open), T); g.lineTo(X(open), H - B); g.stroke();
+  // target
+  if (tgt != null) {
+    g.strokeStyle = css("--target"); g.setLineDash([6, 4]); g.lineWidth = 1.5;
+    g.beginPath(); g.moveTo(L, Y(tgt)); g.lineTo(W - R, Y(tgt)); g.stroke(); g.setLineDash([]);
+  }
+  // projection to the close: ±2 sd faint, ±1 sd, centre
+  if (proj && avgPts.length) {
+    const [ls, la] = avgPts[avgPts.length - 1], xc = X(close) - 3;
+    g.fillStyle = "rgba(133,146,173,0.14)";
+    g.beginPath(); g.moveTo(X(ls), Y(la)); g.lineTo(xc, Y(proj.mean + 2 * proj.sd)); g.lineTo(xc, Y(proj.mean - 2 * proj.sd)); g.closePath(); g.fill();
+    g.fillStyle = "rgba(133,146,173,0.22)";
+    g.beginPath(); g.moveTo(X(ls), Y(la)); g.lineTo(xc, Y(proj.mean + proj.sd)); g.lineTo(xc, Y(proj.mean - proj.sd)); g.closePath(); g.fill();
+    g.strokeStyle = css("--dim"); g.setLineDash([3, 3]);
+    g.beginPath(); g.moveTo(X(ls), Y(la)); g.lineTo(xc, Y(proj.mean)); g.stroke(); g.setLineDash([]);
+    g.fillStyle = proj.mean >= tgt ? css("--up") : css("--down");
+    g.beginPath(); g.arc(xc, Y(proj.mean), 4, 0, 7); g.fill();
+  }
+  // the perpetual future, if it is connected
+  const lead = leadTape.filter(p => p.t / 1000 >= t0);
+  if (lead.length > 5) {
+    g.strokeStyle = css("--lead"); g.lineWidth = 1; g.setLineDash([2, 3]); g.beginPath();
+    lead.forEach((p, i) => { const x = X(p.t / 1000), y = Y(p.p + basis); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+    g.stroke(); g.setLineDash([]);
+  }
+  // spot
+  g.strokeStyle = css("--spot"); g.lineWidth = 1.2; g.beginPath();
+  pts.forEach((p, i) => { const x = X(p.t / 1000), y = Y(p.p + basis); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+  g.stroke();
+  // 60-s average
+  g.strokeStyle = css("--avg"); g.lineWidth = 2.5; g.beginPath();
+  avgPts.forEach(([s, a], i) => { const x = X(s), y = Y(a); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+  g.stroke();
+  // right-edge tags
+  const tag = (v, color, text) => {
+    if (v == null) return;
+    const y = Math.min(H - B - 8, Math.max(T + 8, Y(v)));
+    g.fillStyle = color; g.fillRect(W - R + 2, y - 8, R - 4, 16);
+    g.fillStyle = css("--ground"); g.textBaseline = "middle";
+    g.fillText(text, W - R + 6, y); g.textBaseline = "alphabetic";
+  };
+  if (tgt != null) tag(tgt, css("--target"), Math.round(tgt).toLocaleString("en-US"));
+  if (avgPts.length) tag(avgPts[avgPts.length - 1][1], css("--avg"), Math.round(avgPts[avgPts.length - 1][1]).toLocaleString("en-US"));
+  if (pts.length) tag(pts[pts.length - 1].p + basis, css("--spot"), Math.round(pts[pts.length - 1].p + basis).toLocaleString("en-US"));
+  // now
+  g.strokeStyle = "rgba(230,235,245,0.25)"; g.beginPath(); g.moveTo(X(now), T); g.lineTo(X(now), H - B); g.stroke();
+}
+
+const pHist = new Map();
+function drawProb(open, close, now) {
+  const [g, W, H] = setupCanvas($("prob"));
+  const L = 8, R = 74, T = 6, B = 8;
+  g.clearRect(0, 0, W, H);
+  const X = t => L + (t - (open - 60)) / (close - (open - 60)) * (W - L - R);
+  const Y = p => T + (1 - p) * (H - T - B);
+  g.strokeStyle = css("--line"); g.lineWidth = 1; g.font = "11px " + css("--mono"); g.fillStyle = css("--dim"); g.textBaseline = "middle";
+  for (const p of [0, 0.5, 1]) { g.beginPath(); g.moveTo(L, Y(p)); g.lineTo(W - R, Y(p)); g.stroke(); g.fillText(Math.round(p * 100) + "%", W - R + 6, Y(p)); }
+  g.fillStyle = "rgba(255,200,87,0.07)"; g.fillRect(X(close - SETTLE), T, X(close) - X(close - SETTLE), H - T - B);
+  // market price, if Kalshi is reachable
+  g.fillStyle = css("--ink");
+  for (const [s, m] of kalshi.hist) if (s >= open) { g.fillRect(X(s) - 1, Y(m) - 1, 2, 2); }
+  if (![...pHist.keys()].some(s => s >= open)) {
+    g.fillStyle = css("--dim"); g.textAlign = "center";
+    g.fillText("Starts once the chance of Up is showing", (W - R) / 2, H / 2); g.textAlign = "left";
+  }
+  // chance of Up, coloured by side of 50%
+  let prev = null;
+  g.lineWidth = 2;
+  for (let s = open; s <= Math.floor(now); s++) {
+    const p = pHist.get(s); if (p == null) { prev = null; continue; }
+    if (prev) { g.strokeStyle = p >= 0.5 ? css("--up") : css("--down"); g.beginPath(); g.moveTo(X(prev[0]), Y(prev[1])); g.lineTo(X(s), Y(p)); g.stroke(); }
+    prev = [s, p];
+  }
+}
+
+// ---------------------------------------------------------------- page
+function verdict(el, fair, priceCents) {
+  if (!(priceCents > 0 && priceCents < 100)) { el.textContent = ""; el.className = "verdict"; return; }
+  if (fair == null) { el.textContent = "needs the chance of Up first"; el.className = "verdict meh"; return; }
+  const edge = fair * 100 - priceCents - feeCents(priceCents / 100);
+  el.textContent = (edge >= 0 ? "+" : "−") + Math.abs(edge).toFixed(1) + "¢ a contract after fees"
+    + (edge >= 3 ? " · buy" : edge <= 0 ? " · no" : " · thin");
+  el.className = "verdict " + (edge >= 3 ? "good" : edge <= 0 ? "bad" : "meh");
+}
+let lastP = null, lastMk = null;
+function render() {
+  const nowMs = Date.now(), now = nowMs / 1000, [open, close] = bounds(now), [, mk] = tickers(close);
+  spot = consensus();
+  if (spot != null) {
+    tape.push({t: nowMs, p: spot});
+    while (tape.length && tape[0].t < (open - 120) * 1000) tape.shift();
+  }
+  const lead = leadPrice();
+  if (lead != null) {
+    leadTape.push({t: nowMs, p: lead});
+    while (leadTape.length && leadTape[0].t < (open - 120) * 1000) leadTape.shift();
+  }
+  $("leadLegend").hidden = lead == null;
+  if (mk !== lastMk) { lastMk = mk; pHist.clear(); for (const k of kalshi.hist.keys()) if (k < open - 60) kalshi.hist.delete(k); }
+
+  // header
+  $("winLabel").textContent = ET_CLOCK.format(new Date(open * 1000)).replace(/ [AP]M/, "") + "–" + ET_CLOCK.format(new Date(close * 1000)) + " ET";
+  $("ticker").textContent = mk;
+  const left = Math.max(0, close - now);
+  $("clock").textContent = Math.floor(left / 60) + ":" + String(Math.floor(left % 60)).padStart(2, "0");
+  $("clock").classList.toggle("settling", left <= SETTLE);
+
+  // levels
+  const x = spot != null ? spot + basis : null;
+  const a = avgAt(Math.floor(now) - 1);
+  const avg = a != null ? a + basis : null;
+  const [tgt, tgtSrc] = target(open, mk);
+  const nIndex = Object.values(VENUES).filter(v => !v.lead).length;
+  $("lvSpot").textContent = money(x);
+  $("lvSpot").parentElement.classList.toggle("thin", x == null);
+  $("lvSpotNote").textContent = x == null ? `${nLive} of ${nIndex} exchanges: need ${MIN_LIVE} that agree`
+    : `${nLive} of ${nIndex} exchanges` + (basisSrc === "kalshi" ? ", aligned to Kalshi" : basisSrc === "target" ? ", calibrated by the target" : basisSrc === "synced" ? ", synced to Robinhood" : "")
+    + (lead != null ? ` · perp ${signed(lead - spot)}` : "");
+  $("lvAvg").textContent = money(avg);
+  $("lvAvgNote").textContent = x != null && avg != null ? `Robinhood's number · spot ${signed(x - avg)}` : "filling in the last minute…";
+  $("lvTgt").textContent = money(tgt);
+  $("lvTgtNote").textContent = tgtSrc;
+
+  // model
+  const sig = sigma();
+  let proj = null, p = null;
+  if (x != null && tgt != null && sig != null) {
+    proj = project(now, close, x, sig);
+    p = normCdf((proj.mean - (tgt - 0.005)) / proj.sd);
+    pHist.set(Math.floor(now), p);
+  }
+  $("lvProj").textContent = proj ? money(proj.mean) : "–";
+  $("lvProjNote").textContent = proj ? `±${proj.sd.toFixed(0)} (1 sd) · vol $${sig.toFixed(1)}/√s` : sig == null ? "measuring volatility…" : "needs the target";
+
+  const big = $("pBig");
+  if (p == null) {
+    big.textContent = "–"; big.className = "p none";
+    $("fairUp").textContent = "Up –"; $("fairDown").textContent = "Down –";
+    $("why").textContent = spot == null ? "Waiting for two exchanges to agree on a price…" : sig == null ? "Measuring volatility; about 30 seconds after opening." : "Needs this window's target. Type the one Robinhood shows.";
+  } else {
+    big.textContent = Math.min(99, Math.max(1, Math.round(p * 100))) + "%"; big.className = "p " + (p >= 0.5 ? "up" : "down");
+    $("pBar").style.width = (p * 100).toFixed(1) + "%";
+    const c = Math.min(99, Math.max(1, Math.round(p * 100)));
+    $("fairUp").textContent = `Up ${c}¢`;
+    $("fairDown").textContent = `Down ${100 - c}¢`;
+    const gap = proj.mean - tgt;
+    $("why").textContent = `Closing average heading for ${signed(gap)} vs the target; ±${proj.sd.toFixed(0)} is one standard deviation.`
+      + (basisSrc === "raw" ? " Typing one target from Robinhood calibrates the level for the hours ahead." : "");
+  }
+  lastP = p;
+  $("ask").hidden = tgt != null && !askOpen;
+  const km = kalshi.market && kalshi.market.ticker === mk && nowMs - kalshi.market.at < 20000 && kalshi.market.bid && kalshi.market.ask ? kalshi.market : null;
+  const upC = km ? Math.round(km.ask * 100) : null, downC = km ? Math.round((1 - km.bid) * 100) : null;
+  $("rhUp").placeholder = upC != null ? String(upC) : "type";
+  $("rhDown").placeholder = downC != null ? String(downC) : "type";
+  $("edgeHead").textContent = km ? `Kalshi's book now: Up ${upC}¢ · Down ${downC}¢ (Robinhood sells at these). Type over them if Robinhood differs.`
+    : "Type what Robinhood's buttons say to see your edge";
+  verdict($("vUp"), p, $("rhUp").value ? parseFloat($("rhUp").value) : upC);
+  verdict($("vDown"), p == null ? null : 1 - p, $("rhDown").value ? parseFloat($("rhDown").value) : downC);
+
+  // sources
+  const chips = Object.entries(VENUES).map(([k, spec]) => {
+    const v = venue[k] || {}; const age = v.quoteAt ? nowMs - v.quoteAt : null;
+    const live = v.ws && isLive(v, nowMs);
+    const cls = live ? (age < 2000 ? "ok" : "slow") : "off";
+    const txt = age == null ? spec.name + (v.state === "off" ? " off" : " …")
+      : `${spec.name} ${age < 1000 ? "<1s" : (age / 1000).toFixed(0) + "s"}${live ? "" : " off"}`;
+    return `<span class="chip ${cls}">${txt}</span>`;
+  });
+  const kcls = kalshi.ok ? "ok" : kalshi.ok === false ? "off" : "";
+  const ktxt = kalshi.ok ? (kalshi.relay ? "Kalshi via your relay" : kalshi.via === "site" ? "Kalshi via this site" : kalshi.via === "public" ? "Kalshi via public relay (slow)" : "Kalshi target and prices")
+    : kalshi.ok === false ? (kalshi.relay ? "Kalshi relay not answering" : "Kalshi not reachable: targets estimated") : "Kalshi checking";
+  chips.push(`<span class="chip ${kcls}">${ktxt}</span>`);
+  $("sources").innerHTML = chips.join("");
+  $("mktLegend").hidden = !kalshi.ok;
+
+  drawMain(open, close, now, tgt, proj);
+  drawProb(open, close, now);
+  if ($("diag").open && Math.floor(now) !== diagAt) { diagAt = Math.floor(now); $("diagOut").textContent = diagnostics(now, open); }
+}
+let diagAt = 0;
+function diagnostics(now, open) {
+  const sec = Math.floor(now), t = Date.now();
+  let own = 0, back = 0;
+  for (let k = sec - 60; k < sec; k++) { if (samples.has(k)) own++; else if (backfill.has(k)) back++; }
+  const lines = [
+    `seconds in the last minute: ${own} live, ${back} backfilled · backfill: ${backfillNote}`,
+    `last sample ${sec - lastSampleSec} s ago · volatility samples ${volN} · level: ${basisSrc} ${basis.toFixed(2)}`,
+    `kalshi: ${kalshi.ok === null ? "checking" : kalshi.ok ? "ok via " + kalshi.via : "not reachable"} · candle for ${candle.open === open ? "this window" : "none"}`,
+  ];
+  for (const [k, v] of Object.entries(venue)) {
+    const ws = v.ws ? ["connecting", "open", "closing", "closed"][v.ws.readyState] : "none";
+    lines.push(`${VENUES[k].name.padEnd(10)} ${ws.padEnd(10)} mid ${v.mid ? v.mid.toFixed(2) : "-"} offset ${v.offset.toFixed(2)} n ${v.n}`
+      + ` quote ${v.quoteAt ? ((t - v.quoteAt) / 1000).toFixed(1) + "s" : "-"} changed ${v.changedAt ? ((t - v.changedAt) / 1000).toFixed(1) + "s" : "-"} msg ${v.at ? ((t - v.at) / 1000).toFixed(1) + "s" : "-"}`);
+  }
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------- inputs
+function num(s) { const v = parseFloat(String(s).replace(/[$,\s]/g, "")); return isFinite(v) ? v : null; }
+let askOpen = false;
+function setTarget(input) {
+  const v = num(input.value), [open, close] = bounds(Date.now() / 1000), mk = tickers(close)[1];
+  if (!(v && v > 1000)) { input.value = ""; input.placeholder = "Type the target, e.g. 82913.71"; return; }
+  store.set("target." + mk, v); typedTarget[mk] = v;
+  // The exact target is the official average over the minute before the open. The page has its own
+  // average over that same minute, so the difference is the level correction for the hours ahead.
+  const a = avgAt(open - 1);
+  let note = "Set: " + money(v);
+  if (a != null && basisSrc !== "kalshi") {
+    if (Math.abs(v - (a + basis)) <= 60) { setBasis(v - a, "target"); note += " · level calibrated"; }
+    else note += " · far from this page's own estimate, level left alone";
+  }
+  input.value = ""; input.placeholder = note; input.blur(); askOpen = false; render();
+}
+$("lvTgt").parentElement.addEventListener("click", () => {
+  askOpen = true;
+  const t = $("lvTgt").textContent.replace(/[$,]/g, "");
+  $("askIn").value = /^\d/.test(t) ? t : "";
+  render(); $("askIn").focus(); $("askIn").select();
+});
+$("tgtSet").addEventListener("click", () => setTarget($("tgtIn")));
+$("askSet").addEventListener("click", () => setTarget($("askIn")));
+for (const id of ["tgtIn", "askIn"]) $(id).addEventListener("keydown", e => { if (e.key === "Enter") setTarget($(id)); });
+$("syncSet").addEventListener("click", () => {
+  const v = num($("syncIn").value), a = avgAt(Math.floor(Date.now() / 1000) - 1);
+  if (v && v > 1000 && a != null) {
+    setBasis(v - a, "synced");
+    $("syncIn").value = ""; $("syncIn").placeholder = `Synced: index is ${signed(basis)} from the exchanges`; render();
+  } else $("syncIn").placeholder = a == null ? "Wait a minute for the average to fill" : "Type Robinhood's big number";
+});
+$("relaySet").addEventListener("click", () => {
+  const v = $("relayIn").value.trim().replace(/\/+$/, "");
+  kalshi.relay = /^https:\/\//.test(v) ? v : "";
+  store.set("relay", kalshi.relay); kalshi.ok = null; kalshi.base = null;
+  $("relayIn").value = ""; $("relayIn").placeholder = kalshi.relay ? "Relay set: " + kalshi.relay : "Relay cleared";
+});
+if (kalshi.relay) $("relayIn").placeholder = "Relay set: " + kalshi.relay;
+let lock = null;
+async function keepAwake() {
+  try { lock = await navigator.wakeLock.request("screen"); $("wakeNote").textContent = "Screen stays on while this page is visible."; }
+  catch (e) { $("wakeNote").textContent = "This browser will not keep the screen on."; }
+}
+$("wake").addEventListener("click", keepAwake);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  if (lock) keepAwake();
+  reconnectAll();                                    // iPhones drop the connections while another app is in front
+  fetchBackfill(false, bounds(Date.now() / 1000)[0] - 60);
+});
+window.addEventListener("online", reconnectAll);
+
+// ---------------------------------------------------------------- start
+for (const k of Object.keys(VENUES)) connect(k);
+(function second() {            // one sample at each whole second
+  const t = Date.now();
+  onSecond(Math.floor(t / 1000));
+  if (t / 1000 % 10 < 1) fetchBackfill(false, bounds(t / 1000)[0] - 60);   // only while the last minute has gaps
+  setTimeout(second, 1000 - (t % 1000) + 20);
+})();
+setInterval(render, 100);
+window.addEventListener("resize", render);
+pollKalshi();
+render();
+</script>
+</body>
+</html>

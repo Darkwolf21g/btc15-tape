@@ -4,19 +4,20 @@
 // requests (the BTC 15-minute market record and its 60-second-average feed) and adds the header
 // browsers need. Nothing else is forwarded, and no account or key is involved.
 //
-// Set up: dash.cloudflare.com -> Workers & Pages -> Create -> Start with Hello World -> Deploy,
-// then Edit code, replace everything with this file, Deploy again, and paste the worker's address
-// (https://....workers.dev) into the page under "Target and calibration".
+// Deployed from the GitHub repo (wrangler.jsonc), the Worker also serves the page itself, so the
+// page and its relay share one address and nothing needs pasting. Pasting the Worker's address into
+// another copy of the page (under "Target and calibration") works too.
 
 const UPSTREAMS = ["https://external-api.kalshi.com/trade-api/v2", "https://api.elections.kalshi.com/trade-api/v2"];
 const ALLOWED = [/^\/markets\/KXBTC15M-[A-Z0-9-]+$/, /^\/live_data\/events\/KXBTC15M-[A-Z0-9]+$/];
 const CORS = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS", "Cache-Control": "no-store"};
 
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     const path = new URL(request.url).pathname.replace(/\/+$/, "");
     if (request.method === "OPTIONS") return new Response(null, {headers: CORS});
     if (request.method !== "GET" || !ALLOWED.some(re => re.test(path))) {
+      if (env && env.ASSETS) return env.ASSETS.fetch(request);     // the page and its files
       return new Response("not found", {status: 404, headers: CORS});
     }
     let last = null;

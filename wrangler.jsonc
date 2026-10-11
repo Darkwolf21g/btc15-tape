@@ -1,0 +1,9 @@
+{
+  // Cloudflare Worker: serves the page (public/index.html) and relays two read-only Kalshi requests.
+  // GitHub Pages serves the identical copy at the repo root.
+  "name": "btc15-tape",
+  "main": "worker.js",
+  "compatibility_date": "2025-06-01",
+  "assets": { "directory": "./public", "binding": "ASSETS" },
+  "observability": { "enabled": true }
+}
