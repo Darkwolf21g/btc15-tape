@@ -782,7 +782,7 @@ function render() {
   const kcls = kalshi.ok ? (kstale ? "slow" : "ok") : kalshi.ok === false ? "off" : "";
   const ktxt = kalshi.ok ? (kalshi.relay ? "Kalshi via your relay" : kalshi.via === "site" ? "Kalshi via this site" : kalshi.via === "public" ? "Kalshi via public relay (slow)" : "Kalshi target and prices")
     : kalshi.ok === false ? (kalshi.relay ? "Kalshi relay not answering" : "Kalshi not reachable: targets estimated") : "Kalshi checking";
-  const kerr = kalshi.lastErr && nowMs - kalshi.lastErr.at < 30000 ? ` (${kalshi.lastErr.status || "no answer"})` : "";
+  const kerr = (!kalshi.ok || kstale) && kalshi.lastErr && nowMs - kalshi.lastErr.at < 30000 ? ` (${kalshi.lastErr.status || "no answer"})` : "";
   chips.push(`<span class="chip ${kcls}">${ktxt}${kerr}</span>`);
   $("sources").innerHTML = chips.join("");
   $("mktLegend").hidden = !kalshi.ok;
