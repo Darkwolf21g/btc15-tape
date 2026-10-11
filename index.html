@@ -163,6 +163,7 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
   <label for="rhDown"><span class="label">Down button ¢</span>
     <input id="rhDown" inputmode="numeric" placeholder="type" autocomplete="off">
     <span class="verdict" id="vDown"></span></label>
+  <div class="notes recline" id="decision" style="color:var(--ink)"></div>
   <div class="notes recline" id="recLine">Record: no official results yet. Scores wait for confirmed Kalshi outcomes.</div>
 </section>
 
@@ -1622,8 +1623,10 @@ function render() {
     const gap = proj.mean - tgt;
     // In a sharp move the flow says whether the move has weight behind it or is a sweep of thin books.
     const withFlow = fw && fw.side ? (fw.side === Math.sign(move10) ? " with " + fw.text + " behind it" : " against " + fw.text) : fw ? " on balanced flow" : "";
+    const zs = Math.abs(gap) / proj.sd;
     const line1 = (sharp ? `SHARP MOVE: ${signed(move10)} in 10 s${withFlow}. ` : "")
-      + (live ? "" : "Exchange estimate: ") + `closing average heading for ${signed(gap)} vs the target, ±${proj.sd.toFixed(0)}.`
+      + (live ? "" : "Exchange estimate: ") + `closing average heading for ${signed(gap)} vs the target, ±${proj.sd.toFixed(0)}: target ${zs.toFixed(1)} sd away`
+      + (zs < 1 && left > 120 ? " · close call; most of the decision comes in the last two minutes." : zs >= 2 ? " · clear." : ".")
       + (proj.observed && !proj.official ? ` ${proj.observed}/60 proxy samples; ${proj.reconstructed} rebuilt.` : "");
     const line2 = (move10 != null && back60 != null && !sharp ? `Spot ${signed(move10)} in 10 s, ${signed(spot - back60)} in 60 s.` : "")
       + (fw && !sharp ? ` Flow 30 s: ${fw.text}${fw.side ? " " + signedUsd(fw.net) : ""}.` : "")
@@ -1648,6 +1651,7 @@ function render() {
   const dep = depth(mk);
   const vUp = verdict($("vUp"), signalP, band && band.lo, typedUp != null ? typedUp : upC, waitReason, dep && dep.up);
   const vDown = verdict($("vDown"), signalP == null ? null : 1 - signalP, band && 1 - band.hi, typedDown != null ? typedDown : downC, waitReason, dep && dep.down);
+  decisionLine(p, band, vUp, vDown, upC, downC, left);
   keepRecord(mk, close, left, tgt, p, proj && tgt != null ? chanceMatched(proj.mean, proj.sd, tgt) : null, km, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, typedUp != null || typedDown != null);
 
   // sounds: a sharp move as it starts, a buy call on Kalshi's own prices once it has held for a few
@@ -1678,6 +1682,22 @@ function render() {
   if ($("diag").open && Math.floor(now) !== diagAt) { diagAt = Math.floor(now); $("diagOut").textContent = diagnostics(now, open); }
 }
 let wasSharp = false, edgeSince = 0, edgeGoneAt = 0, edgeArmed = true, lastLeft = Infinity;
+// One sentence on what to do, and the prices at which each side would become a buy.
+function decisionLine(p, band, vUp, vDown, upC, downC, left) {
+  const el = $("decision");
+  let txt = "";
+  if (p != null && band) {
+    const limit = worst => { for (let c = 99; c >= 1; c--) if (worst * 100 - c - feeCents(c / 100) >= 3) return c; return null; };   // the dearest price that is still a buy
+    const lu = limit(band.lo), ld = limit(1 - band.hi);
+    if (vUp && vUp.call === "buy") txt = `Buy Up at ${upC}¢: ${cents(vUp.worst)} a contract even at the bad end of the band.`;
+    else if (vDown && vDown.call === "buy") txt = `Buy Down at ${downC}¢: ${cents(vDown.worst)} a contract even at the bad end of the band.`;
+    else if (upC != null && downC != null) txt = `No trade now: Kalshi's ${upC}¢ / ${downC}¢ ${Math.abs(p * 100 - upC) <= 4 ? "matches" : "is within the band of"} the model's ${Math.round(p * 100)}%.`
+      + ` Up becomes a buy below ${lu != null ? lu + "¢" : "nothing realistic"}, Down below ${ld != null ? ld + "¢" : "nothing realistic"}.`;
+    else txt = `Up becomes a buy below ${lu != null ? lu + "¢" : "–"}, Down below ${ld != null ? ld + "¢" : "–"}.`;
+    if (left <= SETTLE) txt += " Settlement minute: watch the strip above.";
+  }
+  if (txt !== el.textContent) el.textContent = txt;
+}
 const VENUE_NAME = k => VENUES[k] ? VENUES[k].name : k;
 function renderFlowText(nowMs, now) {
   const [f30, f60] = FLOW_SPANS.map(s => flowSum(s, now));
