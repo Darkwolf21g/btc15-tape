@@ -53,6 +53,18 @@ header { display: flex; align-items: flex-end; justify-content: space-between; g
 .fair { display: flex; justify-content: space-between; font-size: 13px; }
 .fair .u { color: var(--up); } .fair .d { color: var(--down); }
 .why { grid-column: 1 / -1; color: var(--dim); font-size: 12px; }
+/* the settlement minute, in one strip: what is in, what is needed, where spot is */
+.settle { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; background: var(--panel); border: 1px solid var(--target); border-radius: 8px; padding: 8px 10px; }
+.settle div { display: grid; gap: 3px; min-width: 0; }
+.settle b { font: 600 17px/1.1 var(--mono); overflow-wrap: anywhere; }
+.settle .up { color: var(--up); } .settle .down { color: var(--down); }
+/* a slim bar that follows the page once the hero has scrolled away */
+.bar2 { position: sticky; top: 0; z-index: 5; display: none; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center;
+        background: rgba(10,15,28,0.94); backdrop-filter: blur(6px); border-bottom: 1px solid var(--line); padding: 6px 0; margin-inline: -16px; padding-inline: 16px; }
+.bar2.on { display: grid; }
+.bar2 .c { font: 700 26px/1 var(--display); } .bar2 .c.settling { color: var(--target); }
+.bar2 .p2 { font: 700 26px/1 var(--display); text-align: right; }
+.bar2 .m { font-size: 12px; color: var(--dim); text-align: center; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .ask { grid-column: 1 / -1; display: flex; gap: 8px; }
 .ask input { flex: 1 1 auto; min-width: 0; background: var(--panel); border: 1px solid var(--target); border-radius: 6px; color: var(--ink); font: 16px var(--mono); padding: 9px 10px; }
 
@@ -62,6 +74,7 @@ header { display: flex; align-items: flex-end; justify-content: space-between; g
 .edge input::placeholder { color: #44506c; }
 .edge .verdict { font-size: 12px; min-height: 1.4em; }
 .edge .recline { grid-column: 1 / -1; max-width: none; }
+.edge .label.head { text-transform: none; letter-spacing: 0; font: 12px/1.4 var(--mono); }
 .good { color: var(--up); } .bad { color: var(--down); } .meh { color: var(--dim); }
 
 .levels { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
@@ -108,6 +121,7 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
 </head>
 <body>
 
+<div class="bar2" id="bar2" aria-hidden="true"><span class="c" id="bar2Clock">–:––</span><span class="m" id="bar2Mid"></span><span class="p2" id="bar2P">–</span></div>
 <header>
   <div class="win">
     <span class="label">BTC 15 min · window</span>
@@ -126,6 +140,11 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
     <div class="fair"><span class="u" id="fairUp">Up –</span><span class="d" id="fairDown">Down –</span></div>
   </div>
   <div class="why" id="why">Connecting to exchanges…</div>
+  <div class="settle" id="settle" hidden>
+    <div><span class="label">Seconds in</span><b id="stIn">–</b><small class="notes" id="stInNote"></small></div>
+    <div><span class="label">Average so far</span><b id="stAvg">–</b><small class="notes" id="stAvgNote"></small></div>
+    <div><span class="label">Up needs ≥</span><b id="stNeed">–</b><small class="notes" id="stNeedNote"></small></div>
+  </div>
   <div class="ask" id="ask" hidden>
     <input id="askIn" inputmode="decimal" placeholder="Target from Robinhood, e.g. 82913.71" autocomplete="off">
     <button id="askSet" type="button">Set target</button>
@@ -133,7 +152,7 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
 </section>
 
 <section class="edge" aria-label="Compare with Robinhood">
-  <div class="label" style="grid-column:1/-1" id="edgeHead">Type what Robinhood's buttons say to see your edge</div>
+  <div class="label head" style="grid-column:1/-1" id="edgeHead">Type what Robinhood's buttons say to see your edge</div>
   <label for="rhUp"><span class="label">Up button ¢</span>
     <input id="rhUp" inputmode="numeric" placeholder="type" autocomplete="off">
     <span class="verdict" id="vUp"></span></label>
@@ -153,26 +172,26 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
 <div class="chart"><canvas id="main" aria-label="Price this window"></canvas>
   <div class="legend">
     <span><i style="background:var(--spot)"></i>Spot</span>
-    <span><i style="background:var(--avg)"></i>60-s exchange-proxy average</span>
+    <span><i style="background:var(--avg)"></i><span id="avgLegend">60-s average</span></span>
     <span><i style="background:var(--target)"></i>Target</span>
-    <span><i style="background:var(--warn)"></i>Final minute: the average the remaining seconds need for Up</span>
-    <span><i style="background:var(--dim)"></i>Projected proxy average, ±1 and ±2 model scales</span>
-    <span id="leadLegend" hidden><i style="background:var(--lead)"></i>Perpetual future (Hyperliquid), often first to move</span>
+    <span><i style="background:var(--warn)"></i>Needed for Up (last minute)</span>
+    <span><i style="background:var(--dim)"></i>Projection, ±1 and ±2 scales</span>
+    <span id="leadLegend" hidden><i style="background:var(--lead)"></i>Perp (leads)</span>
   </div>
 </div>
 <div class="chart"><canvas id="flow" aria-label="Order flow this window"></canvas>
   <div class="flowline" id="flowLine">Order flow: waiting for trades…</div>
   <div class="flowline" id="flowLine2"></div>
   <div class="legend">
-    <span><i style="background:var(--up)"></i>Market buys minus market sells, in dollars, per bar</span>
+    <span><i style="background:var(--up)"></i>Net buying per bar</span>
     <span><i style="background:var(--down)"></i>Net selling</span>
-    <span><i style="background:var(--ink)"></i>Running total since the open</span>
-    <span>▼ longs liquidated (forced selling) · ▲ shorts liquidated (forced buying)</span>
+    <span><i style="background:var(--ink)"></i>Total since the open</span>
+    <span>▼ longs liquidated · ▲ shorts liquidated</span>
   </div>
   <div class="whales" id="whales" hidden></div>
 </div>
 <div class="chart"><canvas id="prob" aria-label="Chance of Up through the window"></canvas>
-  <div class="legend"><span><i style="background:var(--up)"></i>Chance of Up, filled green when Up is favoured, orange when Down is</span><span id="mktLegend" hidden><i style="background:var(--ink)"></i>Up price on Kalshi (what you would pay), with its bid-ask band</span></div>
+  <div class="legend"><span><i style="background:var(--up)"></i>Chance of Up (green: Up favoured, orange: Down)</span><span id="mktLegend" hidden><i style="background:var(--ink)"></i>Kalshi's Up price, with its bid-ask band</span></div>
 </div>
 
 <div class="sources" id="sources"></div>
@@ -1103,7 +1122,12 @@ function drawMain(open, close, now, tgt, proj) {
     lead.forEach((p, i) => { const x = X(p.t / 1000), y = Y(p.p + basis); i ? g.lineTo(x, y) : g.moveTo(x, y); });
     g.stroke(); g.setLineDash([]);
   }
-  // spot
+  // spot: the seconds rebuilt from history as a thin line, then the live tape over it
+  const firstLive = pts.length ? pts[0].t / 1000 : now;
+  g.strokeStyle = "rgba(230,235,245,0.55)"; g.lineWidth = 1; g.beginPath();
+  let drawn = false;
+  for (let s = Math.ceil(t0); s <= firstLive; s++) { const v = sampleAt(s); if (v == null) { drawn = false; continue; } const x = X(s), y = Y(v + basis); drawn ? g.lineTo(x, y) : g.moveTo(x, y); drawn = true; }
+  g.stroke();
   g.strokeStyle = css("--spot"); g.lineWidth = 1.2; g.beginPath();
   pts.forEach((p, i) => { const x = X(p.t / 1000), y = Y(p.p + basis); i ? g.lineTo(x, y) : g.moveTo(x, y); });
   g.stroke();
@@ -1120,7 +1144,7 @@ function drawMain(open, close, now, tgt, proj) {
     g.fillText(text, W - R + 6, y); g.textBaseline = "alphabetic";
   };
   if (tgt != null) tag(tgt, css("--target"), Math.round(tgt).toLocaleString("en-US"));
-  if (lastNeed != null && Math.abs(lastNeed - (tgt || 0)) > (hi - lo) * 0.04) tag(lastNeed, css("--warn"), "need " + Math.round(lastNeed).toLocaleString("en-US"));
+  if (lastNeed != null && Math.abs(lastNeed - (tgt || 0)) > (hi - lo) * 0.04) tag(lastNeed, css("--warn"), "≥" + Math.round(lastNeed).toLocaleString("en-US"));
   if (avgPts.length) tag(avgPts[avgPts.length - 1][1], css("--avg"), Math.round(avgPts[avgPts.length - 1][1]).toLocaleString("en-US"));
   if (pts.length) tag(pts[pts.length - 1].p + basis, css("--spot"), Math.round(pts[pts.length - 1].p + basis).toLocaleString("en-US"));
   // now
@@ -1533,6 +1557,26 @@ function render() {
   $("lvProjNote").textContent = proj ? (proj.observed ? (proj.official ? `${proj.observed}/60 s in Kalshi's own average` : `${proj.observed}/60 proxy samples, ${proj.reconstructed} reconstructed`) + (need != null ? ` · Up needs ≥ ${money(need)} over the last ${proj.m} s` : "") : (live ? "official index; forecast until the final minute" : "exchange-proxy forecast until the final minute")) + ` · ±${proj.sd.toFixed(0)} model scale · vol $${vols.s.toFixed(1)} now, $${vols.l.toFixed(1)}/√s over 15 min` + (lean ? ` · lean ${signed(lean)}` : "")
     : projectionStatus && projectionStatus.missing ? `INCOMPLETE: ${projectionStatus.missing} elapsed proxy samples missing` : vols == null ? "measuring volatility…" : "needs the target";
   lastNeed = need;
+  // the settlement minute, in one strip
+  const inFinal = left <= SETTLE && left > 0 && proj && proj.observed;
+  $("settle").hidden = !inFinal;
+  if (inFinal) {
+    const soFar = (proj.sum + (proj.official ? 0 : proj.observed * basis)) / proj.observed;
+    $("stIn").textContent = `${proj.observed} / 60`;
+    $("stInNote").textContent = proj.official ? "Kalshi's own count" : proj.reconstructed ? `${proj.reconstructed} rebuilt` : "page's own";
+    $("stAvg").textContent = money(soFar); $("stAvg").className = tgt != null ? (soFar >= tgt ? "up" : "down") : "";
+    $("stAvgNote").textContent = tgt != null ? `${signed(soFar - tgt)} vs target` : "";
+    $("stNeed").textContent = need != null ? money(need) : "–"; $("stNeed").className = need != null && x != null ? (x >= need ? "up" : "down") : "";
+    $("stNeedNote").textContent = need != null && x != null ? `over the last ${proj.m} s · spot ${signed(x - need)}` : "";
+  }
+  $("avgLegend").textContent = offAvg ? "60-s average (official)" : "60-s average (exchange estimate)";
+  // the slim bar, once the hero has scrolled away
+  const bar = $("bar2");
+  if (bar.classList.contains("on")) {
+    $("bar2Clock").textContent = $("clock").textContent; $("bar2Clock").classList.toggle("settling", left <= SETTLE);
+    $("bar2P").textContent = p == null ? "–" : Math.min(99, Math.max(1, Math.round(p * 100))) + "%"; $("bar2P").style.color = p == null ? "" : p >= 0.5 ? css("--up") : css("--down");
+    $("bar2Mid").textContent = x != null && tgt != null ? `${Math.round(x).toLocaleString("en-US")} · ${signed(x - tgt)}` + (need != null ? ` · need ≥${Math.round(need).toLocaleString("en-US")}` : " vs target") : "";
+  }
 
   const fw = flowWords(flowSum(30, now));
   const big = $("pBig");
@@ -1546,15 +1590,16 @@ function render() {
     big.textContent = Math.min(99, Math.max(1, Math.round(p * 100))) + "%"; big.className = "p " + (p >= 0.5 ? "up" : "down");
     $("pBar").style.width = (p * 100).toFixed(1) + "%";
     const c = Math.min(99, Math.max(1, Math.round(p * 100)));
-    $("fairUp").textContent = `Up ${c}¢ (${Math.round(band.lo * 100)}–${Math.round(band.hi * 100)})`;
-    $("fairDown").textContent = `Down ${100 - c}¢ (${100 - Math.round(band.hi * 100)}–${100 - Math.round(band.lo * 100)})`;
+    const cl = Math.min(99, Math.max(1, Math.round(band.lo * 100))), ch = Math.min(99, Math.max(1, Math.round(band.hi * 100)));
+    $("fairUp").textContent = `Up ${c}¢ (${cl}–${ch})`;
+    $("fairDown").textContent = `Down ${100 - c}¢ (${100 - ch}–${100 - cl})`;
     const gap = proj.mean - tgt;
     // In a sharp move the flow says whether the move has weight behind it or is a sweep of thin books.
     const withFlow = fw && fw.side ? (fw.side === Math.sign(move10) ? " with " + fw.text + " behind it" : " against " + fw.text) : fw ? " on balanced flow" : "";
     $("why").textContent = (sharp ? `SHARP MOVE: ${signed(move10)} in 10 s${withFlow}. ` : "")
       + (live ? "" : "UNCALIBRATED EXCHANGE ESTIMATE: ") + `closing average heading for ${signed(gap)} vs the target; model scale ±${proj.sd.toFixed(0)}.`
       + (proj.observed ? (proj.official ? ` ${proj.observed}/60 s in Kalshi's own average.` : ` ${proj.observed}/60 proxy samples are available; ${proj.reconstructed} reconstructed.`) : "")
-      + (need != null ? ` Up needs the index to average ${money(need)} or more over the last ${proj.m} s (${x >= need ? "spot is above it" : "spot is " + signed(x - need) + " below it"}).` : "")
+
       + (move10 != null && back60 != null && !sharp ? ` Spot ${signed(move10)} in 10 s, ${signed(spot - back60)} in 60 s.` : "")
       + (fw && !sharp ? ` Flow 30 s: ${fw.text}${fw.side ? " " + signedUsd(fw.net) : ""}.` : "")
       + (basisSrc === "raw" ? " Enter the exact Robinhood target to estimate the current price offset." : "")
@@ -1567,7 +1612,7 @@ function render() {
   const upC = km ? Math.round(km.ask * 100) : null, downC = km ? Math.round((1 - km.bid) * 100) : null;
   $("rhUp").placeholder = upC != null ? String(upC) : "type";
   $("rhDown").placeholder = downC != null ? String(downC) : "type";
-  $("edgeHead").textContent = km ? `Kalshi's book now: Up ${upC}¢ · Down ${downC}¢ (Robinhood sells at these). Type over them if Robinhood differs.`
+  $("edgeHead").textContent = km ? `Kalshi now: Up ${upC}¢ · Down ${downC}¢, ${((nowMs - km.at) / 1000).toFixed(0)} s old · type over them if Robinhood shows something else`
     : "Type what Robinhood's buttons say to see your edge";
   const typedUp = $("rhUp").value ? parseFloat($("rhUp").value) : null, typedDown = $("rhDown").value ? parseFloat($("rhDown").value) : null;
   const paused = tradingPaused();
@@ -1760,6 +1805,7 @@ document.addEventListener("visibilitychange", () => {
   fetchBackfill(false, bounds(Date.now() / 1000)[0] - 60);
 });
 window.addEventListener("online", reconnectAll);
+if ("IntersectionObserver" in window) new IntersectionObserver(([e]) => $("bar2").classList.toggle("on", !e.isIntersecting), {threshold: 0}).observe(document.querySelector(".hero"));
 
 // ---------------------------------------------------------------- start
 for (const k of Object.keys(VENUES)) connect(k);

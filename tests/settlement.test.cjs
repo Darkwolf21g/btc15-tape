@@ -16,7 +16,7 @@ function page(savedRecord = []) {
   class Clock extends Date { static now() { return now; } }
   const node = id => {
     if (!nodes.has(id)) nodes.set(id, {
-      value: '', style: {}, dataset: {}, classList: {toggle() {}},
+      value: '', style: {}, dataset: {}, classList: {toggle() {}, contains() { return false; }},
       parentElement: {classList: {toggle() {}}, addEventListener() {}}, addEventListener() {},
       hidden: false, open: false, textContent: '',
     });
