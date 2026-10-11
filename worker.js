@@ -180,6 +180,10 @@ async function signedCall(env, mode, method, apiPath, body) {
   if (!r.ok) throw new Error(method + " " + apiPath + " " + r.status + " " + text.slice(0, 160));
   return text ? JSON.parse(text) : {};
 }
+async function notify(env, title, text) {           // a push to the ntfy app, if NTFY_TOPIC is set
+  if (!env.NTFY_TOPIC) return;
+  try { await fetch("https://ntfy.sh/" + encodeURIComponent(env.NTFY_TOPIC.trim()), {method: "POST", body: text, headers: {"Title": title, "Tags": "chart_with_upwards_trend"}}); } catch (e) {}
+}
 const etDay = ms => new Intl.DateTimeFormat("en-CA", {timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit"}).format(new Date(ms));
 const tailFromBand = (mean, sd, tgt) => tailCdf((mean - (tgt - 0.005)) / sd);
 function parseTicks(d) {                        // the CF Benchmarks history payload, tolerant of its shape
@@ -481,6 +485,8 @@ export class KalshiFeed {
       }
       w.trades.push(trade); today.trades++;
       await this.state.storage.put(key, w); await this.state.storage.put("trade.day", today);
+      await notify(this.env, `BTC 15 ${cfg.mode}: ${trade.side} ${trade.filled}/${trade.n} at ${trade.price}¢`,
+        `${mk} with ${Math.floor(trade.left / 60)}:${String(trade.left % 60).padStart(2, "0")} left · edge ${trade.edge}¢ · chance ${Math.round(trade.p * 100)}% (${Math.round(trade.lo * 100)}–${Math.round(trade.hi * 100)}) · cost $${(trade.cost / 100).toFixed(2)}${trade.status ? " · " + trade.status : ""}`);
       log.decisions = log.decisions.concat([Object.assign({note: "TRADE"}, trade)]).slice(-200);
       await this.state.storage.put("trade.log", log);
     } catch (e) {
@@ -504,6 +510,7 @@ export class KalshiFeed {
     const today = (await this.state.storage.get("trade.day")) || {day: etDay(Date.now()), trades: 0, pnlCents: 0};
     if (today.day === etDay(close * 1000)) today.pnlCents += pnl;
     await this.state.storage.put(key, w); await this.state.storage.put("trade.day", today);
+    await notify(this.env, `BTC 15 settled: ${pnl >= 0 ? "+" : "−"}$${(Math.abs(pnl) / 100).toFixed(2)}`, `${mk} resolved ${m.result === "yes" ? "Up" : "Down"} · today ${today.pnlCents >= 0 ? "+" : "−"}$${(Math.abs(today.pnlCents) / 100).toFixed(2)} over ${today.trades} trade${today.trades === 1 ? "" : "s"}`);
   }
   snapshotOf(tk, b) {
     return {type: "orderbook_snapshot", msg: {market_ticker: tk, yes_dollars_fp: [...b.yes].map(([p, q]) => [p.toFixed(4), q.toFixed(2)]), no_dollars_fp: [...b.no].map(([p, q]) => [p.toFixed(4), q.toFixed(2)])}};

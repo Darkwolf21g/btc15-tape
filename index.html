@@ -204,11 +204,7 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
 <details id="agentBox">
   <summary>Trading agent <span id="agentMode" class="notes" style="text-transform:none;letter-spacing:0"></span></summary>
   <pre id="agentOut" class="notes" style="white-space:pre-wrap;margin:10px 0 0">Loading…</pre>
-  <div class="row" style="margin-top:10px">
-    <button id="agOff" type="button">Off</button><button id="agPaper" type="button">Paper</button><button id="agDemo" type="button">Demo</button><button id="agLive" type="button">Live</button>
-  </div>
-  <div class="row"><input id="agCap" inputmode="decimal" placeholder="Max $ per window (now 10)" autocomplete="off"><button id="agCapSet" type="button">Set cap</button></div>
-  <div class="notes"><p>The agent runs in the relay from 10 minutes before each close to 15 seconds before it, on the same model as this page, and only ever sends a limit order at the ask that is cancelled at once if it does not fill. One trade a window, 12 a day, stops for the day after a $30 loss. <b>Paper</b> decides and scores without orders; <b>Demo</b> trades Kalshi's demo exchange (needs its own key pair on the relay); <b>Live</b> trades your account and asks you to type LIVE. Controls need the stream token.</p></div>
+  <div class="row" style="margin-top:10px"><a href="agent.html" id="agentLink"><button type="button">Open the agent page</button></a><span class="notes">Controls, every trade and every look, auto-refreshing.</span></div>
 </details>
 
 <details id="recordBox">
@@ -1542,7 +1538,7 @@ async function agentRefresh(force) {
     if (!r.ok) { $("agentOut").textContent = r.status === 403 ? "Needs the stream token (set it under Target and calibration)." : "Relay answered " + r.status; return; }
     const st = await r.json(), c = st.config, lines = [];
     $("agentMode").textContent = "· " + c.mode.toUpperCase();
-    lines.push(`Mode ${c.mode} · stream ${st.stream} · ${st.ticks} ticks in hand · cap $${(c.perWindowCents / 100).toFixed(0)} a window, ${c.maxTradesPerDay} a day, stop after −$${(c.dailyLossStopCents / 100).toFixed(0)}` + (st.tokenSet ? "" : " · NO TOKEN: controls locked") + (st.hasDemoKey ? "" : " · no demo key"));
+    lines.push(`Mode ${c.mode} · stream ${st.stream} · cap $${(c.perWindowCents / 100).toFixed(0)} a window, ${c.maxTradesPerDay} a day, stop after −$${(c.dailyLossStopCents / 100).toFixed(0)}` + (st.tokenSet ? "" : " · controls locked until FEED_TOKEN is set"));
     if (st.today) lines.push(`Today (${st.today.day}): ${st.today.trades} trade${st.today.trades === 1 ? "" : "s"}, ${pnlText(st.today.pnlCents)} settled`);
     const tr = (st.windows || []).flatMap(w => w.trades.map(t => Object.assign({result: w.result}, t))).slice(-12).reverse();
     if (tr.length) { lines.push("", "Trades:"); for (const t of tr) lines.push(`${ET_CLOCK.format(new Date(t.at))}  ${t.mode} ${t.side} ${t.filled}/${t.n} at ${t.price}¢ (${t.offered} offered, edge ${cents(t.edge)}, chance ${Math.round(t.p * 100)}%)` + (t.pnlCents != null ? ` → ${pnlText(t.pnlCents)}` : t.status ? ` · ${t.status}` : "")); }
@@ -1552,21 +1548,6 @@ async function agentRefresh(force) {
     $("agentOut").textContent = lines.join("\n");
   } catch (e) { $("agentOut").textContent = "Relay not reachable."; }
 }
-async function agentSet(body) {
-  const base = kalshi.relay || SAME_SITE;
-  if (!base) return;
-  if (!feed.token) { $("agentOut").textContent = "Set the stream token first (Target and calibration), and FEED_TOKEN on the relay."; return; }
-  try {
-    const r = await fetch(base + "/trade/config?token=" + encodeURIComponent(feed.token), {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-    if (!r.ok) { $("agentOut").textContent = "Refused: " + (await r.text()); return; }
-    agentRefresh(true);
-  } catch (e) { $("agentOut").textContent = "Relay not reachable."; }
-}
-$("agOff").addEventListener("click", () => agentSet({mode: "off"}));
-$("agPaper").addEventListener("click", () => agentSet({mode: "paper"}));
-$("agDemo").addEventListener("click", () => agentSet({mode: "demo"}));
-$("agLive").addEventListener("click", () => { const c = prompt("This sends real orders with real money. Type LIVE to confirm."); if (c === "LIVE") agentSet({mode: "live", confirm: "LIVE"}); });
-$("agCapSet").addEventListener("click", () => { const v = num($("agCap").value); if (v && v >= 1) { agentSet({perWindowCents: Math.round(v * 100)}); $("agCap").value = ""; } });
 $("agentBox").addEventListener("toggle", () => { if ($("agentBox").open) agentRefresh(true); });
 setInterval(() => { if ($("agentBox").open) agentRefresh(false); }, 30000);
 setTimeout(() => agentRefresh(true), 6000);

@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>BTC 15 Agent</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root { color-scheme: dark; --ground: #0a0f1c; --panel: #111a2c; --line: #22304d; --ink: #e6ebf5; --dim: #8592ad; --up: #2fd17c; --down: #ff6a3d; --warn: #ffb020; --target: #ffc857;
+        --display: "Barlow Condensed", "Arial Narrow", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace; }
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--ground); color: var(--ink); }
+body { font: 14px/1.45 var(--mono); padding: calc(10px + env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-left, 0px)) 32px; max-width: 920px; margin-inline: auto; font-variant-numeric: tabular-nums; }
+h1 { font: 700 28px/1 var(--display); letter-spacing: .02em; margin: 0 0 4px; }
+.label { font: 600 12px/1 var(--display); letter-spacing: .09em; text-transform: uppercase; color: var(--dim); }
+.mode { font: 700 44px/1 var(--display); margin: 8px 0; }
+.mode.off { color: var(--dim); } .mode.paper { color: var(--target); } .mode.demo { color: var(--warn); } .mode.live { color: var(--down); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 12px 0; }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 4px; }
+.tile b { font: 600 20px/1.1 var(--mono); }
+.good { color: var(--up); } .bad { color: var(--down); } .meh { color: var(--dim); }
+section { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 12px; }
+h2 { font: 600 14px/1 var(--display); letter-spacing: .08em; text-transform: uppercase; color: var(--dim); margin: 0 0 8px; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+td, th { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--dim); font-weight: 500; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+input { flex: 1 1 140px; min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; color: var(--ink); font: 15px var(--mono); padding: 8px 10px; }
+button { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; font: 600 14px var(--display); letter-spacing: .06em; text-transform: uppercase; padding: 9px 12px; cursor: pointer; }
+button.on { border-color: var(--up); color: var(--up); }
+button.danger { border-color: var(--down); color: var(--down); }
+.notes { color: var(--dim); font-size: 12px; }
+pre { white-space: pre-wrap; font: 12px/1.45 var(--mono); color: var(--dim); margin: 6px 0 0; }
+a { color: var(--ink); }
+</style>
+</head>
+<body>
+<h1>BTC 15 · trading agent</h1>
+<div class="notes"><a href="./">← back to the tape</a> · <span id="when">connecting…</span></div>
+<div class="mode off" id="mode">–</div>
+<div class="notes" id="line">Loading the relay's status…</div>
+
+<div class="tiles">
+  <div class="tile"><span class="label">Today</span><b id="tToday">–</b><small class="notes" id="tTodayNote"></small></div>
+  <div class="tile"><span class="label">All time</span><b id="tAll">–</b><small class="notes" id="tAllNote"></small></div>
+  <div class="tile"><span class="label">Stream</span><b id="tStream">–</b><small class="notes" id="tStreamNote"></small></div>
+  <div class="tile"><span class="label">Limits</span><b id="tLimits">–</b><small class="notes" id="tLimitsNote"></small></div>
+</div>
+
+<section>
+  <h2>Controls</h2>
+  <div class="row">
+    <button id="bOff" type="button">Off</button><button id="bPaper" type="button">Paper</button><button id="bDemo" type="button">Demo</button><button id="bLive" type="button" class="danger">Live</button>
+  </div>
+  <div class="row"><input id="cap" inputmode="decimal" placeholder="Max $ per window"><input id="first" inputmode="numeric" placeholder="Start trading at minute (1–14)"><input id="bank" inputmode="decimal" placeholder="Bankroll $ for sizing"><button id="bSet" type="button">Apply</button></div>
+  <div class="row"><input id="tok" inputmode="text" placeholder="Stream token (FEED_TOKEN on the Worker)"><button id="bTok" type="button">Save token</button></div>
+  <div class="notes" id="ctlNote"></div>
+</section>
+
+<section>
+  <h2>Trades</h2>
+  <table id="trades"><thead><tr><th>When</th><th>Mode</th><th>Side · price</th><th>Filled</th><th>Edge · chance</th><th>Result</th></tr></thead><tbody></tbody></table>
+  <div class="notes" id="tradesNote"></div>
+</section>
+
+<section>
+  <h2>Recent looks without a trade</h2>
+  <pre id="looks">–</pre>
+</section>
+
+<section>
+  <h2>Errors</h2>
+  <pre id="errors">none</pre>
+</section>
+
+<section>
+  <h2>Collector and record</h2>
+  <pre id="collector">–</pre>
+  <div class="notes">Full record: <a href="./record.csv" id="csv">record.csv</a> · JSON: <a href="./record" id="json">record</a></div>
+</section>
+
+<section>
+  <div class="notes">
+    <p>The agent runs in the relay around the clock: from the start minute you set (default minute 5) to 15 seconds before each close, every 5 seconds, on Kalshi's own index and book. It trades when a side clears 3¢ after fees at the bad end of the model's band and the call has held for two looks: one limit order at the ask, immediate-or-cancel, a quarter Kelly, capped per window. One trade a window, 12 a day, nothing after the daily loss stop, nothing while Kalshi has trading paused.</p>
+    <p><b>Paper</b> decides and scores without orders. <b>Demo</b> trades Kalshi's demo exchange (its own key pair on the relay). <b>Live</b> trades your account. Controls need the stream token; Live asks you to type LIVE.</p>
+  </div>
+</section>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const store = {get(k) { try { return JSON.parse(localStorage.getItem("btc15tape." + k)); } catch (e) { return null; } }, set(k, v) { try { localStorage.setItem("btc15tape." + k, JSON.stringify(v)); } catch (e) {} }};
+let token = store.get("feedToken") || "";
+const q = () => token ? "?token=" + encodeURIComponent(token) : "";
+const ET = new Intl.DateTimeFormat("en-US", {timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit"});
+const mmss = l => `${Math.floor((l || 0) / 60)}:${String((l || 0) % 60).padStart(2, "0")}`;
+const pct = v => v == null ? "–" : Math.round(v * 100);
+const money = c => (c >= 0 ? "+" : "−") + "$" + (Math.abs(c) / 100).toFixed(2);
+const cents = v => (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + "¢";
+let cfg = null;
+async function refresh() {
+  try {
+    const r = await fetch("./trade/status" + q(), {cache: "no-store"});
+    if (!r.ok) { $("line").textContent = r.status === 403 ? "The relay wants the stream token: save it below." : "Relay answered " + r.status; $("when").textContent = "not updated"; return; }
+    const st = await r.json(); cfg = st.config;
+    $("when").textContent = "updated " + new Date().toLocaleTimeString();
+    $("mode").textContent = cfg.mode.toUpperCase(); $("mode").className = "mode " + cfg.mode;
+    for (const [id, m] of [["bOff", "off"], ["bPaper", "paper"], ["bDemo", "demo"], ["bLive", "live"]]) $(id).classList.toggle("on", cfg.mode === m);
+    $("line").textContent = (st.tokenSet ? "Controls unlocked." : "Controls locked: set FEED_TOKEN on the Worker (Settings → Runtime variables and secrets), then save the same token below.")
+      + (cfg.mode !== "off" && !st.hasDemoKey ? " No demo key on the relay." : "");
+    const t = st.today;
+    $("tToday").textContent = t ? money(t.pnlCents) : "–"; $("tToday").className = t ? (t.pnlCents > 0 ? "good" : t.pnlCents < 0 ? "bad" : "") : "";
+    $("tTodayNote").textContent = t ? `${t.trades} trade${t.trades === 1 ? "" : "s"} on ${t.day}` : "no trades yet";
+    const all = (st.windows || []).flatMap(w => w.trades.map(x => Object.assign({result: w.result, settled: w.settled}, x)));
+    const settled = all.filter(x => x.pnlCents != null), pnl = settled.reduce((a, x) => a + x.pnlCents, 0), wins = settled.filter(x => x.pnlCents > 0).length;
+    $("tAll").textContent = settled.length ? money(pnl) : "–"; $("tAll").className = pnl > 0 ? "good" : pnl < 0 ? "bad" : "";
+    $("tAllNote").textContent = settled.length ? `${settled.length} settled, ${wins} won · ${all.length - settled.length} open` : `${all.length} trades, none settled`;
+    $("tStream").textContent = st.stream; $("tStream").className = st.stream === "open" ? "good" : "bad";
+    $("tStreamNote").textContent = `${st.ticks} index ticks in hand`;
+    $("tLimits").textContent = `$${(cfg.perWindowCents / 100).toFixed(0)} / window`;
+    $("tLimitsNote").textContent = `${cfg.maxTradesPerDay} a day · stop at −$${(cfg.dailyLossStopCents / 100).toFixed(0)} · from minute ${Math.round((cfg.firstSeconds || 300) / 60)} · bankroll $${((cfg.bankrollCents || 50000) / 100).toFixed(0)}`;
+    const tb = $("trades").querySelector("tbody"); tb.innerHTML = "";
+    for (const x of all.slice(-40).reverse()) {
+      const tr = document.createElement("tr");
+      const res = x.pnlCents != null ? `<span class="${x.pnlCents > 0 ? "good" : x.pnlCents < 0 ? "bad" : "meh"}">${money(x.pnlCents)}</span>` : x.result ? x.result : (x.status || "open");
+      tr.innerHTML = `<td>${ET.format(new Date(x.at))}<br><span class="notes">${mmss(x.left)} left</span></td><td>${x.mode}</td><td>${x.side} ${x.price}¢<br><span class="notes">${x.offered} offered</span></td><td>${x.filled}/${x.n}${x.cost ? `<br><span class="notes">$${(x.cost / 100).toFixed(2)}</span>` : ""}</td><td>${cents(x.edge)}<br><span class="notes">${pct(x.p)}% (${pct(x.lo)}–${pct(x.hi)})${x.official ? " · official avg" : ""}</span></td><td>${res}</td>`;
+      tb.appendChild(tr);
+    }
+    $("tradesNote").textContent = all.length ? "" : "No trades yet. In paper mode the agent still logs every look below.";
+    const looks = (st.decisions || []).filter(d => d.note !== "TRADE").slice(-8).reverse();
+    $("looks").textContent = looks.length ? looks.map(d => `${ET.format(new Date(d.at))} · ${mmss(d.left)} left · chance ${pct(d.p)}% (${pct(d.lo)}–${pct(d.hi)})` + (d.up ? ` · Up ${d.up.price}¢ ${cents(d.up.edge)} ${d.up.call}` : "") + (d.down ? ` · Down ${d.down.price}¢ ${cents(d.down.edge)} ${d.down.call}` : "")).join("\n") : (cfg.mode === "off" ? "The agent is off." : "Nothing logged yet; the first look comes in the next window's trading zone.");
+    $("errors").textContent = st.errors && st.errors.length ? st.errors.map(e => `${ET.format(new Date(e.at))} ${e.error}`).join("\n") : "none";
+  } catch (e) { $("line").textContent = "Relay not reachable."; $("when").textContent = "not updated"; }
+  try {
+    const c = await (await fetch("./collector/status" + q(), {cache: "no-store"})).json();
+    $("collector").textContent = `runs ${c.runs || 0} · last ${c.lastRun ? ET.format(new Date(c.lastRun)) : "never"} · next ${c.nextAlarm ? ET.format(new Date(c.nextAlarm)) : "–"}` + (c.errors && c.errors.length ? `\nlast error: ${c.errors[c.errors.length - 1].error}` : "");
+  } catch (e) {}
+}
+async function set(body) {
+  if (!token) { $("ctlNote").textContent = "Save the stream token first."; return; }
+  try {
+    const r = await fetch("./trade/config" + q(), {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    $("ctlNote").textContent = r.ok ? "Applied." : "Refused: " + (await r.text());
+    refresh();
+  } catch (e) { $("ctlNote").textContent = "Relay not reachable."; }
+}
+$("bOff").addEventListener("click", () => set({mode: "off"}));
+$("bPaper").addEventListener("click", () => set({mode: "paper"}));
+$("bDemo").addEventListener("click", () => set({mode: "demo"}));
+$("bLive").addEventListener("click", () => { const c = prompt("Live sends real orders with real money, around the clock, within the limits shown. Type LIVE to confirm."); if (c === "LIVE") set({mode: "live", confirm: "LIVE"}); });
+$("bSet").addEventListener("click", () => {
+  const b = {};
+  const cap = parseFloat($("cap").value), first = parseFloat($("first").value), bank = parseFloat($("bank").value);
+  if (cap >= 1) b.perWindowCents = Math.round(cap * 100);
+  if (first >= 1 && first <= 14) b.firstSeconds = Math.round(first * 60);
+  if (bank >= 10) b.bankrollCents = Math.round(bank * 100);
+  if (Object.keys(b).length) set(b); else $("ctlNote").textContent = "Nothing to apply.";
+  $("cap").value = ""; $("first").value = ""; $("bank").value = "";
+});
+$("bTok").addEventListener("click", () => { token = $("tok").value.trim(); store.set("feedToken", token); $("tok").value = ""; $("ctlNote").textContent = token ? "Token saved (shared with the tape page)." : "Token cleared."; refresh(); });
+$("csv").href = "./record.csv" + q(); $("json").href = "./record" + q();
+refresh(); setInterval(refresh, 10000);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(); });
+</script>
+</body>
+</html>
