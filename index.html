@@ -122,11 +122,12 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
 </section>
 
 <section class="edge" aria-label="Compare with Robinhood">
-  <label for="rhUp"><span class="label">Robinhood Up ¢</span>
-    <input id="rhUp" inputmode="numeric" placeholder="77" autocomplete="off">
+  <div class="label" style="grid-column:1/-1">Type what Robinhood's buttons say to see your edge</div>
+  <label for="rhUp"><span class="label">Up button ¢</span>
+    <input id="rhUp" inputmode="numeric" placeholder="type" autocomplete="off">
     <span class="verdict" id="vUp"></span></label>
-  <label for="rhDown"><span class="label">Robinhood Down ¢</span>
-    <input id="rhDown" inputmode="numeric" placeholder="24" autocomplete="off">
+  <label for="rhDown"><span class="label">Down button ¢</span>
+    <input id="rhDown" inputmode="numeric" placeholder="type" autocomplete="off">
     <span class="verdict" id="vDown"></span></label>
 </section>
 
@@ -670,7 +671,8 @@ function verdict(el, fair, priceCents) {
   if (!(priceCents > 0 && priceCents < 100)) { el.textContent = ""; el.className = "verdict"; return; }
   if (fair == null) { el.textContent = "needs the chance of Up first"; el.className = "verdict meh"; return; }
   const edge = fair * 100 - priceCents - feeCents(priceCents / 100);
-  el.textContent = (edge >= 0 ? "+" : "−") + Math.abs(edge).toFixed(1) + "¢ a contract after fees";
+  el.textContent = (edge >= 0 ? "+" : "−") + Math.abs(edge).toFixed(1) + "¢ a contract after fees"
+    + (edge >= 3 ? " · buy" : edge <= 0 ? " · no" : " · thin");
   el.className = "verdict " + (edge >= 3 ? "good" : edge <= 0 ? "bad" : "meh");
 }
 let lastP = null, lastMk = null;
