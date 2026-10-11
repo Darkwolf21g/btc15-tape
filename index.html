@@ -210,6 +210,7 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
     <div class="notes">
       <p><b>Target.</b> Exact when Kalshi can be reached (through a relay). Otherwise it is estimated from the page's own prices over the minute before the open, and the exchanges here sit a few dollars from the official index. Type one target from Robinhood, in either box, and that difference is measured and applied to every window after it. It holds for hours.</p>
       <p><b>Sync.</b> Another way to measure the same difference: type Robinhood's big number while it is showing.</p>
+      <p><b>Closing average, projected.</b> The contract settles on the average of the last 60 seconds. Until that minute starts none of those seconds has happened, and a random walk's best forecast for every one of them is the price now, so the projection sits on spot (plus the lean) and only its uncertainty shrinks as the close nears. In the last minute the seconds already gone are locked in and only the rest follow spot, so it pulls away from spot and settles on the final number.</p>
       <p><b>Why Robinhood looks late.</b> Its big number is the average of the last 60 seconds, the same quantity the contract settles on. When price moves, it trails spot by about 30 seconds. The fast line here is spot. The blue line is that average.</p>
       <p><b>Relay.</b> Browsers are not allowed to read Kalshi directly. A small relay of your own (a free Cloudflare Worker; the code is in the README) lets this page read the exact target, the official 60-second average and Kalshi's own Up price. Paste its address here once.</p>
       <p><b>Fees.</b> The edge figures take off Robinhood's commission and Kalshi's 1¢ fee, about 2¢ a contract in the middle of the range.</p>
@@ -853,7 +854,7 @@ function project(now, close, x, vols, drifts) {
   for (const [amount, horizon] of drifts || []) for (const d of ahead) mean += amount * Math.min(1, d / horizon);
   mean /= SETTLE;
   const lv = levelSd();
-  return {mean, sd: Math.sqrt(variance / (SETTLE * SETTLE) + lv * lv)};
+  return {mean, sd: Math.sqrt(variance / (SETTLE * SETTLE) + lv * lv), locked: SETTLE - m};
 }
 
 // ---------------------------------------------------------------- drawing
@@ -1333,7 +1334,7 @@ function render() {
     fillProbHistory(open, now, close, tgt, vols);
   }
   $("lvProj").textContent = proj ? money(proj.mean) : "–";
-  $("lvProjNote").textContent = proj ? `±${proj.sd.toFixed(0)} (1 sd) · vol $${vols.s.toFixed(1)} now, $${vols.l.toFixed(1)}/√s over 15 min` + (lean ? ` · lean ${signed(lean)}` : "")
+  $("lvProjNote").textContent = proj ? (proj.locked ? `${proj.locked} of 60 s locked in, the rest follow spot` : "follows spot until the last minute") + ` · ±${proj.sd.toFixed(0)} (1 sd) · vol $${vols.s.toFixed(1)} now, $${vols.l.toFixed(1)}/√s over 15 min` + (lean ? ` · lean ${signed(lean)}` : "")
     : vols == null ? "measuring volatility…" : "needs the target";
 
   const fw = flowWords(flowSum(30, now));
@@ -1354,6 +1355,7 @@ function render() {
     const withFlow = fw && fw.side ? (fw.side === Math.sign(move10) ? " with " + fw.text + " behind it" : " against " + fw.text) : fw ? " on balanced flow" : "";
     $("why").textContent = (sharp ? `SHARP MOVE: ${signed(move10)} in 10 s${withFlow}. ` : "")
       + `Closing average heading for ${signed(gap)} vs the target; ±${proj.sd.toFixed(0)} is one standard deviation.`
+      + (proj.locked ? ` ${proj.locked} of its 60 seconds are in.` : "")
       + (move10 != null && back60 != null && !sharp ? ` Spot ${signed(move10)} in 10 s, ${signed(spot - back60)} in 60 s.` : "")
       + (fw && !sharp ? ` Flow 30 s: ${fw.text}${fw.side ? " " + signedUsd(fw.net) : ""}.` : "")
       + (basisSrc === "raw" ? " Typing one target from Robinhood calibrates the level for the hours ahead." : "");
