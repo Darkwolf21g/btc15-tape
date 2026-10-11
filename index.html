@@ -61,6 +61,7 @@ header { display: flex; align-items: flex-end; justify-content: space-between; g
 .edge input { width: 100%; background: transparent; border: 0; color: var(--ink); font: 600 22px var(--mono); outline: none; }
 .edge input::placeholder { color: #44506c; }
 .edge .verdict { font-size: 12px; min-height: 1.4em; }
+.edge .recline { grid-column: 1 / -1; max-width: none; }
 .good { color: var(--up); } .bad { color: var(--down); } .meh { color: var(--dim); }
 
 .levels { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
@@ -139,6 +140,7 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
   <label for="rhDown"><span class="label">Down button ¢</span>
     <input id="rhDown" inputmode="numeric" placeholder="type" autocomplete="off">
     <span class="verdict" id="vDown"></span></label>
+  <div class="notes recline" id="recLine">Record: no settled windows yet. The page scores its chance against Kalshi's price in every window it watches.</div>
 </section>
 
 <section class="levels">
@@ -174,6 +176,12 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
 
 <div class="sources" id="sources"></div>
 
+<details id="recordBox">
+  <summary>Record</summary>
+  <pre id="recOut" class="notes" style="white-space:pre-wrap;margin:10px 0 0"></pre>
+  <div class="row" style="margin-top:10px"><button id="recClear" type="button">Clear record</button><span class="notes">Kept in this browser only.</span></div>
+</details>
+
 <details id="diag">
   <summary>Diagnostics</summary>
   <pre id="diagOut" class="notes" style="white-space:pre-wrap;margin:10px 0 0"></pre>
@@ -194,6 +202,10 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
       <input id="relayIn" inputmode="url" placeholder="Kalshi relay address (optional, see README)" autocomplete="off">
       <button id="relaySet" type="button">Use relay</button>
     </div>
+    <div class="row">
+      <input id="bankIn" inputmode="decimal" placeholder="Bankroll for sizing, $ (now 500)" autocomplete="off">
+      <button id="bankSet" type="button">Set bankroll</button>
+    </div>
     <div class="row"><button id="wake" type="button">Keep screen on</button><span class="notes" id="wakeNote"></span></div>
     <div class="notes">
       <p><b>Target.</b> Exact when Kalshi can be reached (through a relay). Otherwise it is estimated from the page's own prices over the minute before the open, and the exchanges here sit a few dollars from the official index. Type one target from Robinhood, in either box, and that difference is measured and applied to every window after it. It holds for hours.</p>
@@ -201,6 +213,8 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
       <p><b>Why Robinhood looks late.</b> Its big number is the average of the last 60 seconds, the same quantity the contract settles on. When price moves, it trails spot by about 30 seconds. The fast line here is spot. The blue line is that average.</p>
       <p><b>Relay.</b> Browsers are not allowed to read Kalshi directly. A small relay of your own (a free Cloudflare Worker; the code is in the README) lets this page read the exact target, the official 60-second average and Kalshi's own Up price. Paste its address here once.</p>
       <p><b>Fees.</b> The edge figures take off Robinhood's commission and Kalshi's 1¢ fee, about 2¢ a contract in the middle of the range.</p>
+      <p><b>Buy, thin, no.</b> The chance is shown with a band: the range it covers if volatility were 30% lower or 50% higher, if the lean were off, and if spot moved one standard deviation of a ten-second move against you while you placed the order. <b>Buy</b> means the price still leaves 3¢ after fees at the bad end of that band, and comes with a size: a quarter of the Kelly stake on the bad end, never more than 2% of the bankroll set below. <b>Thin</b> means there is an edge at the model's own chance but not at the bad end. <b>No</b> means none at the model's chance.</p>
+      <p><b>Record.</b> At 10, 5, 2 and 1 minutes before each close the page notes its chance and Kalshi's price, and when the market settles it scores both (a Brier score: the squared miss, so 0 is perfect and 0.25 is a coin flip). It also scores every buy call as one contract held to settlement. Until the model's score is below the market's over a few dozen windows, treat buy calls as a hypothesis, not an edge.</p>
       <p><b>Sharp moves.</b> No model predicts a sudden jump. The chance allows for them with a fat-tailed curve, so it never shows more than about 98% however calm the last minutes were, and the "Sharp move" note appears when spot has just moved several standard deviations in ten seconds. In a sharp move, spot here leads Robinhood's number by about half a minute, and the projection shows where the closing average lands if the price holds.</p>
       <p><b>Order flow.</b> Every trade on the five index exchanges and the Hyperliquid perpetual is sorted by who crossed the spread: a market buy counts as buying, a market sell as selling. The bars are the difference, in dollars, and the line is the running total since the open. A move with heavy flow behind it tends to carry on; a move on balanced flow is more often a sweep that fades. Prints of $200k or more are listed under the chart.</p>
       <p><b>Flow lean.</b> The page also measures, as it runs, how far spot has tended to move in the 30 seconds after a stretch of net buying or selling. Once that relation is clear (about ten minutes of data at the least, usually more) the projection leans the way the flow points, by that measured amount and never by more than two standard deviations of a 30-second move. The flow line says whether the lean is on. It is forgotten slowly, so what it learnt this evening still counts tomorrow morning. Liquidations come from Bybit, OKX, Deribit, BitMEX and Binance (Binance refuses US connections): longs being liquidated is forced selling, shorts being liquidated is forced buying, and a run of them is what makes a move overshoot.</p>
@@ -495,11 +509,14 @@ function onSecond(sec) {
   if (px == null) return;
   samples.set(sec, px); lastSampleSec = sec;
   learnOffsets(px);
+  const l = leadPrice();
+  if (l != null) leadSamples.set(sec, l);
   const back = sampleAt(sec - VOL_STEP);
   if (back != null) addVol(px, back);
   calibrate(sec);
   for (const k of samples.keys()) if (k < sec - 4000) samples.delete(k);
   for (const k of backfill.keys()) if (k < sec - 4000) backfill.delete(k);
+  for (const k of leadSamples.keys()) if (k < sec - 4000) leadSamples.delete(k);
 }
 
 // ---------------------------------------------------------------- order flow: who is crossing the spread
@@ -561,36 +578,58 @@ const fmtUsd = x => {                     // $1.2M, $412k, $9.5k, $120
   return "$" + (a >= 1e6 ? (a / 1e6).toFixed(a >= 1e7 ? 0 : 1) + "M" : a >= 1e3 ? (a / 1e3).toFixed(a >= 1e4 ? 0 : 1) + "k" : a.toFixed(0));
 };
 const signedUsd = x => (x >= 0 ? "+" : "−") + fmtUsd(x);
-// What flow like this has been followed by. Every 5 s the page records the net flow of a 30-s stretch
-// and how far spot moved in the 30 s after it. A least-squares slope through those pairs, forgotten
-// with a 3-hour half-life, says how many dollars of movement a million dollars of net flow has been
-// worth lately. It leans the projection only once the relation is clearly there (t-statistic of 3 or
-// more), only the way the flow points, and never by more than two standard deviations of a 30-s move.
-const cal = Object.assign({sxx: 0, sxy: 0, syy: 0, n: 0, at: 0}, (() => { const c = store.get("flowcal"); return c && c.n > 0 && Date.now() - c.at < 86400000 ? c : null; })());
+// What the flow and the perp have been followed by. Every 5 s the page records two things about a
+// moment 30 s ago: the net flow of the 30 s before it (in $M) and how far the perp sat from spot
+// (in $, beyond its usual distance), together with how far spot then moved in the next 30 s. A
+// least-squares fit of the move on both at once, forgotten with a 3-hour half-life, says what a
+// million dollars of net flow and a dollar of perp gap have been worth lately. Each enters the
+// projection only once its own relation is clear (t-statistic of 3 or more) and points the sensible
+// way: flow pushes price along, spot closes toward the perp. The lean is capped at two standard
+// deviations of a 30-s move, and is kept across reloads for a day.
+const NOW_H = 30;                         // seconds the lean plays out over, and the horizon it is fitted on
+const cal = Object.assign({s11: 0, s12: 0, s22: 0, s1y: 0, s2y: 0, syy: 0, n: 0, at: 0},
+                          (() => { const c = store.get("nowcal"); return c && c.n > 0 && Date.now() - c.at < 86400000 ? c : null; })());
+const leadSamples = new Map();            // second -> the perp on spot's footing
 function calibrate(sec) {
   if (sec % 5) return;
-  const s0 = sec - 30, a = sampleAt(s0), b = sampleAt(sec);
+  const s0 = sec - NOW_H, a = sampleAt(s0), b = sampleAt(sec);
   if (a == null || b == null) return;
-  const f = flowSum(30, s0);
-  if (f.b + f.s + f.pb + f.ps <= 0) return;
-  const x = (f.b + f.pb - f.s - f.ps) / 1e6, y = b - a, k = Math.pow(0.5, 5 / 10800);
-  cal.sxx = cal.sxx * k + x * x; cal.sxy = cal.sxy * k + x * y; cal.syy = cal.syy * k + y * y; cal.n = cal.n * k + 1; cal.at = Date.now();
-  if (sec % 60 === 0) store.set("flowcal", cal);
+  const f = flowSum(NOW_H, s0), lead = leadSamples.get(s0);
+  const x1 = f.b + f.s + f.pb + f.ps > 0 ? (f.b + f.pb - f.s - f.ps) / 1e6 : 0, x2 = lead != null ? lead - a : 0, y = b - a;
+  if (!x1 && !x2) return;
+  const k = Math.pow(0.5, 5 / 10800);
+  cal.s11 = cal.s11 * k + x1 * x1; cal.s12 = cal.s12 * k + x1 * x2; cal.s22 = cal.s22 * k + x2 * x2;
+  cal.s1y = cal.s1y * k + x1 * y; cal.s2y = cal.s2y * k + x2 * y; cal.syy = cal.syy * k + y * y;
+  cal.n = cal.n * k + 1; cal.at = Date.now();
+  if (sec % 60 === 0) store.set("nowcal", cal);
 }
-function leanStats() {                    // {beta: dollars per $1M of net flow, t, minutes of data}
-  if (cal.n < 120 || cal.sxx <= 0) return null;
-  const beta = cal.sxy / cal.sxx, nEff = Math.max(3, cal.n / 6);        // the samples overlap six to one
-  const resid = Math.max(0, cal.syy - beta * cal.sxy) / (nEff - 2);
-  const se = Math.sqrt(resid / cal.sxx);
-  return {beta, t: se > 0 ? beta / se : 0, minutes: cal.n * 5 / 60, on: se > 0 && beta > 0 && beta / se >= 3};
+function calStats() {                     // {b1: $ per $1M of flow, b2: $ per $ of perp gap, t1, t2, flowOn, leadOn, minutes}
+  if (cal.n < 120) return null;
+  const {s11, s12, s22, s1y, s2y, syy} = cal, det = s11 * s22 - s12 * s12;
+  let b1 = 0, b2 = 0, v1 = 0, v2 = 0;     // v: the variance of each slope, before the residual scale
+  if (s11 > 0 && s22 > 0 && det > 1e-6 * s11 * s22) { b1 = (s22 * s1y - s12 * s2y) / det; b2 = (s11 * s2y - s12 * s1y) / det; v1 = s22 / det; v2 = s11 / det; }
+  else if (s11 > 0) { b1 = s1y / s11; v1 = 1 / s11; }
+  else if (s22 > 0) { b2 = s2y / s22; v2 = 1 / s22; }
+  else return null;
+  const nEff = Math.max(4, cal.n / 6);    // the samples overlap six to one
+  const resid = Math.max(0, syy - b1 * s1y - b2 * s2y) / (nEff - 3);
+  const t1 = v1 > 0 && resid > 0 ? b1 / Math.sqrt(resid * v1) : 0, t2 = v2 > 0 && resid > 0 ? b2 / Math.sqrt(resid * v2) : 0;
+  return {b1, b2, t1, t2, flowOn: b1 > 0 && t1 >= 3, leadOn: b2 > 0 && t2 >= 3, minutes: cal.n * 5 / 60};
 }
-function leanAt(sec, sig) {               // dollars spot is expected to move over the next 30 s, or 0
-  const st = leanStats();
-  if (!st || !st.on) return 0;
-  const f = flowSum(30, sec), net = (f.b + f.pb - f.s - f.ps) / 1e6;
-  const cap = sig != null ? 2 * sig * Math.sqrt(30) : 0;
-  return Math.max(-cap, Math.min(cap, st.beta * net));
+// The lean, in dollars over the next NOW_H seconds, from the last 30 s of net flow ($M) and the perp's
+// gap to spot ($). The perp slope is held at one at most: spot closes a gap, it does not overshoot it.
+function nowcast(net, gap, vols) {
+  const st = calStats();
+  if (!st || !(st.flowOn || st.leadOn)) return 0;
+  let lean = (st.flowOn ? st.b1 * net : 0) + (st.leadOn && gap != null ? Math.min(1, st.b2) * gap : 0);
+  const cap = vols ? 2 * vols.s * Math.sqrt(NOW_H) : 0;
+  return Math.max(-cap, Math.min(cap, lean));
 }
+function nowcastAt(sec, vols) {           // the lean as it stood at a past second, for the chance history
+  const f = flowSum(NOW_H, sec), x = sampleAt(sec), l = leadSamples.get(sec);
+  return nowcast((f.b + f.pb - f.s - f.ps) / 1e6, x != null && l != null ? l - x : null, vols);
+}
+const driftsOf = lean => lean ? [[lean, NOW_H]] : [];
 // Words for the last 30 s of flow: by how much buying outweighs selling, and whether that is a lot.
 function flowWords(f) {
   const net = f.b + f.pb - f.s - f.ps, gross = f.b + f.pb + f.s + f.ps;
@@ -646,19 +685,29 @@ async function fetchBackfill(force, backTo) {
   } catch (e) { backfillNote = "Coinbase trade list not reachable"; }
   backfilling = false;
 }
-function sigma() {              // dollars per sqrt(second); a blend of the quick and the slower estimate
+function sigmas() {             // dollars per sqrt(second): the quick (2-min) and the slow (15-min) estimate
   if (volN < 30) return null;
-  const vars = vol.map(([a, w]) => a / w);
-  return Math.max(0.5, Math.sqrt(vars.reduce((x, y) => x + y, 0) / vars.length));
+  const [s, l] = vol.map(([a, w]) => Math.max(0.5, Math.sqrt(a / w)));
+  return {s, l};
+}
+function sigma() {              // one number for the readouts and the sharp-move test
+  const v = sigmas();
+  return v ? Math.sqrt((v.s * v.s + v.l * v.l) / 2) : null;
 }
 
 // ---------------------------------------------------------------- level: basis to the official index
-let basis = 0, basisSrc = "raw", basisAt = 0;     // official index minus exchange consensus
+let basis = 0, basisSrc = "raw", basisAt = 0, basisSd = null;   // official index minus exchange consensus, and how steady that is
 const synced = store.get("basis");
-if (synced && Date.now() - synced.at < 6 * 3600 * 1000) { basis = synced.value; basisSrc = synced.via || "synced"; basisAt = synced.at; }
-function setBasis(value, via) {
-  basis = value; basisSrc = via; basisAt = Date.now();
-  store.set("basis", {value, at: basisAt, via});
+if (synced && Date.now() - synced.at < 6 * 3600 * 1000) { basis = synced.value; basisSrc = synced.via || "synced"; basisAt = synced.at; basisSd = synced.sd || null; }
+function setBasis(value, via, sd) {
+  basis = value; basisSrc = via; basisAt = Date.now(); basisSd = sd || null;
+  store.set("basis", {value, at: basisAt, via, sd: basisSd});
+}
+// How far the page's level may be from the official index, in dollars: measured against Kalshi's
+// official average when that is in hand, otherwise a fixed allowance by how the level was set.
+function levelSd() {
+  if (basisSrc === "kalshi") return Math.min(6, Math.max(0.5, basisSd || 1.5));
+  return basisSrc === "target" ? 2.5 : basisSrc === "synced" ? 3 : 6;
 }
 
 // ---------------------------------------------------------------- Kalshi, if the browser may reach it
@@ -727,7 +776,10 @@ async function pollKalshi() {
       // The feed is the official 60-s average. Its distance from this page's own average is the basis.
       const diffs = [];
       for (const [s, v] of kalshi.feed) if (s > now - 180) { const a = avgAt(s); if (a != null) diffs.push(v - a); }
-      if (diffs.length >= 20) setBasis(median(diffs), "kalshi");
+      if (diffs.length >= 20) {
+        const med = median(diffs), spread = 1.4826 * median(diffs.map(d => Math.abs(d - med)));   // a robust standard deviation
+        setBasis(med, "kalshi", spread);
+      }
       for (const k of kalshi.feed.keys()) if (k < now - 5000) kalshi.feed.delete(k);
     }
   }
@@ -775,19 +827,33 @@ function target(open, mk) {
 // ---------------------------------------------------------------- model
 // The settlement value is the mean of the index at the 60 whole seconds before the close.
 // Seconds already past are known; the rest follow a driftless random walk from spot.
-function project(now, close, x, sig, lean) {
+// `vols` is {s, l}: the quick and the slow volatility estimate. The quick one holds for the next
+// minutes and gives way to the slow one (VOL_TAU), since a burst or a lull rarely lasts a quarter
+// hour. `drifts` is a list of [dollars, seconds]: a lean that plays out over that many seconds.
+const VOL_TAU = 180;
+function project(now, close, x, vols, drifts) {
   let known = 0; const ahead = [];
   for (let s = close - SETTLE; s < close; s++) {
     if (s <= now) { const p = sampleAt(s); known += p != null ? p + basis : x; }
     else ahead.push(s - now);
   }
   const m = ahead.length;
-  let walk = 0, leanSum = 0;
-  ahead.forEach((d, j) => { walk += d * (2 * (m - (j + 1)) + 1); leanSum += Math.min(1, d / 30); });   // the lean plays out over 30 s
-  const mean = (known + m * x + (lean || 0) * leanSum) / SETTLE;
-  const levelSd = basisSrc === "kalshi" ? 1.5 : basisSrc === "target" ? 2.5 : basisSrc === "synced" ? 3 : 6;
-  const sd = Math.sqrt(sig * sig * walk / (SETTLE * SETTLE) + levelSd * levelSd);
-  return {mean, sd};
+  // Variance of the sum of the future values: the step the index takes `u` seconds from now feeds
+  // every settlement second after it, so it counts (how many of those there are) squared.
+  let variance = 0;
+  if (m) {
+    const vs = vols.s * vols.s, vl = vols.l * vols.l, dmax = ahead[m - 1];
+    let c = m, j = 0;
+    for (let u = 1; u <= dmax; u++) {
+      while (j < m && ahead[j] < u - 0.5) { j++; c--; }
+      variance += (vl + (vs - vl) * Math.exp(-u / VOL_TAU)) * c * c;
+    }
+  }
+  let mean = known + m * x;
+  for (const [amount, horizon] of drifts || []) for (const d of ahead) mean += amount * Math.min(1, d / horizon);
+  mean /= SETTLE;
+  const lv = levelSd();
+  return {mean, sd: Math.sqrt(variance / (SETTLE * SETTLE) + lv * lv)};
 }
 
 // ---------------------------------------------------------------- drawing
@@ -961,7 +1027,7 @@ const pHist = new Map();
 // The chance of Up for seconds the page did not see live, worked out from the backfilled prices
 // with today's volatility, so the chart covers the window from its open.
 let probFilledAt = 0;
-function fillProbHistory(open, now, close, tgt, sig) {
+function fillProbHistory(open, now, close, tgt, vols) {
   const sec = Math.floor(now);
   if (sec - probFilledAt < 5) return;
   probFilledAt = sec;
@@ -969,7 +1035,7 @@ function fillProbHistory(open, now, close, tgt, sig) {
     if (pHist.has(s)) continue;
     const x = sampleAt(s);
     if (x == null) continue;
-    const pr = project(s + 0.5, close, x + basis, sig, leanAt(s, sig));
+    const pr = project(s + 0.5, close, x + basis, vols, driftsOf(nowcastAt(s, vols)));
     pHist.set(s, chance(pr.mean, pr.sd, tgt));
   }
 }
@@ -1049,15 +1115,137 @@ function drawProb(open, close, now) {
 }
 
 // ---------------------------------------------------------------- page
-function verdict(el, fair, priceCents) {     // returns the edge in cents, if there is a price and a chance
+// The model's own doubt, as a band around the chance: volatility 30% lower or 50% higher, the lean
+// on or off, and spot one standard deviation of a 10-second move against you while the order is
+// placed. "Buy" has to clear the fee and 3c at the bad end of that band; "thin" clears only the
+// middle; "no" does not clear the middle.
+function chanceBand(now, close, x, tgt, vols, drifts) {
+  let lo = 1, hi = 0;
+  const adverse = vols.s * Math.sqrt(10);
+  for (const k of [0.7, 1, 1.5]) for (const dr of drifts.length ? [drifts, []] : [[]]) for (const shift of [-adverse, 0, adverse]) {
+    const pr = project(now, close, x + shift, {s: vols.s * k, l: vols.l * k}, dr);
+    const p = chance(pr.mean, pr.sd, tgt);
+    if (p < lo) lo = p;
+    if (p > hi) hi = p;
+  }
+  return {lo, hi};
+}
+const cents = v => (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + "¢";
+let bankroll = store.get("bankroll") || 500;
+// Returns {edge, worst, call, n}: the edge in cents at the model's chance and at the bad end of its
+// band, the call, and a quarter-Kelly size on the worst case, capped at 2% of the bankroll.
+function verdict(el, fair, worstFair, priceCents) {
   if (!(priceCents > 0 && priceCents < 100)) { el.textContent = ""; el.className = "verdict"; return null; }
   if (fair == null) { el.textContent = "needs the chance of Up first"; el.className = "verdict meh"; return null; }
-  const edge = fair * 100 - priceCents - feeCents(priceCents / 100);
-  el.textContent = (edge >= 0 ? "+" : "−") + Math.abs(edge).toFixed(1) + "¢ a contract after fees"
-    + (edge >= 3 ? " · buy" : edge <= 0 ? " · no" : " · thin");
-  el.className = "verdict " + (edge >= 3 ? "good" : edge <= 0 ? "bad" : "meh");
-  return edge;
+  const fee = feeCents(priceCents / 100), edge = fair * 100 - priceCents - fee, worst = worstFair * 100 - priceCents - fee;
+  const call = worst >= 3 ? "buy" : edge <= 0 ? "no" : "thin";
+  let n = 0;
+  if (call === "buy") {
+    const c = (priceCents + fee) / 100, f = (worstFair - c) / (1 - c);        // Kelly for a contract paying $1
+    n = Math.floor(Math.min(0.02 * bankroll, 0.25 * f * bankroll) / c);
+  }
+  el.textContent = `${cents(edge)} a contract after fees · worst case ${cents(worst)} · ${call}`
+    + (n >= 1 ? ` ${n} (about $${(n * (priceCents + fee) / 100).toFixed(2)})` : "");
+  el.className = "verdict " + (call === "buy" ? "good" : call === "no" ? "bad" : "meh");
+  return {edge, worst, call, n};
 }
+// ---------------------------------------------------------------- record: does the model beat the market?
+// For each window: the model's chance and Kalshi's book at fixed points before the close, the first
+// buy call on each side, and the result: Kalshi's own once the market settles, the page's closing
+// average until then (only when it is clearly on one side). From those, a Brier score for the model
+// and one for the market at each checkpoint, and what the buy calls would have made.
+const CHECKS = [600, 300, 120, 60];
+const record = {windows: store.get("record") || [], cur: null};
+function saveRecord() {
+  if (record.windows.length > 300) record.windows.splice(0, record.windows.length - 300);
+  store.set("record", record.windows);
+}
+function keepRecord(mk, close, left, tgt, p, km, vUp, vDown, upC, downC, typed) {
+  let r = record.cur;
+  if (!r || r.mk !== mk) {
+    if (r) settleWindow(r);
+    r = record.windows.find(w => w.mk === mk);
+    if (!r) { r = {mk, close, tgt: null, checks: {}, buys: [], result: null, src: null, closeAvg: null}; record.windows.push(r); }
+    record.cur = r;
+  }
+  if (tgt != null) r.tgt = tgt;
+  // a checkpoint waits up to 5 s for a Kalshi quote, so the market is scored on the same moment
+  if (p != null) for (const c of CHECKS) if (left <= c && left > c - 20 && !r.checks[c] && (km || left <= c - 5)) {
+    r.checks[c] = {p: +p.toFixed(3), ask: km ? km.ask : null, bid: km ? km.bid : null};
+    saveRecord();
+  }
+  for (const [side, v, price] of [["Up", vUp, upC], ["Down", vDown, downC]]) {
+    if (v && v.call === "buy" && left > SETTLE && price > 0 && !r.buys.some(b => b.side === side)) {
+      r.buys.push({side, price, p: +(side === "Up" ? p : 1 - p).toFixed(3), worst: +v.worst.toFixed(1), left: Math.round(left), typed: !!typed, n: v.n});
+      saveRecord();
+    }
+  }
+}
+function settleWindow(r) {
+  const a = avgAt(r.close - 1);
+  if (a != null) r.closeAvg = +(a + basis).toFixed(2);
+  if (r.tgt != null && r.closeAvg != null && Math.abs(r.closeAvg - r.tgt) >= 2) { r.result = r.closeAvg >= r.tgt ? "yes" : "no"; r.src = "page"; }
+  saveRecord();
+  for (const delay of [45000, 150000, 600000]) setTimeout(() => settleOfficial(r), delay);
+}
+async function settleOfficial(r) {                 // Kalshi's result, usually there within a minute or two of the close
+  if (r.src === "kalshi") return;
+  const d = await kalshiGet("/markets/" + r.mk);
+  const m = d && d.market, res = m && (m.result === "yes" || m.result === "no") ? m.result : null;
+  if (res) { r.result = res; r.src = "kalshi"; if (+m.floor_strike > 0) r.tgt = +m.floor_strike; saveRecord(); }
+}
+// Windows left unsettled by an earlier session: ask Kalshi once, a few at a time.
+record.windows.filter(w => w.src !== "kalshi" && Date.now() / 1000 - w.close > 90).slice(-20)
+  .forEach((w, i) => setTimeout(() => settleOfficial(w), 8000 + i * 1500));
+function scoreRecord() {
+  const settled = record.windows.filter(w => w.result);
+  const brier = c => {                              // model against the market's mid, where both were seen
+    let n = 0, sm = 0, sk = 0;
+    for (const w of settled) {
+      const k = w.checks[c];
+      if (!k || k.ask == null || k.bid == null) continue;
+      const y = w.result === "yes" ? 1 : 0, mid = (k.ask + k.bid) / 2;
+      n++; sm += (k.p - y) ** 2; sk += (mid - y) ** 2;
+    }
+    return n ? {n, model: sm / n, market: sk / n} : null;
+  };
+  const buys = [];
+  for (const w of settled) for (const b of w.buys) {
+    const y = w.result === "yes", won = b.side === "Up" ? y : !y;
+    buys.push(Object.assign({won, pnl: (won ? 100 - b.price : -b.price) - feeCents(b.price / 100), mk: w.mk, close: w.close}, b));
+  }
+  return {settled: settled.length, total: record.windows.length, briers: Object.fromEntries(CHECKS.map(c => [c, brier(c)])), buys};
+}
+function recordLine() {
+  const s = scoreRecord();
+  if (!s.settled) return `Record: ${s.total} window${s.total === 1 ? "" : "s"} watched, none settled yet. The page scores its chance against Kalshi's price in every window it watches.`;
+  const b = s.briers[300] || s.briers[120] || s.briers[60] || s.briers[600];
+  const at = s.briers[300] ? "5 min" : s.briers[120] ? "2 min" : s.briers[60] ? "1 min" : "10 min";
+  const wins = s.buys.filter(x => x.won).length, avg = s.buys.length ? s.buys.reduce((a, x) => a + x.pnl, 0) / s.buys.length : 0;
+  return `Record: ${s.settled} settled` + (b ? ` · at ${at} to go the model's Brier is ${b.model.toFixed(3)} vs the market's ${b.market.toFixed(3)} over ${b.n} (lower is better; ${b.model < b.market ? "model ahead" : "market ahead"})` : " · no checkpoint with a Kalshi price yet")
+    + (s.buys.length ? ` · buy calls ${s.buys.length}: ${wins} right, ${cents(avg)} a contract on average` : " · no buy calls yet");
+}
+function recordText() {
+  const s = scoreRecord(), lines = [];
+  for (const c of CHECKS) { const b = s.briers[c]; lines.push(`${String(c / 60).padStart(2)} min to go: ` + (b ? `model ${b.model.toFixed(3)} vs market ${b.market.toFixed(3)} over ${b.n} windows` : "nothing scored yet")); }
+  lines.push(`Brier score: mean squared error of the chance, 0 is perfect, 0.25 is a coin flip. Settled ${s.settled} of ${s.total} watched. Buy calls are scored as one contract held to settlement, fees off.`);
+  lines.push("");
+  for (const w of record.windows.slice(-25).reverse()) {
+    const when = ET_CLOCK.format(new Date((w.close - WINDOW) * 1000));
+    const res = w.result ? `${w.result === "yes" ? "Up" : "Down"} (${w.src})` : "open";
+    const ch = [300, 60].map(c => { const k = w.checks[c]; return k ? `${c / 60} min: model ${Math.round(k.p * 100)}%` + (k.ask != null ? ` mkt ${Math.round((k.ask + k.bid) * 50)}¢` : "") : null; }).filter(Boolean).join(" · ");
+    const buys = w.buys.map(b => { const sc = s.buys.find(x => x.mk === w.mk && x.side === b.side); return `buy ${b.side} ${b.price}¢ at ${Math.floor(b.left / 60)}:${String(b.left % 60).padStart(2, "0")}` + (sc ? ` → ${cents(sc.pnl)}` : ""); }).join(", ");
+    lines.push(`${when}  target ${w.tgt != null ? money(w.tgt) : "?"}  ${res}` + (w.closeAvg != null ? `  close ${money(w.closeAvg)}` : "") + (ch ? `\n     ${ch}` : "") + (buys ? `\n     ${buys}` : ""));
+  }
+  return lines.join("\n");
+}
+$("recClear").addEventListener("click", () => { record.windows.length = 0; record.cur = null; saveRecord(); $("recOut").textContent = recordText(); $("recLine").textContent = recordLine(); });
+$("bankSet").addEventListener("click", () => {
+  const v = num($("bankIn").value);
+  if (v && v >= 10) { bankroll = v; store.set("bankroll", v); $("bankIn").value = ""; $("bankIn").placeholder = `Bankroll for sizing, $ (now ${v})`; }
+});
+if (bankroll !== 500) $("bankIn").placeholder = `Bankroll for sizing, $ (now ${bankroll})`;
+
 // ---------------------------------------------------------------- sound
 // Browsers only play audio after a tap, so the Sound button creates the audio context, and the
 // alerts are short tone sequences: nothing to download, nothing to keep playing.
@@ -1133,16 +1321,20 @@ function render() {
   $("lvTgt").textContent = money(tgt);
   $("lvTgtNote").textContent = tgtSrc;
 
-  let proj = null, p = null;
-  const lean = sig != null ? leanAt(sec, sig) : 0;
-  if (x != null && tgt != null && sig != null) {
-    proj = project(now, close, x, sig, lean);
+  let proj = null, p = null, band = null;
+  const vols = sigmas(), f30 = flowSum(NOW_H, now);
+  const lean = vols ? nowcast((f30.b + f30.pb - f30.s - f30.ps) / 1e6, lead != null && spot != null ? lead - spot : null, vols) : 0;
+  if (x != null && tgt != null && vols) {
+    const drifts = driftsOf(lean);
+    proj = project(now, close, x, vols, drifts);
     p = chance(proj.mean, proj.sd, tgt);
+    band = chanceBand(now, close, x, tgt, vols, drifts);
     pHist.set(Math.floor(now), p);
-    fillProbHistory(open, now, close, tgt, sig);
+    fillProbHistory(open, now, close, tgt, vols);
   }
   $("lvProj").textContent = proj ? money(proj.mean) : "–";
-  $("lvProjNote").textContent = proj ? `±${proj.sd.toFixed(0)} (1 sd) · vol $${sig.toFixed(1)}/√s` + (lean ? ` · flow lean ${signed(lean)}` : "") : sig == null ? "measuring volatility…" : "needs the target";
+  $("lvProjNote").textContent = proj ? `±${proj.sd.toFixed(0)} (1 sd) · vol $${vols.s.toFixed(1)} now, $${vols.l.toFixed(1)}/√s over 15 min` + (lean ? ` · lean ${signed(lean)}` : "")
+    : vols == null ? "measuring volatility…" : "needs the target";
 
   const fw = flowWords(flowSum(30, now));
   const big = $("pBig");
@@ -1155,8 +1347,8 @@ function render() {
     big.textContent = Math.min(99, Math.max(1, Math.round(p * 100))) + "%"; big.className = "p " + (p >= 0.5 ? "up" : "down");
     $("pBar").style.width = (p * 100).toFixed(1) + "%";
     const c = Math.min(99, Math.max(1, Math.round(p * 100)));
-    $("fairUp").textContent = `Up ${c}¢`;
-    $("fairDown").textContent = `Down ${100 - c}¢`;
+    $("fairUp").textContent = `Up ${c}¢ (${Math.round(band.lo * 100)}–${Math.round(band.hi * 100)})`;
+    $("fairDown").textContent = `Down ${100 - c}¢ (${100 - Math.round(band.hi * 100)}–${100 - Math.round(band.lo * 100)})`;
     const gap = proj.mean - tgt;
     // In a sharp move the flow says whether the move has weight behind it or is a sweep of thin books.
     const withFlow = fw && fw.side ? (fw.side === Math.sign(move10) ? " with " + fw.text + " behind it" : " against " + fw.text) : fw ? " on balanced flow" : "";
@@ -1175,15 +1367,17 @@ function render() {
   $("rhDown").placeholder = downC != null ? String(downC) : "type";
   $("edgeHead").textContent = km ? `Kalshi's book now: Up ${upC}¢ · Down ${downC}¢ (Robinhood sells at these). Type over them if Robinhood differs.`
     : "Type what Robinhood's buttons say to see your edge";
-  const edgeUp = verdict($("vUp"), p, $("rhUp").value ? parseFloat($("rhUp").value) : upC);
-  const edgeDown = verdict($("vDown"), p == null ? null : 1 - p, $("rhDown").value ? parseFloat($("rhDown").value) : downC);
+  const typedUp = $("rhUp").value ? parseFloat($("rhUp").value) : null, typedDown = $("rhDown").value ? parseFloat($("rhDown").value) : null;
+  const vUp = verdict($("vUp"), p, band && band.lo, typedUp != null ? typedUp : upC);
+  const vDown = verdict($("vDown"), p == null ? null : 1 - p, band && 1 - band.hi, typedDown != null ? typedDown : downC);
+  keepRecord(mk, close, left, tgt, p, km, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, typedUp != null || typedDown != null);
 
-  // sounds: a sharp move as it starts, an edge of 3c on Kalshi's own prices once it has held for
-  // a few seconds, and the start of the settlement minute
+  // sounds: a sharp move as it starts, a buy call on Kalshi's own prices once it has held for a few
+  // seconds, and the start of the settlement minute
   if (sharp && !wasSharp) alertOnce("sharp", 20000, move10 > 0 ? [[520, 90], [780, 150]] : [[780, 90], [520, 150]]);
   wasSharp = sharp;
-  // The edge sound plays once when an edge appears, then only after the edge has been gone for half a minute.
-  const liveEdge = km && !$("rhUp").value && !$("rhDown").value && left > SETTLE && Math.max(edgeUp || 0, edgeDown || 0) >= 3;
+  // The edge sound plays once when a buy call appears, then only after it has been gone for half a minute.
+  const liveEdge = km && typedUp == null && typedDown == null && left > SETTLE && ((vUp && vUp.call === "buy") || (vDown && vDown.call === "buy"));
   if (liveEdge) {
     if (!edgeSince) edgeSince = nowMs;
     else if (nowMs - edgeSince >= 3000 && edgeArmed) { edgeArmed = false; alertOnce("edge", 60000, [[660, 80], [660, 80], [880, 180]]); }
@@ -1197,7 +1391,11 @@ function render() {
   lastLeft = left;
 
   // sources (once a second: rebuilding these is the costliest DOM work on the page)
-  if (nowMs - chipsAt >= 1000) { chipsAt = nowMs; renderChips(nowMs, mk); renderFlowText(nowMs, now); }
+  if (nowMs - chipsAt >= 1000) {
+    chipsAt = nowMs; renderChips(nowMs, mk); renderFlowText(nowMs, now);
+    const rl = recordLine(); if (rl !== $("recLine").textContent) $("recLine").textContent = rl;
+    if ($("recordBox").open) { const rt = recordText(); if (rt !== $("recOut").textContent) $("recOut").textContent = rt; }
+  }
   if (nowMs - chartsAt >= 200) { chartsAt = nowMs; drawMain(open, close, now, tgt, proj); drawFlow(open, close, now); drawProb(open, close, now); }
   if ($("diag").open && Math.floor(now) !== diagAt) { diagAt = Math.floor(now); $("diagOut").textContent = diagnostics(now, open); }
 }
@@ -1212,9 +1410,11 @@ function renderFlowText(nowMs, now) {
     return `${label}: <span class="${cls}">${signedUsd(net)}</span>`;
   };
   const el = $("flowLine");
-  const st = leanStats(), lean = leanAt(Math.floor(now), sigma());
-  const leanTxt = !st ? `lean: calibrating, ${Math.round(cal.n * 5 / 60)} of 10 min` : !st.on ? "lean: none measurable (flow has not led price lately)"
-    : `lean next 30 s: <span class="${lean > 0 ? "u" : lean < 0 ? "d" : ""}">${signed(lean)}</span> (${st.beta.toFixed(0)} $ per $1M, ${st.minutes < 90 ? Math.round(st.minutes) + " min" : (st.minutes / 60).toFixed(1) + " h"} of data)`;
+  const st = calStats(), vols = sigmas();
+  const lead = leadPrice(), lean = vols ? nowcast((f30.b + f30.pb - f30.s - f30.ps) / 1e6, lead != null && spot != null ? lead - spot : null, vols) : 0;
+  const dataFor = st ? (st.minutes < 90 ? Math.round(st.minutes) + " min" : (st.minutes / 60).toFixed(1) + " h") : "";
+  const leanTxt = !st ? `lean: calibrating, ${Math.round(cal.n * 5 / 60)} of 10 min` : !(st.flowOn || st.leadOn) ? `lean: none measurable yet (neither flow nor the perp has led price, ${dataFor})`
+    : `lean next 30 s: <span class="${lean > 0 ? "u" : lean < 0 ? "d" : ""}">${signed(lean)}</span> (${[st.flowOn ? `flow ${st.b1.toFixed(0)} $ per $1M` : "", st.leadOn ? `perp gap ×${Math.min(1, st.b2).toFixed(2)}` : ""].filter(Boolean).join(", ")}, ${dataFor})`;
   const html = !anyTrades ? "Order flow: " + (Object.keys(tstat).length ? "no trades in the last minute" : "waiting for trades…")
     : `${span(f30, "Last 30 s")} (spot ${signedUsd(f30.b - f30.s)} · perp ${signedUsd(f30.pb - f30.ps)}) · ${span(f60, "60 s")}`;
   if (html !== el.dataset.html) { el.dataset.html = html; el.innerHTML = html; }
@@ -1282,8 +1482,9 @@ function diagnostics(now, open) {
   }
   const f = flowSum(60, now);
   lines.push(`flow 60 s: spot bought ${fmtUsd(f.b)} sold ${fmtUsd(f.s)} · perp bought ${fmtUsd(f.pb)} sold ${fmtUsd(f.ps)} · liquidations kept ${liqs.length} · big prints ${whales.length} · sound ${snd.on ? "on" : "off"}`);
-  const st = leanStats();
-  lines.push(`flow lean: samples ${cal.n.toFixed(0)}` + (st ? ` · slope ${st.beta.toFixed(1)} $ per $1M · t ${st.t.toFixed(1)} · ${st.on ? "applied" : "not applied"}` : " · needs 120"));
+  const st = calStats();
+  lines.push(`nowcast: samples ${cal.n.toFixed(0)}` + (st ? ` · flow ${st.b1.toFixed(1)} $ per $1M (t ${st.t1.toFixed(1)}, ${st.flowOn ? "on" : "off"}) · perp gap ×${st.b2.toFixed(2)} (t ${st.t2.toFixed(1)}, ${st.leadOn ? "on" : "off"})` : " · needs 120")
+    + ` · level sd ${levelSd().toFixed(1)}` + (basisSd != null ? ` (measured ${basisSd.toFixed(2)})` : "") + ` · bankroll $${bankroll}`);
   return lines.join("\n");
 }
 
