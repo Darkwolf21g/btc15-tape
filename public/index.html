@@ -74,15 +74,24 @@ header { display: flex; align-items: flex-end; justify-content: space-between; g
 
 .chart { position: relative; margin-top: 14px; }
 canvas { display: block; width: 100%; }
-#main { height: 300px; } #prob { height: 190px; }
+#main { height: 300px; } #prob { height: 190px; } #flow { height: 110px; }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--dim); margin-top: 6px; }
 .legend i { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 5px; border-radius: 2px; }
+.flowline { font-size: 12px; margin-top: 4px; }
+.flowline:empty { display: none; }
+.flowline .u { color: var(--up); } .flowline .d { color: var(--down); }
+.whales { display: grid; gap: 3px; margin-top: 6px; font-size: 12px; color: var(--dim); }
+.whales b { font-weight: 500; } .whales b.buy { color: var(--up); } .whales b.sell { color: var(--down); }
 
-.sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+.sources { display: grid; gap: 6px; margin-top: 14px; }
+.sg { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.grp { font: 600 11px/1 var(--display); letter-spacing: .08em; text-transform: uppercase; color: var(--dim); min-width: 92px; }
 .chip { font-size: 11px; padding: 4px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim); display: flex; gap: 6px; align-items: center; }
 .chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #44506c; }
 .chip.ok::before { background: var(--up); } .chip.slow::before { background: var(--warn); } .chip.off::before { background: var(--down); }
 .chip.ok { color: var(--ink); }
+button.mini { padding: 5px 9px; font-size: 12px; justify-self: start; }
+button.on { border-color: var(--up); color: var(--up); }
 
 details { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
 summary { cursor: pointer; font: 600 14px var(--display); letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
@@ -103,6 +112,7 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
     <span class="label">BTC 15 min · window</span>
     <b id="winLabel">–</b>
     <small id="ticker">–</small>
+    <button id="snd" type="button" class="mini" title="Beeps on a sharp move, a 3¢ edge, and one minute to go">Sound off</button>
   </div>
   <div class="clock" id="clock" aria-live="off">–:––</div>
 </header>
@@ -147,6 +157,17 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
     <span id="leadLegend" hidden><i style="background:var(--lead)"></i>Perpetual future (Hyperliquid), often first to move</span>
   </div>
 </div>
+<div class="chart"><canvas id="flow" aria-label="Order flow this window"></canvas>
+  <div class="flowline" id="flowLine">Order flow: waiting for trades…</div>
+  <div class="flowline" id="flowLine2"></div>
+  <div class="legend">
+    <span><i style="background:var(--up)"></i>Market buys minus market sells, in dollars, per bar</span>
+    <span><i style="background:var(--down)"></i>Net selling</span>
+    <span><i style="background:var(--ink)"></i>Running total since the open</span>
+    <span>▼ longs liquidated (forced selling) · ▲ shorts liquidated (forced buying)</span>
+  </div>
+  <div class="whales" id="whales" hidden></div>
+</div>
 <div class="chart"><canvas id="prob" aria-label="Chance of Up through the window"></canvas>
   <div class="legend"><span><i style="background:var(--up)"></i>Chance of Up, filled green when Up is favoured, orange when Down is</span><span id="mktLegend" hidden><i style="background:var(--ink)"></i>Up price on Kalshi (what you would pay), with its bid-ask band</span></div>
 </div>
@@ -181,7 +202,10 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
       <p><b>Relay.</b> Browsers are not allowed to read Kalshi directly. A small relay of your own (a free Cloudflare Worker; the code is in the README) lets this page read the exact target, the official 60-second average and Kalshi's own Up price. Paste its address here once.</p>
       <p><b>Fees.</b> The edge figures take off Robinhood's commission and Kalshi's 1¢ fee, about 2¢ a contract in the middle of the range.</p>
       <p><b>Sharp moves.</b> No model predicts a sudden jump. The chance allows for them with a fat-tailed curve, so it never shows more than about 98% however calm the last minutes were, and the "Sharp move" note appears when spot has just moved several standard deviations in ten seconds. In a sharp move, spot here leads Robinhood's number by about half a minute, and the projection shows where the closing average lands if the price holds.</p>
-      <p>The chance shown is a model: a random walk from spot with recently measured volatility and fat tails. It is an estimate, not advice.</p>
+      <p><b>Order flow.</b> Every trade on the five index exchanges and the Hyperliquid perpetual is sorted by who crossed the spread: a market buy counts as buying, a market sell as selling. The bars are the difference, in dollars, and the line is the running total since the open. A move with heavy flow behind it tends to carry on; a move on balanced flow is more often a sweep that fades. Prints of $200k or more are listed under the chart.</p>
+      <p><b>Flow lean.</b> The page also measures, as it runs, how far spot has tended to move in the 30 seconds after a stretch of net buying or selling. Once that relation is clear (about ten minutes of data at the least, usually more) the projection leans the way the flow points, by that measured amount and never by more than two standard deviations of a 30-second move. The flow line says whether the lean is on. It is forgotten slowly, so what it learnt this evening still counts tomorrow morning. Liquidations come from Bybit, OKX, Deribit, BitMEX and Binance (Binance refuses US connections): longs being liquidated is forced selling, shorts being liquidated is forced buying, and a run of them is what makes a move overshoot.</p>
+      <p><b>Sound.</b> Tap Sound once (browsers will not play anything until you do). Then: two rising notes for a sharp move up, two falling for down; three notes when Kalshi's own price leaves a 3¢ edge for Up or Down; one low note at one minute to go. On an iPhone the ring/silent switch must be on ring.</p>
+      <p>The chance shown is a model: a random walk from spot with recently measured volatility and fat tails. The flow and the liquidations are shown, not modelled. It is an estimate, not advice.</p>
     </div>
   </div>
 </details>
@@ -195,6 +219,8 @@ const ALIVE_MS = 20000;         // an exchange that has sent nothing (not even a
 const FROZEN_MS = 120000;       // a quote unchanged this long is not trusted, however alive the socket looks
 const MAX_DEV = 0.0005, MIN_LIVE = 2;
 const VOL_HALFLIVES = [120, 900], VOL_STEP = 5;
+const WHALE_USD = 200000;       // a single spot trade this large is listed under the flow chart (perp trades: 2.5x)
+const FLOW_SPANS = [30, 60];    // seconds behind now for the flow readouts
 
 // ---------------------------------------------------------------- small helpers
 const $ = id => document.getElementById(id);
@@ -229,42 +255,120 @@ function feeCents(price) {            // Robinhood commission (10% x p x (1-p), 
 }
 
 // ---------------------------------------------------------------- exchanges (all BRTI constituents)
+// Each message handler gets: the message, q(bid, ask) for a quote, the socket, a scratch object,
+// tr(price, size, takerBought, timeMs) for a trade and lq(price, dollars, longLiquidated, timeMs)
+// for a liquidation. Trade sides follow each exchange's own documentation (checked against the
+// AGGR project's connectors): "taker bought" means a market buy lifted the ask.
 const VENUES = {
   coinbase: {name: "Coinbase", url: "wss://ws-feed.exchange.coinbase.com",
-    open: ws => ws.send(JSON.stringify({type: "subscribe", product_ids: ["BTC-USD"], channels: ["ticker", "heartbeat"]})),
-    msg: (d, q) => { if (d.type === "ticker" && d.best_bid) q(+d.best_bid, +d.best_ask); }},
+    open: ws => ws.send(JSON.stringify({type: "subscribe", product_ids: ["BTC-USD"], channels: ["ticker", "heartbeat", "matches"]})),
+    msg: (d, q, ws, st, tr) => {
+      if (d.type === "ticker" && d.best_bid) q(+d.best_bid, +d.best_ask);
+      // In a match, `side` is the maker's: a sell-side match is an up-tick, so the taker bought.
+      else if (d.type === "match" && d.size) tr(+d.price, +d.size, d.side === "sell", Date.parse(d.time));
+    }},
   kraken: {name: "Kraken", url: "wss://ws.kraken.com/v2",
-    open: ws => ws.send(JSON.stringify({method: "subscribe", params: {channel: "ticker", symbol: ["BTC/USD"], event_trigger: "bbo"}})),
-    msg: (d, q) => { if (d.channel === "ticker" && Array.isArray(d.data)) for (const r of d.data) if (r.bid) q(+r.bid, +r.ask); }},
+    open: ws => {
+      ws.send(JSON.stringify({method: "subscribe", params: {channel: "ticker", symbol: ["BTC/USD"], event_trigger: "bbo"}}));
+      ws.send(JSON.stringify({method: "subscribe", params: {channel: "trade", symbol: ["BTC/USD"], snapshot: false}}));
+    },
+    msg: (d, q, ws, st, tr) => {
+      if (!Array.isArray(d.data)) return;
+      if (d.channel === "ticker") { for (const r of d.data) if (r.bid) q(+r.bid, +r.ask); }
+      else if (d.channel === "trade" && d.type === "update") for (const r of d.data) tr(+r.price, +r.qty, r.side === "buy", Date.parse(r.timestamp));   // side: the taker's
+    }},
   bitstamp: {name: "Bitstamp", url: "wss://ws.bitstamp.net",
-    open: ws => ws.send(JSON.stringify({event: "bts:subscribe", data: {channel: "order_book_btcusd"}})),
+    open: ws => {
+      ws.send(JSON.stringify({event: "bts:subscribe", data: {channel: "order_book_btcusd"}}));
+      ws.send(JSON.stringify({event: "bts:subscribe", data: {channel: "live_trades_btcusd"}}));
+    },
     ping: ws => ws.send(JSON.stringify({event: "bts:heartbeat"})),
-    msg: (d, q, ws) => {
+    msg: (d, q, ws, st, tr) => {
       if (d.event === "bts:request_reconnect") ws.close();
       else if (d.event === "data" && d.data && d.data.bids && d.data.bids.length && d.data.asks.length) q(+d.data.bids[0][0], +d.data.asks[0][0]);
+      else if (d.event === "trade" && d.data && d.data.price) tr(+d.data.price, +d.data.amount, +d.data.type === 0, +d.data.microtimestamp / 1000);   // type 0 buy, 1 sell
     }},
-  gemini: {name: "Gemini", url: "wss://api.gemini.com/v1/marketdata/BTCUSD?top_of_book=true&trades=false&heartbeat=true",
+  gemini: {name: "Gemini", url: "wss://api.gemini.com/v1/marketdata/BTCUSD?top_of_book=true&trades=true&heartbeat=true",
     open: () => {},
-    msg: (d, q, ws, st) => {
+    msg: (d, q, ws, st, tr) => {
       if (d.type !== "update" || !d.events) return;
-      for (const e of d.events) if (e.type === "change" && +e.remaining > 0) st[e.side] = +e.price;
+      for (const e of d.events) {
+        if (e.type === "change" && +e.remaining > 0) st[e.side] = +e.price;
+        else if (e.type === "trade" && e.price && d.timestampms) tr(+e.price, +e.amount, e.makerSide === "ask", +d.timestampms);   // the maker was the ask: the taker bought (the first, undated message is history)
+      }
       if (st.bid && st.ask) q(st.bid, st.ask);
     }},
   cryptocom: {name: "Crypto.com", url: "wss://stream.crypto.com/exchange/v1/market",
-    open: ws => setTimeout(() => { if (ws.readyState === 1) ws.send(JSON.stringify({id: 1, method: "subscribe", params: {channels: ["ticker.BTC_USD"]}, nonce: Date.now()})); }, 1000),
-    msg: (d, q, ws) => {
+    open: ws => setTimeout(() => { if (ws.readyState === 1) ws.send(JSON.stringify({id: 1, method: "subscribe", params: {channels: ["ticker.BTC_USD", "trade.BTC_USD"]}, nonce: Date.now()})); }, 1000),
+    msg: (d, q, ws, st, tr) => {
       if (d.method === "public/heartbeat") { ws.send(JSON.stringify({id: d.id, method: "public/respond-heartbeat"})); return; }
       const r = d.result;
-      if (r && r.channel === "ticker" && Array.isArray(r.data)) for (const x of r.data) if (x.b && x.k) q(+x.b, +x.k);
+      if (!r || !Array.isArray(r.data)) return;
+      if (r.channel === "ticker") { for (const x of r.data) if (x.b && x.k) q(+x.b, +x.k); }
+      else if (r.channel === "trade") for (const x of r.data) if (x.p && x.q) tr(+x.p, +x.q, String(x.s || x.side || "").toUpperCase() === "BUY", +x.t || 0);
     }},
   // Not part of the index. The perpetual future often moves a moment before spot, so it is drawn
-  // as a lead line and never used for the price itself.
+  // as a lead line and never used for the price itself. Its trades count as perp flow.
   hyperliquid: {name: "HL perp", lead: true, url: "wss://api.hyperliquid.xyz/ws",
-    open: ws => ws.send(JSON.stringify({method: "subscribe", subscription: {type: "bbo", coin: "BTC"}})),
+    open: ws => {
+      ws.send(JSON.stringify({method: "subscribe", subscription: {type: "bbo", coin: "BTC"}}));
+      ws.send(JSON.stringify({method: "subscribe", subscription: {type: "trades", coin: "BTC"}}));
+    },
     ping: ws => ws.send(JSON.stringify({method: "ping"})),
-    msg: (d, q) => {
-      const b = d && d.channel === "bbo" && d.data && d.data.bbo;
-      if (b && b[0] && b[1]) q(+b[0].px, +b[1].px);
+    msg: (d, q, ws, st, tr) => {
+      if (!d) return;
+      if (d.channel === "bbo") { const b = d.data && d.data.bbo; if (b && b[0] && b[1]) q(+b[0].px, +b[1].px); }
+      else if (d.channel === "trades" && Array.isArray(d.data)) for (const x of d.data) if (x.coin === "BTC") tr(+x.px, +x.sz, x.side === "B", +x.time || 0);
+    }},
+  // Liquidation feeds (derivatives venues, not part of the index). A `liq` venue never supplies a
+  // price; `pingEvery` keeps the socket provably alive between rare events; `quiet` venues send
+  // nothing between events and are not closed for silence.
+  bybit: {name: "Bybit", liq: true, url: "wss://stream.bybit.com/v5/public/linear", pingEvery: 15000,
+    open: ws => ws.send(JSON.stringify({op: "subscribe", args: ["allLiquidation.BTCUSDT", "allLiquidation.BTCPERP"]})),
+    ping: ws => ws.send(JSON.stringify({op: "ping"})),
+    msg: (d, q, ws, st, tr, lq) => {
+      if (typeof d.topic === "string" && d.topic.startsWith("allLiquidation.") && Array.isArray(d.data))
+        for (const x of d.data) lq(+x.p, +x.v * +x.p, x.S === "Buy", +x.T);       // "S: Buy" means a long position was liquidated
+    }},
+  okx: {name: "OKX", liq: true, url: "wss://ws.okx.com:8443/ws/v5/public", pingEvery: 15000,
+    open: ws => ws.send(JSON.stringify({op: "subscribe", args: [{channel: "liquidation-orders", instType: "SWAP"}]})),
+    ping: ws => ws.send("ping"),
+    msg: (d, q, ws, st, tr, lq) => {
+      if (!(d.arg && d.arg.channel === "liquidation-orders" && Array.isArray(d.data))) return;
+      const perContract = {"BTC-USDT-SWAP": px => 0.01 * px, "BTC-USDC-SWAP": px => 0.0001 * px, "BTC-USD-SWAP": () => 100};   // dollars
+      for (const inst of d.data) {
+        const per = perContract[inst.instId];
+        if (!per || !Array.isArray(inst.details)) continue;
+        for (const x of inst.details) lq(+x.bkPx, +x.sz * per(+x.bkPx), x.posSide === "long" || (x.posSide !== "short" && x.side === "sell"), +x.ts);
+      }
+    }},
+  deribit: {name: "Deribit", liq: true, url: "wss://www.deribit.com/ws/api/v2", pingEvery: 15000,
+    open: ws => ws.send(JSON.stringify({jsonrpc: "2.0", id: 1, method: "public/subscribe", params: {channels: ["trades.BTC-PERPETUAL.100ms"]}})),
+    ping: ws => ws.send(JSON.stringify({jsonrpc: "2.0", id: 2, method: "public/test"})),
+    msg: (d, q, ws, st, tr, lq) => {
+      const p = d.params;
+      if (!(d.method === "subscription" && p && Array.isArray(p.data))) return;
+      for (const x of p.data) if (x.liquidation) {
+        // "T": the taker was being liquidated, so the forced order went the trade's way; "M": the maker was.
+        const forcedSell = String(x.liquidation).includes("T") ? x.direction === "sell" : x.direction === "buy";
+        lq(+x.price, +x.amount, forcedSell, +x.timestamp);                       // amount is in dollars for the perpetual
+      }
+    }},
+  bitmex: {name: "BitMEX", liq: true, url: "wss://ws.bitmex.com/realtime?subscribe=liquidation:XBTUSD,liquidation:XBTUSDT", pingEvery: 15000,
+    open: () => {},
+    ping: ws => ws.send("ping"),
+    msg: (d, q, ws, st, tr, lq) => {
+      if (!(d.table === "liquidation" && d.action === "insert" && Array.isArray(d.data))) return;
+      for (const x of d.data) {
+        const usd = x.symbol === "XBTUSD" ? +x.leavesQty : x.symbol === "XBTUSDT" ? +x.leavesQty * 1e-6 * +x.price : 0;   // XBTUSD: one contract is one dollar
+        if (usd > 0) lq(+x.price, usd, x.side === "Sell", 0);
+      }
+    }},
+  binance: {name: "Binance", liq: true, quiet: true, url: "wss://fstream.binance.com/ws/btcusdt@forceOrder",
+    open: () => {},
+    msg: (d, q, ws, st, tr, lq) => {
+      const o = d.e === "forceOrder" && d.o;
+      if (o && o.s === "BTCUSDT") lq(+o.p, +o.q * +o.p, o.S === "SELL", +o.T);
     }},
 };
 const venue = {};   // name -> {mid, at (last message), quoteAt, changedAt, offset, n, state, ws, backoff, timer}
@@ -272,48 +376,55 @@ const venue = {};   // name -> {mid, at (last message), quoteAt, changedAt, offs
 // Exchanges only send a quote when it changes. In a quiet market that can be many seconds apart, so a
 // quote stays valid until a newer one arrives, as long as the connection is alive (heartbeats count).
 function connect(key) {
-  const v = venue[key] || (venue[key] = {mid: null, at: 0, quoteAt: 0, changedAt: 0, offset: 0, n: 0,
-                                         state: "connecting", backoff: 1000, timer: null});
+  const v = venue[key] || (venue[key] = {mid: null, at: 0, quoteAt: 0, changedAt: 0, offset: 0, n: 0, openedAt: 0,
+                                         state: "connecting", backoff: 1000, timer: null, fails: 0, raw: "", rawAt: 0, pingAt: 0});
   if (v.timer) { clearTimeout(v.timer); v.timer = null; }
   if (v.ws && v.ws.readyState <= 1) return;           // already connecting or open
   const spec = VENUES[key], st = {};
   let ws;
-  try { ws = new WebSocket(spec.url); } catch (e) { v.state = "off"; return retry(key); }
+  try { ws = new WebSocket(spec.url); } catch (e) { v.state = "off"; v.fails++; return retry(key); }
   v.ws = ws; v.state = "connecting";
-  ws.onopen = () => { v.state = "waiting"; v.at = Date.now(); try { spec.open(ws); } catch (e) {} };
+  let heard = false;
+  ws.onopen = () => { v.state = "waiting"; v.at = v.openedAt = Date.now(); try { spec.open(ws); } catch (e) {} };
   ws.onmessage = ev => {
-    v.at = Date.now();
-    let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+    const t = v.at = Date.now();
+    if (!heard) { heard = true; v.fails = 0; }
+    if (t - v.rawAt > 5000 && typeof ev.data === "string") { v.raw = ev.data.slice(0, 160); v.rawAt = t; }   // a sample, for the diagnostics
+    let d; try { d = JSON.parse(ev.data); } catch (e) { return; }      // "pong" and the like
+    if (!d || typeof d !== "object") return;
     spec.msg(d, (bid, ask) => {
       if (!(bid > 0 && ask >= bid && (ask - bid) / ask < 0.005)) return;
       const mid = (bid + ask) / 2, t = Date.now();
       if (mid !== v.mid || !v.changedAt) v.changedAt = t;
       v.mid = mid; v.quoteAt = t; v.state = "live"; v.backoff = 1000;
-    }, ws, st);
+    }, ws, st,
+    (px, size, takerBuy, tMs) => onTrade(key, v, px, size, takerBuy, tMs),
+    (px, usd, long, tMs) => onLiq(key, v, px, usd, long, tMs));
   };
   ws.onerror = () => {};
-  ws.onclose = () => { if (v.ws === ws) { v.state = "off"; retry(key); } };
+  ws.onclose = () => { if (v.ws === ws) { v.state = "off"; if (!heard) v.fails++; retry(key); } };
 }
 function retry(key, now) {
   const v = venue[key];
   if (v.timer) clearTimeout(v.timer);
   v.timer = setTimeout(() => { v.timer = null; connect(key); }, now ? 0 : v.backoff);
-  v.backoff = Math.min(15000, v.backoff * 2);
+  // A venue that never answers (Binance refuses US connections) is retried once a minute, not every 15 s.
+  v.backoff = Math.min(v.fails >= 5 ? 60000 : 15000, v.backoff * 2);
 }
 function reconnectAll() {                            // after the phone comes back to this page
   for (const [k, v] of Object.entries(venue)) {
     v.backoff = 1000;
     if (!v.ws || v.ws.readyState > 1) retry(k, true);
-    else if (Date.now() - v.at > ALIVE_MS) v.ws.close();
+    else if (Date.now() - v.at > ALIVE_MS && !VENUES[k].quiet) v.ws.close();
   }
 }
 setInterval(() => {                                  // watchdog: pings, and a silent socket is a dead one
   const t = Date.now();
   for (const [k, v] of Object.entries(venue)) {
-    const ws = v.ws;
+    const ws = v.ws, spec = VENUES[k];
     if (ws && ws.readyState === 1) {
-      if (t - v.at > ALIVE_MS) { v.state = "off"; ws.close(); }
-      else if (VENUES[k].ping) { try { VENUES[k].ping(ws); } catch (e) {} }
+      if (t - v.at > ALIVE_MS && !spec.quiet) { v.state = "off"; ws.close(); }
+      else if (spec.ping && t - v.pingAt >= (spec.pingEvery || 5000) - 500) { v.pingAt = t; try { spec.ping(ws); } catch (e) {} }
     } else if ((!ws || ws.readyState === 3) && !v.timer) retry(k, true);
   }
 }, 5000);
@@ -379,14 +490,114 @@ function addVol(px, back) {
 }
 let lastSampleSec = 0;
 function onSecond(sec) {
+  rollFlow(sec);
   const px = consensus();
   if (px == null) return;
   samples.set(sec, px); lastSampleSec = sec;
   learnOffsets(px);
   const back = sampleAt(sec - VOL_STEP);
   if (back != null) addVol(px, back);
+  calibrate(sec);
   for (const k of samples.keys()) if (k < sec - 4000) samples.delete(k);
   for (const k of backfill.keys()) if (k < sec - 4000) backfill.delete(k);
+}
+
+// ---------------------------------------------------------------- order flow: who is crossing the spread
+// Every trade is a market order hitting the book. Dollars bought at market minus dollars sold at
+// market, per second, is the flow; it is kept apart for the index exchanges (spot) and the perp.
+const flow = new Map();         // second (local clock) -> {b, s, pb, ps}: dollars; b/s spot, pb/ps the perp
+const tstat = {};               // venue -> {n: events this second, hist: events per second (last 60), lastAt}
+const liqs = [];                // [{t, key, long, usd, px}] recent liquidations; long = a long was liquidated
+const whales = [];              // [{t, key, buy, usd, px}] single prints of WHALE_USD or more
+function counted(key) {
+  const s = tstat[key] || (tstat[key] = {n: 0, hist: [], lastAt: 0});
+  s.n++; s.lastAt = Date.now();
+}
+// A feed that replays recent history on connecting (Crypto.com, Hyperliquid) would count old trades
+// twice, so trades stamped more than 15 s old are dropped in the first seconds after a connection.
+function stale(v, tMs) {
+  if (!(tMs > 0) || Date.now() - v.openedAt > 10000) return false;
+  const ms = tMs > 1e11 ? tMs : tMs * 1000;
+  return Date.now() - ms > 15000;
+}
+function onTrade(key, v, px, size, takerBuy, tMs) {
+  if (!(px > 0 && size > 0) || stale(v, tMs)) return;
+  const t = Date.now(), sec = Math.floor(t / 1000), usd = px * size;
+  let f = flow.get(sec);
+  if (!f) flow.set(sec, f = {b: 0, s: 0, pb: 0, ps: 0});
+  f[(VENUES[key].lead ? "p" : "") + (takerBuy ? "b" : "s")] += usd;
+  counted(key);
+  if (usd >= WHALE_USD * (VENUES[key].lead ? 2.5 : 1)) { whales.push({t, key, buy: takerBuy, usd, px}); if (whales.length > 40) whales.shift(); }
+}
+function onLiq(key, v, px, usd, long, tMs) {
+  if (!(usd > 0 && px > 0) || stale(v, tMs)) return;
+  liqs.push({t: Date.now(), key, long, usd, px});
+  if (liqs.length > 400) liqs.shift();
+  counted(key);
+}
+function rollFlow(sec) {
+  for (const s of Object.values(tstat)) { s.hist.push(s.n); if (s.hist.length > 60) s.hist.shift(); s.n = 0; }
+  for (const k of flow.keys()) if (k < sec - 4000) flow.delete(k);
+  const old = (sec - 3600) * 1000;
+  while (liqs.length && liqs[0].t < old) liqs.shift();
+  while (whales.length && whales[0].t < old) whales.shift();
+}
+function flowSum(secs, now) {             // the last `secs` whole seconds, plus the second in progress
+  const o = {b: 0, s: 0, pb: 0, ps: 0}, sec = Math.floor(now);
+  for (let k = sec - secs + 1; k <= sec; k++) { const f = flow.get(k); if (f) { o.b += f.b; o.s += f.s; o.pb += f.pb; o.ps += f.ps; } }
+  return o;
+}
+function liqSum(secs, nowMs) {
+  const o = {long: 0, short: 0};
+  for (const l of liqs) if (nowMs - l.t <= secs * 1000) o[l.long ? "long" : "short"] += l.usd;
+  return o;
+}
+function eventsPerMin(key) {              // events in the last 60 s, counting the second in progress
+  const s = tstat[key];
+  return s ? s.hist.reduce((a, b) => a + b, 0) + s.n : 0;
+}
+const fmtUsd = x => {                     // $1.2M, $412k, $9.5k, $120
+  const a = Math.abs(x);
+  return "$" + (a >= 1e6 ? (a / 1e6).toFixed(a >= 1e7 ? 0 : 1) + "M" : a >= 1e3 ? (a / 1e3).toFixed(a >= 1e4 ? 0 : 1) + "k" : a.toFixed(0));
+};
+const signedUsd = x => (x >= 0 ? "+" : "−") + fmtUsd(x);
+// What flow like this has been followed by. Every 5 s the page records the net flow of a 30-s stretch
+// and how far spot moved in the 30 s after it. A least-squares slope through those pairs, forgotten
+// with a 3-hour half-life, says how many dollars of movement a million dollars of net flow has been
+// worth lately. It leans the projection only once the relation is clearly there (t-statistic of 3 or
+// more), only the way the flow points, and never by more than two standard deviations of a 30-s move.
+const cal = Object.assign({sxx: 0, sxy: 0, syy: 0, n: 0, at: 0}, (() => { const c = store.get("flowcal"); return c && c.n > 0 && Date.now() - c.at < 86400000 ? c : null; })());
+function calibrate(sec) {
+  if (sec % 5) return;
+  const s0 = sec - 30, a = sampleAt(s0), b = sampleAt(sec);
+  if (a == null || b == null) return;
+  const f = flowSum(30, s0);
+  if (f.b + f.s + f.pb + f.ps <= 0) return;
+  const x = (f.b + f.pb - f.s - f.ps) / 1e6, y = b - a, k = Math.pow(0.5, 5 / 10800);
+  cal.sxx = cal.sxx * k + x * x; cal.sxy = cal.sxy * k + x * y; cal.syy = cal.syy * k + y * y; cal.n = cal.n * k + 1; cal.at = Date.now();
+  if (sec % 60 === 0) store.set("flowcal", cal);
+}
+function leanStats() {                    // {beta: dollars per $1M of net flow, t, minutes of data}
+  if (cal.n < 120 || cal.sxx <= 0) return null;
+  const beta = cal.sxy / cal.sxx, nEff = Math.max(3, cal.n / 6);        // the samples overlap six to one
+  const resid = Math.max(0, cal.syy - beta * cal.sxy) / (nEff - 2);
+  const se = Math.sqrt(resid / cal.sxx);
+  return {beta, t: se > 0 ? beta / se : 0, minutes: cal.n * 5 / 60, on: se > 0 && beta > 0 && beta / se >= 3};
+}
+function leanAt(sec, sig) {               // dollars spot is expected to move over the next 30 s, or 0
+  const st = leanStats();
+  if (!st || !st.on) return 0;
+  const f = flowSum(30, sec), net = (f.b + f.pb - f.s - f.ps) / 1e6;
+  const cap = sig != null ? 2 * sig * Math.sqrt(30) : 0;
+  return Math.max(-cap, Math.min(cap, st.beta * net));
+}
+// Words for the last 30 s of flow: by how much buying outweighs selling, and whether that is a lot.
+function flowWords(f) {
+  const net = f.b + f.pb - f.s - f.ps, gross = f.b + f.pb + f.s + f.ps;
+  if (gross < 20000) return null;
+  const imb = net / gross, a = Math.abs(net);
+  const word = a >= 500000 && Math.abs(imb) >= 0.25 ? "heavy " : a >= 150000 && Math.abs(imb) >= 0.15 ? "" : null;
+  return word == null ? {net, text: "balanced flow", side: 0} : {net, text: word + (net > 0 ? "buying" : "selling"), side: net > 0 ? 1 : -1};
 }
 // The minute the page did not see (just opened, or back from another app) comes from Coinbase's
 // public trade list: the last trade in each second, carried forward through seconds without one.
@@ -564,16 +775,16 @@ function target(open, mk) {
 // ---------------------------------------------------------------- model
 // The settlement value is the mean of the index at the 60 whole seconds before the close.
 // Seconds already past are known; the rest follow a driftless random walk from spot.
-function project(now, close, x, sig) {
+function project(now, close, x, sig, lean) {
   let known = 0; const ahead = [];
   for (let s = close - SETTLE; s < close; s++) {
     if (s <= now) { const p = sampleAt(s); known += p != null ? p + basis : x; }
     else ahead.push(s - now);
   }
   const m = ahead.length;
-  let walk = 0;
-  ahead.forEach((d, j) => { walk += d * (2 * (m - (j + 1)) + 1); });
-  const mean = (known + m * x) / SETTLE;
+  let walk = 0, leanSum = 0;
+  ahead.forEach((d, j) => { walk += d * (2 * (m - (j + 1)) + 1); leanSum += Math.min(1, d / 30); });   // the lean plays out over 30 s
+  const mean = (known + m * x + (lean || 0) * leanSum) / SETTLE;
   const levelSd = basisSrc === "kalshi" ? 1.5 : basisSrc === "target" ? 2.5 : basisSrc === "synced" ? 3 : 6;
   const sd = Math.sqrt(sig * sig * walk / (SETTLE * SETTLE) + levelSd * levelSd);
   return {mean, sd};
@@ -681,6 +892,71 @@ function drawMain(open, close, now, tgt, proj) {
   g.strokeStyle = "rgba(230,235,245,0.25)"; g.beginPath(); g.moveTo(X(now), T); g.lineTo(X(now), H - B); g.stroke();
 }
 
+// Net flow per bar (5 s where the screen is wide enough, else 10 s), the running total since the
+// open as a line on its own scale, and liquidations as triangles: longs at the top pointing down.
+function drawFlow(open, close, now) {
+  const [g, W, H] = setupCanvas($("flow"));
+  const L = 8, R = 74, T = 12, B = 12;
+  g.clearRect(0, 0, W, H);
+  const t0 = open - 60, t1 = close, sec = Math.floor(now);
+  const X = t => L + (t - t0) / (t1 - t0) * (W - L - R);
+  const bin = (W - L - R) / ((t1 - t0) / 5) >= 3 ? 5 : 10;
+  const mid = T + (H - T - B) / 2, half = (H - T - B) / 2;
+  g.fillStyle = "rgba(255,200,87,0.07)"; g.fillRect(X(close - SETTLE), T, X(close) - X(close - SETTLE), H - T - B);
+  g.strokeStyle = css("--line"); g.lineWidth = 1;
+  g.beginPath(); g.moveTo(X(open), T); g.lineTo(X(open), H - B); g.stroke();
+  g.beginPath(); g.moveTo(L, mid); g.lineTo(W - R, mid); g.stroke();
+  const bars = []; let scale = 100000;
+  for (let b = Math.floor(t0 / bin) * bin; b <= sec; b += bin) {
+    let net = 0, any = false;
+    for (let s = b; s < b + bin; s++) { const f = flow.get(s); if (f) { net += f.b + f.pb - f.s - f.ps; any = true; } }
+    if (any) { bars.push([b, net]); scale = Math.max(scale, Math.abs(net)); }
+  }
+  for (const [b, net] of bars) {
+    const x0 = X(Math.max(b, t0)), x1 = X(Math.min(b + bin, t1)), h = Math.abs(net) / scale * half;
+    g.fillStyle = net >= 0 ? "rgba(47,209,124,0.85)" : "rgba(255,106,61,0.85)";
+    g.fillRect(x0, net >= 0 ? mid - h : mid, Math.max(1, x1 - x0 - (x1 - x0 >= 3 ? 1 : 0)), Math.max(h, net ? 1 : 0));
+  }
+  let cum = 0, cmax = 1; const cpts = [];
+  for (let s = open; s <= sec; s++) { const f = flow.get(s); if (f) cum += f.b + f.pb - f.s - f.ps; if (f || cpts.length) cpts.push([s, cum]); }
+  for (const [, c] of cpts) cmax = Math.max(cmax, Math.abs(c));
+  if (cpts.length > 1) {
+    g.strokeStyle = css("--ink"); g.lineWidth = 1.2; g.beginPath();
+    cpts.forEach(([s, c], i) => { const x = X(s), y = mid - c / cmax * (half - 2); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+    g.stroke();
+  }
+  // liquidations, totalled per bar: one triangle per side, sized by the dollars ($10k small, $10M large)
+  const lbin = new Map();
+  for (const l of liqs) {
+    const t = l.t / 1000;
+    if (t < t0) continue;
+    const b = Math.floor(t / bin) * bin, o = lbin.get(b) || {long: 0, short: 0};
+    o[l.long ? "long" : "short"] += l.usd; lbin.set(b, o);
+  }
+  for (const [b, o] of lbin) {
+    const x = (X(Math.max(b, t0)) + X(Math.min(b + bin, t1))) / 2;
+    for (const side of ["long", "short"]) {
+      if (!o[side]) continue;
+      const r = 2.5 + Math.min(5, 1.5 * Math.log10(Math.max(1, o[side] / 10000)));
+      g.fillStyle = side === "long" ? css("--down") : css("--up");
+      g.beginPath();
+      if (side === "long") { g.moveTo(x, T - 2 + r * 1.6); g.lineTo(x - r, T - 2); g.lineTo(x + r, T - 2); }
+      else { g.moveTo(x, H - B + 2 - r * 1.6); g.lineTo(x - r, H - B + 2); g.lineTo(x + r, H - B + 2); }
+      g.closePath(); g.fill();
+    }
+  }
+  g.font = "11px " + css("--mono"); g.textBaseline = "middle";
+  let tagY = null;
+  if (cpts.length > 1) {
+    tagY = Math.min(H - B - 8, Math.max(T + 8, mid - cum / cmax * (half - 2)));
+    g.fillStyle = css("--ink"); g.fillRect(W - R + 2, tagY - 8, R - 4, 16);
+    g.fillStyle = css("--ground"); g.fillText(signedUsd(cum), W - R + 6, tagY);
+  }
+  g.fillStyle = css("--dim");                      // the bar scale, out of the running-total tag's way
+  g.fillText("±" + fmtUsd(scale), W - R + 6, tagY != null && tagY < T + 22 ? H - B - 6 : T + 6);
+  g.strokeStyle = "rgba(230,235,245,0.25)"; g.beginPath(); g.moveTo(X(now), T); g.lineTo(X(now), H - B); g.stroke();
+}
+
 const pHist = new Map();
 // The chance of Up for seconds the page did not see live, worked out from the backfilled prices
 // with today's volatility, so the chart covers the window from its open.
@@ -693,7 +969,7 @@ function fillProbHistory(open, now, close, tgt, sig) {
     if (pHist.has(s)) continue;
     const x = sampleAt(s);
     if (x == null) continue;
-    const pr = project(s + 0.5, close, x + basis, sig);
+    const pr = project(s + 0.5, close, x + basis, sig, leanAt(s, sig));
     pHist.set(s, chance(pr.mean, pr.sd, tgt));
   }
 }
@@ -773,14 +1049,44 @@ function drawProb(open, close, now) {
 }
 
 // ---------------------------------------------------------------- page
-function verdict(el, fair, priceCents) {
-  if (!(priceCents > 0 && priceCents < 100)) { el.textContent = ""; el.className = "verdict"; return; }
-  if (fair == null) { el.textContent = "needs the chance of Up first"; el.className = "verdict meh"; return; }
+function verdict(el, fair, priceCents) {     // returns the edge in cents, if there is a price and a chance
+  if (!(priceCents > 0 && priceCents < 100)) { el.textContent = ""; el.className = "verdict"; return null; }
+  if (fair == null) { el.textContent = "needs the chance of Up first"; el.className = "verdict meh"; return null; }
   const edge = fair * 100 - priceCents - feeCents(priceCents / 100);
   el.textContent = (edge >= 0 ? "+" : "−") + Math.abs(edge).toFixed(1) + "¢ a contract after fees"
     + (edge >= 3 ? " · buy" : edge <= 0 ? " · no" : " · thin");
   el.className = "verdict " + (edge >= 3 ? "good" : edge <= 0 ? "bad" : "meh");
+  return edge;
 }
+// ---------------------------------------------------------------- sound
+// Browsers only play audio after a tap, so the Sound button creates the audio context, and the
+// alerts are short tone sequences: nothing to download, nothing to keep playing.
+const snd = {ctx: null, on: false, last: {}};
+function beep(seq) {
+  if (!snd.on || !snd.ctx) return;
+  if (snd.ctx.state === "suspended") snd.ctx.resume().catch(() => {});
+  let t = snd.ctx.currentTime + 0.01;
+  for (const [f, ms] of seq) {
+    const o = snd.ctx.createOscillator(), g = snd.ctx.createGain();
+    o.type = "sine"; o.frequency.value = f;
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.35, t + 0.015); g.gain.exponentialRampToValueAtTime(0.0001, t + ms / 1000);
+    o.connect(g); g.connect(snd.ctx.destination); o.start(t); o.stop(t + ms / 1000 + 0.02);
+    t += ms / 1000 + 0.05;
+  }
+}
+function alertOnce(kind, gapMs, seq) {
+  const t = Date.now();
+  if (t - (snd.last[kind] || 0) < gapMs) return;
+  snd.last[kind] = t; beep(seq);
+}
+$("snd").addEventListener("click", () => {
+  if (!snd.ctx) { try { snd.ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { $("snd").textContent = "No sound here"; return; } }
+  snd.on = !snd.on;
+  if (snd.ctx.state === "suspended") snd.ctx.resume().catch(() => {});
+  $("snd").textContent = snd.on ? "Sound on" : "Sound off";
+  $("snd").classList.toggle("on", snd.on);
+  if (snd.on) beep([[660, 70], [880, 110]]);
+});
 let lastP = null, lastMk = null;
 function render() {
   const nowMs = Date.now(), now = nowMs / 1000, [open, close] = bounds(now), [, mk] = tickers(close);
@@ -810,7 +1116,7 @@ function render() {
   const a = avgAt(Math.floor(now) - 1);
   const avg = a != null ? a + basis : null;
   const [tgt, tgtSrc] = target(open, mk);
-  const nIndex = Object.values(VENUES).filter(v => !v.lead).length;
+  const nIndex = Object.values(VENUES).filter(v => !v.lead && !v.liq).length;
   $("lvSpot").textContent = money(x);
   $("lvSpot").parentElement.classList.toggle("thin", x == null);
   $("lvSpotNote").textContent = x == null ? `${nLive} of ${nIndex} exchanges: need ${MIN_LIVE} that agree`
@@ -828,20 +1134,23 @@ function render() {
   $("lvTgtNote").textContent = tgtSrc;
 
   let proj = null, p = null;
+  const lean = sig != null ? leanAt(sec, sig) : 0;
   if (x != null && tgt != null && sig != null) {
-    proj = project(now, close, x, sig);
+    proj = project(now, close, x, sig, lean);
     p = chance(proj.mean, proj.sd, tgt);
     pHist.set(Math.floor(now), p);
     fillProbHistory(open, now, close, tgt, sig);
   }
   $("lvProj").textContent = proj ? money(proj.mean) : "–";
-  $("lvProjNote").textContent = proj ? `±${proj.sd.toFixed(0)} (1 sd) · vol $${sig.toFixed(1)}/√s` : sig == null ? "measuring volatility…" : "needs the target";
+  $("lvProjNote").textContent = proj ? `±${proj.sd.toFixed(0)} (1 sd) · vol $${sig.toFixed(1)}/√s` + (lean ? ` · flow lean ${signed(lean)}` : "") : sig == null ? "measuring volatility…" : "needs the target";
 
+  const fw = flowWords(flowSum(30, now));
   const big = $("pBig");
   if (p == null) {
     big.textContent = "–"; big.className = "p none";
     $("fairUp").textContent = "Up –"; $("fairDown").textContent = "Down –";
     $("why").textContent = spot == null ? "Waiting for two exchanges to agree on a price…" : sig == null ? "Measuring volatility; about 30 seconds after opening." : "Needs this window's target. Type the one Robinhood shows.";
+    $("why").style.color = "";
   } else {
     big.textContent = Math.min(99, Math.max(1, Math.round(p * 100))) + "%"; big.className = "p " + (p >= 0.5 ? "up" : "down");
     $("pBar").style.width = (p * 100).toFixed(1) + "%";
@@ -849,9 +1158,12 @@ function render() {
     $("fairUp").textContent = `Up ${c}¢`;
     $("fairDown").textContent = `Down ${100 - c}¢`;
     const gap = proj.mean - tgt;
-    $("why").textContent = (sharp ? `SHARP MOVE: ${signed(move10)} in 10 s. ` : "")
+    // In a sharp move the flow says whether the move has weight behind it or is a sweep of thin books.
+    const withFlow = fw && fw.side ? (fw.side === Math.sign(move10) ? " with " + fw.text + " behind it" : " against " + fw.text) : fw ? " on balanced flow" : "";
+    $("why").textContent = (sharp ? `SHARP MOVE: ${signed(move10)} in 10 s${withFlow}. ` : "")
       + `Closing average heading for ${signed(gap)} vs the target; ±${proj.sd.toFixed(0)} is one standard deviation.`
       + (move10 != null && back60 != null && !sharp ? ` Spot ${signed(move10)} in 10 s, ${signed(spot - back60)} in 60 s.` : "")
+      + (fw && !sharp ? ` Flow 30 s: ${fw.text}${fw.side ? " " + signedUsd(fw.net) : ""}.` : "")
       + (basisSrc === "raw" ? " Typing one target from Robinhood calibrates the level for the hours ahead." : "");
     $("why").style.color = sharp ? (move10 > 0 ? css("--up") : css("--down")) : "";
   }
@@ -863,31 +1175,87 @@ function render() {
   $("rhDown").placeholder = downC != null ? String(downC) : "type";
   $("edgeHead").textContent = km ? `Kalshi's book now: Up ${upC}¢ · Down ${downC}¢ (Robinhood sells at these). Type over them if Robinhood differs.`
     : "Type what Robinhood's buttons say to see your edge";
-  verdict($("vUp"), p, $("rhUp").value ? parseFloat($("rhUp").value) : upC);
-  verdict($("vDown"), p == null ? null : 1 - p, $("rhDown").value ? parseFloat($("rhDown").value) : downC);
+  const edgeUp = verdict($("vUp"), p, $("rhUp").value ? parseFloat($("rhUp").value) : upC);
+  const edgeDown = verdict($("vDown"), p == null ? null : 1 - p, $("rhDown").value ? parseFloat($("rhDown").value) : downC);
+
+  // sounds: a sharp move as it starts, an edge of 3c on Kalshi's own prices once it has held for
+  // a few seconds, and the start of the settlement minute
+  if (sharp && !wasSharp) alertOnce("sharp", 20000, move10 > 0 ? [[520, 90], [780, 150]] : [[780, 90], [520, 150]]);
+  wasSharp = sharp;
+  // The edge sound plays once when an edge appears, then only after the edge has been gone for half a minute.
+  const liveEdge = km && !$("rhUp").value && !$("rhDown").value && left > SETTLE && Math.max(edgeUp || 0, edgeDown || 0) >= 3;
+  if (liveEdge) {
+    if (!edgeSince) edgeSince = nowMs;
+    else if (nowMs - edgeSince >= 3000 && edgeArmed) { edgeArmed = false; alertOnce("edge", 60000, [[660, 80], [660, 80], [880, 180]]); }
+    edgeGoneAt = 0;
+  } else {
+    edgeSince = 0;
+    if (!edgeGoneAt) edgeGoneAt = nowMs; else if (nowMs - edgeGoneAt >= 30000) edgeArmed = true;
+  }
+  if (left <= SETTLE && lastLeft > SETTLE) alertOnce("minute", 5000, [[392, 220]]);
+  if (lastLeft < left) edgeArmed = true;                 // a new window
+  lastLeft = left;
 
   // sources (once a second: rebuilding these is the costliest DOM work on the page)
-  if (nowMs - chipsAt >= 1000) { chipsAt = nowMs; renderChips(nowMs, mk); }
-  if (nowMs - chartsAt >= 200) { chartsAt = nowMs; drawMain(open, close, now, tgt, proj); drawProb(open, close, now); }
+  if (nowMs - chipsAt >= 1000) { chipsAt = nowMs; renderChips(nowMs, mk); renderFlowText(nowMs, now); }
+  if (nowMs - chartsAt >= 200) { chartsAt = nowMs; drawMain(open, close, now, tgt, proj); drawFlow(open, close, now); drawProb(open, close, now); }
   if ($("diag").open && Math.floor(now) !== diagAt) { diagAt = Math.floor(now); $("diagOut").textContent = diagnostics(now, open); }
+}
+let wasSharp = false, edgeSince = 0, edgeGoneAt = 0, edgeArmed = true, lastLeft = Infinity;
+const VENUE_NAME = k => VENUES[k] ? VENUES[k].name : k;
+function renderFlowText(nowMs, now) {
+  const [f30, f60] = FLOW_SPANS.map(s => flowSum(s, now));
+  const lq = liqSum(60, nowMs);
+  const anyTrades = Object.entries(tstat).some(([k, s]) => !VENUES[k].liq && nowMs - s.lastAt < 60000);
+  const span = (f, label) => {
+    const net = f.b + f.pb - f.s - f.ps, cls = net > 0 ? "u" : net < 0 ? "d" : "";
+    return `${label}: <span class="${cls}">${signedUsd(net)}</span>`;
+  };
+  const el = $("flowLine");
+  const st = leanStats(), lean = leanAt(Math.floor(now), sigma());
+  const leanTxt = !st ? `lean: calibrating, ${Math.round(cal.n * 5 / 60)} of 10 min` : !st.on ? "lean: none measurable (flow has not led price lately)"
+    : `lean next 30 s: <span class="${lean > 0 ? "u" : lean < 0 ? "d" : ""}">${signed(lean)}</span> (${st.beta.toFixed(0)} $ per $1M, ${st.minutes < 90 ? Math.round(st.minutes) + " min" : (st.minutes / 60).toFixed(1) + " h"} of data)`;
+  const html = !anyTrades ? "Order flow: " + (Object.keys(tstat).length ? "no trades in the last minute" : "waiting for trades…")
+    : `${span(f30, "Last 30 s")} (spot ${signedUsd(f30.b - f30.s)} · perp ${signedUsd(f30.pb - f30.ps)}) · ${span(f60, "60 s")}`;
+  if (html !== el.dataset.html) { el.dataset.html = html; el.innerHTML = html; }
+  const el2 = $("flowLine2");
+  const html2 = !anyTrades ? "" : `Liquidated, 60 s: <span class="d">${fmtUsd(lq.long)} longs</span> · <span class="u">${fmtUsd(lq.short)} shorts</span> · ${leanTxt}`;
+  if (html2 !== el2.dataset.html) { el2.dataset.html = html2; el2.innerHTML = html2; }
+  const rows = whales.filter(w => nowMs - w.t < WINDOW * 1000).slice(-5).reverse().map(w => {
+    const ago = Math.round((nowMs - w.t) / 1000);
+    return `<div>${Math.floor(ago / 60)}:${String(ago % 60).padStart(2, "0")} ago · ${VENUE_NAME(w.key)} · <b class="${w.buy ? "buy" : "sell"}">${w.buy ? "BUY" : "SELL"} ${fmtUsd(w.usd)}</b> at ${Math.round(w.px).toLocaleString("en-US")}</div>`;
+  });
+  const wl = $("whales"), wh = rows.length ? `<div class="label">Big prints this window (${fmtUsd(WHALE_USD)} and up; perp ${fmtUsd(WHALE_USD * 2.5)})</div>` + rows.join("") : "";
+  if (wh !== wl.dataset.html) { wl.dataset.html = wh; wl.innerHTML = wh; wl.hidden = !wh; }
 }
 let chipsAt = 0, chartsAt = 0, lastChips = "";
 function renderChips(nowMs, mk) {
-  const chips = Object.entries(VENUES).map(([k, spec]) => {
-    const v = venue[k] || {}; const age = v.quoteAt ? nowMs - v.quoteAt : null;
+  const chip = (cls, txt) => `<span class="chip ${cls}">${txt}</span>`;
+  const price = [], liq = [];
+  for (const [k, spec] of Object.entries(VENUES)) {
+    const v = venue[k] || {}, open = v.ws && v.ws.readyState === 1, s = tstat[k];
+    if (spec.liq) {
+      // A liquidation feed is alive while the socket is open and it answers pings; events are rare.
+      const alive = open && (spec.quiet || nowMs - v.at < ALIVE_MS * 1.5);
+      const n = liqs.reduce((a, l) => a + (l.key === k && nowMs - l.t < 300000 ? 1 : 0), 0);
+      liq.push(chip(alive ? "ok" : "off", spec.name + (alive ? (n ? ` ${n} in 5 min` : "") : v.state === "connecting" || v.state === "waiting" ? " …" : " off")));
+      continue;
+    }
+    const age = v.quoteAt ? nowMs - v.quoteAt : null;
     const live = v.ws && isLive(v, nowMs);
     const cls = live ? (age < 2000 ? "ok" : "slow") : "off";
+    const trades = !live ? "" : s && nowMs - s.lastAt < 60000 ? ` · ${eventsPerMin(k)}/min` : " · no trades";
     const txt = age == null ? spec.name + (v.state === "off" ? " off" : " …")
-      : `${spec.name} ${age < 1000 ? "<1s" : (age / 1000).toFixed(0) + "s"}${live ? "" : " off"}`;
-    return `<span class="chip ${cls}">${txt}</span>`;
-  });
+      : `${spec.name} ${age < 1000 ? "<1s" : (age / 1000).toFixed(0) + "s"}${live ? "" : " off"}${trades}`;
+    price.push(chip(cls, txt));
+  }
   const kstale = kalshi.ok && nowMs - kalshi.lastOk > 15000;
   const kcls = kalshi.ok ? (kstale ? "slow" : "ok") : kalshi.ok === false ? "off" : "";
   const ktxt = kalshi.ok ? (kalshi.relay ? "Kalshi via your relay" : kalshi.via === "site" ? "Kalshi via this site" : kalshi.via === "public" ? "Kalshi via public relay (slow)" : "Kalshi target and prices")
     : kalshi.ok === false ? (kalshi.relay ? "Kalshi relay not answering" : "Kalshi not reachable: targets estimated") : "Kalshi checking";
   const kerr = (!kalshi.ok || kstale) && kalshi.lastErr && nowMs - kalshi.lastErr.at < 30000 ? ` (${kalshi.lastErr.status || "no answer"})` : "";
-  chips.push(`<span class="chip ${kcls}">${ktxt}${kerr}</span>`);
-  const html = chips.join("");
+  const group = (name, items) => `<div class="sg"><span class="grp">${name}</span>${items}</div>`;
+  const html = group("Price · trades", price.join("")) + group("Liquidations", liq.join("")) + group("Market", chip(kcls, ktxt + kerr));
   if (html !== lastChips) { lastChips = html; $("sources").innerHTML = html; }
   $("mktLegend").hidden = !kalshi.ok;
 }
@@ -904,10 +1272,18 @@ function diagnostics(now, open) {
     `candle for ${candle.open === open ? "this window" : "none"} · page ${location.hostname}`,
   ];
   for (const [k, v] of Object.entries(venue)) {
-    const ws = v.ws ? ["connecting", "open", "closing", "closed"][v.ws.readyState] : "none";
-    lines.push(`${VENUES[k].name.padEnd(10)} ${ws.padEnd(10)} mid ${v.mid ? v.mid.toFixed(2) : "-"} offset ${v.offset.toFixed(2)} n ${v.n}`
-      + ` quote ${v.quoteAt ? ((t - v.quoteAt) / 1000).toFixed(1) + "s" : "-"} changed ${v.changedAt ? ((t - v.changedAt) / 1000).toFixed(1) + "s" : "-"} msg ${v.at ? ((t - v.at) / 1000).toFixed(1) + "s" : "-"}`);
+    const ws = v.ws ? ["connecting", "open", "closing", "closed"][v.ws.readyState] : "none", spec = VENUES[k], s = tstat[k];
+    const events = `${spec.liq ? "liquidations" : "trades"} ${eventsPerMin(k)}/min, last ${s && s.lastAt ? ((t - s.lastAt) / 1000).toFixed(0) + "s ago" : "never"}`;
+    if (spec.liq) lines.push(`${spec.name.padEnd(10)} ${ws.padEnd(10)} ${events} msg ${v.at ? ((t - v.at) / 1000).toFixed(1) + "s" : "-"} failures ${v.fails}`);
+    else lines.push(`${spec.name.padEnd(10)} ${ws.padEnd(10)} mid ${v.mid ? v.mid.toFixed(2) : "-"} offset ${v.offset.toFixed(2)} n ${v.n}`
+      + ` quote ${v.quoteAt ? ((t - v.quoteAt) / 1000).toFixed(1) + "s" : "-"} changed ${v.changedAt ? ((t - v.changedAt) / 1000).toFixed(1) + "s" : "-"} msg ${v.at ? ((t - v.at) / 1000).toFixed(1) + "s" : "-"} · ${events}`);
+    // A feed that is connected but yields nothing: its last message, so the format can be checked.
+    if (ws === "open" && v.raw && !(s && t - s.lastAt < 120000)) lines.push(`           last message: ${v.raw}`);
   }
+  const f = flowSum(60, now);
+  lines.push(`flow 60 s: spot bought ${fmtUsd(f.b)} sold ${fmtUsd(f.s)} · perp bought ${fmtUsd(f.pb)} sold ${fmtUsd(f.ps)} · liquidations kept ${liqs.length} · big prints ${whales.length} · sound ${snd.on ? "on" : "off"}`);
+  const st = leanStats();
+  lines.push(`flow lean: samples ${cal.n.toFixed(0)}` + (st ? ` · slope ${st.beta.toFixed(1)} $ per $1M · t ${st.t.toFixed(1)} · ${st.on ? "applied" : "not applied"}` : " · needs 120"));
   return lines.join("\n");
 }
 
