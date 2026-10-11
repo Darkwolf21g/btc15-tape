@@ -22,13 +22,19 @@ export default {
     }
     let last = null;
     for (const base of UPSTREAMS) {
-      try {
-        const up = await fetch(base + path, {headers: {"Accept": "application/json", "User-Agent": "btc15-tape relay"}});
-        const body = await up.text();
-        if (up.ok) return new Response(body, {status: 200, headers: {...CORS, "Content-Type": "application/json"}});
-        last = new Response(body, {status: up.status, headers: CORS});
-      } catch (e) {
-        last = new Response("upstream unreachable", {status: 502, headers: CORS});
+      for (let attempt = 0; attempt < 2; attempt++) {           // one quick retry per upstream
+        try {
+          const up = await fetch(base + path, {headers: {"Accept": "application/json",
+                                                         "User-Agent": "Mozilla/5.0 (compatible; btc15-tape relay)"},
+                                               cf: {cacheTtl: 0, cacheEverything: false}});
+          const body = await up.text();
+          if (up.ok) return new Response(body, {status: 200, headers: {...CORS, "Content-Type": "application/json"}});
+          last = new Response(body.slice(0, 300), {status: up.status, headers: {...CORS, "X-Upstream": base}});
+          if (up.status !== 429 && up.status < 500) break;        // a firm answer; do not hammer
+        } catch (e) {
+          last = new Response("upstream unreachable: " + e.message, {status: 502, headers: {...CORS, "X-Upstream": base}});
+        }
+        await new Promise(r => setTimeout(r, 400));
       }
     }
     return last;

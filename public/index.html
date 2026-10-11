@@ -443,7 +443,7 @@ function setBasis(value, via) {
 // ---------------------------------------------------------------- Kalshi, if the browser may reach it
 const PUBLIC_RELAY = u => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u + "?_=" + Math.floor(Date.now() / 2000));
 const kalshi = {ok: null, base: null, via: null, market: null, feed: new Map(), checked: 0, hist: new Map(),
-                relay: (store.get("relay") || "").replace(/\/+$/, "")};
+                relay: (store.get("relay") || "").replace(/\/+$/, ""), lastOk: 0, lastErr: null, fails: 0};
 // When this page is served by its own Cloudflare Worker, that Worker is the relay: same address, no setup.
 const SAME_SITE = location.protocol === "https:" && !/github\.io$/.test(location.hostname) ? location.origin : null;
 async function kalshiGet(path) {
@@ -457,17 +457,30 @@ async function kalshiGet(path) {
       const r = await fetch(url, {cache: "no-store"});
       if (r.ok) {
         const d = await r.json();
-        if (d && typeof d === "object") { kalshi.base = kalshi.relay ? kalshi.relay : via === "public" ? "public" : url.slice(0, url.indexOf(path)); kalshi.via = via; return d; }
+        if (d && typeof d === "object") {
+          kalshi.base = kalshi.relay ? kalshi.relay : via === "public" ? "public" : url.slice(0, url.indexOf(path));
+          kalshi.via = via; kalshi.lastOk = Date.now(); kalshi.fails = 0;
+          return d;
+        }
       }
-    } catch (e) { /* refused by the browser, or offline */ }
+      kalshi.lastErr = {at: Date.now(), via, status: r.status, text: (await r.text().catch(() => "")).slice(0, 120)};
+    } catch (e) { kalshi.lastErr = {at: Date.now(), via, status: 0, text: String(e.message || e).slice(0, 120)}; }
   }
-  kalshi.base = null;
+  kalshi.fails++;
+  if (kalshi.fails >= 3) kalshi.base = null;        // after a run of failures, look for another route
   return null;
 }
 async function pollKalshi() {
   const now = Date.now() / 1000, [, close] = bounds(now), [ev, mk] = tickers(close);
   const d = await kalshiGet("/markets/" + mk);
-  if (!d || !d.market) { kalshi.ok = false; kalshi.market = null; setTimeout(pollKalshi, kalshi.relay ? 10000 : 45000); return; }
+  if (!d || !d.market) {
+    // One miss is not an outage: keep what we have for a minute and try again soon.
+    const recent = Date.now() - kalshi.lastOk < 60000;
+    kalshi.ok = recent ? kalshi.ok : false;
+    if (!recent) kalshi.market = null;
+    setTimeout(pollKalshi, recent || kalshi.relay || kalshi.via === "site" ? 5000 : 45000);
+    return;
+  }
   const m = d.market;
   kalshi.ok = true;
   let tgt = m.floor_strike != null ? +m.floor_strike : null;
@@ -475,7 +488,7 @@ async function pollKalshi() {
   kalshi.market = {ticker: mk, close, target: tgt > 0 ? tgt : null, status: m.status,
                    bid: +m.yes_bid_dollars || null, ask: +m.yes_ask_dollars || null, at: Date.now()};
   if (kalshi.market.bid && kalshi.market.ask) kalshi.hist.set(Math.floor(now), (kalshi.market.bid + kalshi.market.ask) / 2);
-  if (now - kalshi.checked > 15) {
+  if (now - kalshi.checked > 20) {
     kalshi.checked = now;
     const f = await kalshiGet("/live_data/events/" + ev);
     const pts = f && f.live_data && f.live_data.details && f.live_data.details.timeseries;
@@ -488,7 +501,7 @@ async function pollKalshi() {
       for (const k of kalshi.feed.keys()) if (k < now - 5000) kalshi.feed.delete(k);
     }
   }
-  setTimeout(pollKalshi, kalshi.via === "public" ? 8000 : 2000);
+  setTimeout(pollKalshi, kalshi.via === "public" ? 8000 : 3000);
 }
 
 // ---------------------------------------------------------------- target
@@ -765,10 +778,12 @@ function render() {
       : `${spec.name} ${age < 1000 ? "<1s" : (age / 1000).toFixed(0) + "s"}${live ? "" : " off"}`;
     return `<span class="chip ${cls}">${txt}</span>`;
   });
-  const kcls = kalshi.ok ? "ok" : kalshi.ok === false ? "off" : "";
+  const kstale = kalshi.ok && nowMs - kalshi.lastOk > 15000;
+  const kcls = kalshi.ok ? (kstale ? "slow" : "ok") : kalshi.ok === false ? "off" : "";
   const ktxt = kalshi.ok ? (kalshi.relay ? "Kalshi via your relay" : kalshi.via === "site" ? "Kalshi via this site" : kalshi.via === "public" ? "Kalshi via public relay (slow)" : "Kalshi target and prices")
     : kalshi.ok === false ? (kalshi.relay ? "Kalshi relay not answering" : "Kalshi not reachable: targets estimated") : "Kalshi checking";
-  chips.push(`<span class="chip ${kcls}">${ktxt}</span>`);
+  const kerr = kalshi.lastErr && nowMs - kalshi.lastErr.at < 30000 ? ` (${kalshi.lastErr.status || "no answer"})` : "";
+  chips.push(`<span class="chip ${kcls}">${ktxt}${kerr}</span>`);
   $("sources").innerHTML = chips.join("");
   $("mktLegend").hidden = !kalshi.ok;
 
@@ -784,7 +799,9 @@ function diagnostics(now, open) {
   const lines = [
     `seconds in the last minute: ${own} live, ${back} backfilled · backfill: ${backfillNote}`,
     `last sample ${sec - lastSampleSec} s ago · volatility samples ${volN} · level: ${basisSrc} ${basis.toFixed(2)}`,
-    `kalshi: ${kalshi.ok === null ? "checking" : kalshi.ok ? "ok via " + kalshi.via : "not reachable"} · candle for ${candle.open === open ? "this window" : "none"}`,
+    `kalshi: ${kalshi.ok === null ? "checking" : kalshi.ok ? "ok via " + kalshi.via : "not reachable"}, last success ${kalshi.lastOk ? ((t - kalshi.lastOk) / 1000).toFixed(0) + " s ago" : "never"}, failures in a row ${kalshi.fails}`
+      + (kalshi.lastErr ? ` · last error ${((t - kalshi.lastErr.at) / 1000).toFixed(0)} s ago via ${kalshi.lastErr.via}: ${kalshi.lastErr.status} ${kalshi.lastErr.text}` : ""),
+    `candle for ${candle.open === open ? "this window" : "none"} · page ${location.hostname}`,
   ];
   for (const [k, v] of Object.entries(venue)) {
     const ws = v.ws ? ["connecting", "open", "closing", "closed"][v.ws.readyState] : "none";
