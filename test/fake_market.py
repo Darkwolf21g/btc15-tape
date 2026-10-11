@@ -65,6 +65,9 @@ FAKE = r"""
           if (into >= 1 && into <= 60) msg.last_60s_windowed_average_15min = {value: win(closeMs - 60000, now).toFixed(8), window_size: into, window_start_ts_ms: closeMs - 60000, window_end_ts_exclusive: closeMs};
           emit({type: "cfbenchmarks_value", msg});
         }, 1000);
+        this.btimer = setInterval(() => { if (window.__kalshi) { const tk = window.__curTicker ? window.__curTicker() : "";
+          emit({type: "orderbook_snapshot", msg: {market_ticker: tk, yes_dollars_fp: [[(window.__kBid - 0.02).toFixed(4), "40.00"], [window.__kBid.toFixed(4), "12.00"]], no_dollars_fp: [[(1 - window.__kAsk - 0.01).toFixed(4), "80.00"], [(1 - window.__kAsk).toFixed(4), String(window.__askSize || 5) + ".00"]]}});
+          emit({type: "orderbook_delta", msg: {market_ticker: tk, price_dollars: (1 - window.__kAsk).toFixed(4), delta_fp: "2.00", side: "no"}}); } }, 3000);
         this.ttimer = setInterval(() => { if (window.__kalshi) emit({type: "ticker", msg: {market_ticker: window.__curTicker ? window.__curTicker() : "", yes_bid_dollars: String(window.__kBid), yes_ask_dollars: String(window.__kAsk), ts: Math.floor(Date.now() / 1000)}}); }, 2000);
         return;
       }
@@ -126,7 +129,7 @@ FAKE = r"""
         setTimeout(() => this.emit({method: "subscribe", result: {channel: "trade", instrument_name: "BTC_USD", data: [{d: "0", t: Date.now() - 40000, p: "82900", q: "5", s: "BUY", i: "BTC_USD"}]}}), 100);
       }
     }
-    close() { this.readyState = 3; clearInterval(this.timer); clearInterval(this.ftimer); clearInterval(this.ttimer); clearInterval(this.ltimer); clearInterval(this.hb); this.onclose && this.onclose(); }
+    close() { this.readyState = 3; clearInterval(this.btimer); clearInterval(this.timer); clearInterval(this.ftimer); clearInterval(this.ttimer); clearInterval(this.ltimer); clearInterval(this.hb); this.onclose && this.onclose(); }
   }
   window.WebSocket = FakeWS;
   window.__trades = true;

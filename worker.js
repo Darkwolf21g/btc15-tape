@@ -139,7 +139,8 @@ export class KalshiFeed {
     this.clients = new Set();
     this.up = null; this.upState = "off"; this.upSince = 0; this.upMsgAt = 0; this.lastErr = null; this.backoff = 2000;
     this.last = {};                               // last frame of each type, replayed to a phone that just connected
-    this.tickerSid = null; this.tickerSet = ""; this.subId = 1;
+    this.tickerSid = null; this.bookSid = null; this.tickerSet = ""; this.subId = 1;
+    this.books = {};                              // ticker -> {yes: Map(price -> qty), no: Map(price -> qty)}
     this.idleTimer = null; this.retryTimer = null; this.windowTimer = null;
     this.counts = {};
   }
@@ -162,7 +163,11 @@ export class KalshiFeed {
     server.addEventListener("error", drop);
     server.addEventListener("message", ev => { if (ev.data === "ping") { try { server.send("pong"); } catch (e) {} } });
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
-    try { server.send(JSON.stringify(this.status())); for (const f of Object.values(this.last)) server.send(f); } catch (e) {}
+    try {
+      server.send(JSON.stringify(this.status()));
+      for (const f of Object.values(this.last)) server.send(f);
+      for (const [tk, b] of Object.entries(this.books)) server.send(JSON.stringify(this.snapshotOf(tk, b)));   // the books as they stand now
+    } catch (e) {}
     this.ensureUpstream();
     return new Response(null, {status: 101, webSocket: client});
   }
@@ -175,7 +180,7 @@ export class KalshiFeed {
   }
   closeUpstream(why) {
     if (this.windowTimer) { clearTimeout(this.windowTimer); this.windowTimer = null; }
-    const ws = this.up; this.up = null; this.upState = "off"; this.tickerSid = null; this.tickerSet = "";
+    const ws = this.up; this.up = null; this.upState = "off"; this.tickerSid = null; this.bookSid = null; this.tickerSet = ""; this.books = {};
     if (ws) { try { ws.close(1000, why); } catch (e) {} }
   }
   async ensureUpstream() {
@@ -213,13 +218,19 @@ export class KalshiFeed {
   subscribeTickers() {                           // this window's market and the next; renewed at each boundary
     const tk = currentTickers(), set = tk.join(",");
     if (set !== this.tickerSet) {
-      if (this.tickerSid != null) this.send({cmd: "unsubscribe", params: {sids: [this.tickerSid]}});
-      this.tickerSid = null; this.tickerSet = set; this.pendingTicker = this.subId;
+      const old = [this.tickerSid, this.bookSid].filter(x => x != null);
+      if (old.length) this.send({cmd: "unsubscribe", params: {sids: old}});
+      this.tickerSid = null; this.bookSid = null; this.tickerSet = set;
+      for (const t of Object.keys(this.books)) if (!tk.includes(t)) delete this.books[t];
       this.send({cmd: "subscribe", params: {channels: ["ticker"], market_tickers: tk, send_initial_snapshot: true}});
+      this.send({cmd: "subscribe", params: {channels: ["orderbook_delta"], market_tickers: tk}});
     }
     if (this.windowTimer) clearTimeout(this.windowTimer);
     const msToBoundary = WINDOW * 1000 - (Date.now() % (WINDOW * 1000));
     this.windowTimer = setTimeout(() => { this.windowTimer = null; if (this.up) this.subscribeTickers(); }, msToBoundary + 1500);
+  }
+  snapshotOf(tk, b) {
+    return {type: "orderbook_snapshot", msg: {market_ticker: tk, yes_dollars_fp: [...b.yes].map(([p, q]) => [p.toFixed(4), q.toFixed(2)]), no_dollars_fp: [...b.no].map(([p, q]) => [p.toFixed(4), q.toFixed(2)])}};
   }
   onUpstream(data) {
     if (typeof data !== "string") return;
@@ -227,9 +238,20 @@ export class KalshiFeed {
     let d; try { d = JSON.parse(data); } catch (e) { return; }
     if (!d || !d.type) return;
     this.counts[d.type] = (this.counts[d.type] || 0) + 1;
-    if (d.type === "subscribed" && d.msg && d.msg.channel === "ticker") this.tickerSid = d.msg.sid;
+    if (d.type === "subscribed" && d.msg) { if (d.msg.channel === "ticker") this.tickerSid = d.msg.sid; if (d.msg.channel === "orderbook_delta") this.bookSid = d.msg.sid; }
+    if (d.type === "orderbook_snapshot" && d.msg && d.msg.market_ticker) {
+      const b = {yes: new Map(), no: new Map()};
+      for (const [px, q] of d.msg.yes_dollars_fp || []) if (+q > 0) b.yes.set(+px, +q);
+      for (const [px, q] of d.msg.no_dollars_fp || []) if (+q > 0) b.no.set(+px, +q);
+      this.books[d.msg.market_ticker] = b;
+    }
+    if (d.type === "orderbook_delta" && d.msg && d.msg.market_ticker && this.books[d.msg.market_ticker]) {
+      const m = this.books[d.msg.market_ticker][d.msg.side === "no" ? "no" : "yes"], px = +d.msg.price_dollars, q = (m.get(px) || 0) + +d.msg.delta_fp;
+      if (q > 0) m.set(px, q); else m.delete(px);
+    }
     if (d.type === "error") { this.lastErr = "kalshi error " + JSON.stringify(d.msg).slice(0, 150); this.broadcast(JSON.stringify(this.status())); return; }
-    if (d.type === "cfbenchmarks_value" || d.type === "cfbenchmarks_value_5hz" || d.type === "ticker") {
+    if (d.type === "cfbenchmarks_value" || d.type === "cfbenchmarks_value_5hz" || d.type === "ticker" || d.type === "orderbook_snapshot" || d.type === "orderbook_delta") {
+      if (d.type.startsWith("orderbook")) { this.broadcast(data); return; }     // books are rebuilt for newcomers from this.books
       this.last[d.type] = data;
       this.broadcast(data);
     }
