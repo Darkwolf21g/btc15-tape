@@ -201,6 +201,16 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
 
 <details class="srcbox" id="srcbox"><summary id="srcSum">Feeds…</summary><div class="sources" id="sources"></div></details>
 
+<details id="agentBox">
+  <summary>Trading agent <span id="agentMode" class="notes" style="text-transform:none;letter-spacing:0"></span></summary>
+  <pre id="agentOut" class="notes" style="white-space:pre-wrap;margin:10px 0 0">Loading…</pre>
+  <div class="row" style="margin-top:10px">
+    <button id="agOff" type="button">Off</button><button id="agPaper" type="button">Paper</button><button id="agDemo" type="button">Demo</button><button id="agLive" type="button">Live</button>
+  </div>
+  <div class="row"><input id="agCap" inputmode="decimal" placeholder="Max $ per window (now 10)" autocomplete="off"><button id="agCapSet" type="button">Set cap</button></div>
+  <div class="notes"><p>The agent runs in the relay from 10 minutes before each close to 15 seconds before it, on the same model as this page, and only ever sends a limit order at the ask that is cancelled at once if it does not fill. One trade a window, 12 a day, stops for the day after a $30 loss. <b>Paper</b> decides and scores without orders; <b>Demo</b> trades Kalshi's demo exchange (needs its own key pair on the relay); <b>Live</b> trades your account and asks you to type LIVE. Controls need the stream token.</p></div>
+</details>
+
 <details id="recordBox">
   <summary>Record</summary>
   <pre id="recOut" class="notes" style="white-space:pre-wrap;margin:10px 0 0"></pre>
@@ -1520,6 +1530,46 @@ function recordText() {
   }
   return lines.join("\n");
 }
+// ---- the trading agent's panel
+let agentAt = 0;
+const pnlText = c => (c >= 0 ? "+" : "−") + "$" + (Math.abs(c) / 100).toFixed(2);
+async function agentRefresh(force) {
+  const base = kalshi.relay || SAME_SITE;
+  if (!base || (!force && Date.now() - agentAt < 30000)) return;
+  agentAt = Date.now();
+  try {
+    const r = await fetch(base + "/trade/status" + (feed.token ? "?token=" + encodeURIComponent(feed.token) : ""), {cache: "no-store"});
+    if (!r.ok) { $("agentOut").textContent = r.status === 403 ? "Needs the stream token (set it under Target and calibration)." : "Relay answered " + r.status; return; }
+    const st = await r.json(), c = st.config, lines = [];
+    $("agentMode").textContent = "· " + c.mode.toUpperCase();
+    lines.push(`Mode ${c.mode} · stream ${st.stream} · ${st.ticks} ticks in hand · cap $${(c.perWindowCents / 100).toFixed(0)} a window, ${c.maxTradesPerDay} a day, stop after −$${(c.dailyLossStopCents / 100).toFixed(0)}` + (st.tokenSet ? "" : " · NO TOKEN: controls locked") + (st.hasDemoKey ? "" : " · no demo key"));
+    if (st.today) lines.push(`Today (${st.today.day}): ${st.today.trades} trade${st.today.trades === 1 ? "" : "s"}, ${pnlText(st.today.pnlCents)} settled`);
+    const tr = (st.windows || []).flatMap(w => w.trades.map(t => Object.assign({result: w.result}, t))).slice(-12).reverse();
+    if (tr.length) { lines.push("", "Trades:"); for (const t of tr) lines.push(`${ET_CLOCK.format(new Date(t.at))}  ${t.mode} ${t.side} ${t.filled}/${t.n} at ${t.price}¢ (${t.offered} offered, edge ${cents(t.edge)}, chance ${Math.round(t.p * 100)}%)` + (t.pnlCents != null ? ` → ${pnlText(t.pnlCents)}` : t.status ? ` · ${t.status}` : "")); }
+    const dec = (st.decisions || []).filter(d => d.note !== "TRADE").slice(-5).reverse();
+    if (dec.length) { lines.push("", "Recent looks (no trade):"); for (const d of dec) lines.push(`${ET_CLOCK.format(new Date(d.at))} ${Math.floor(d.left / 60)}:${String(d.left % 60).padStart(2, "0")} left · chance ${Math.round(d.p * 100)}% (${Math.round(d.lo * 100)}–${Math.round(d.hi * 100)})` + (d.up ? ` · Up ${d.up.price}¢ ${cents(d.up.edge)} ${d.up.call}` : "") + (d.down ? ` · Down ${d.down.price}¢ ${cents(d.down.edge)} ${d.down.call}` : "")); }
+    if (st.errors && st.errors.length) { lines.push("", "Errors:"); for (const e of st.errors.slice(-3)) lines.push(`${ET_CLOCK.format(new Date(e.at))} ${e.error}`); }
+    $("agentOut").textContent = lines.join("\n");
+  } catch (e) { $("agentOut").textContent = "Relay not reachable."; }
+}
+async function agentSet(body) {
+  const base = kalshi.relay || SAME_SITE;
+  if (!base) return;
+  if (!feed.token) { $("agentOut").textContent = "Set the stream token first (Target and calibration), and FEED_TOKEN on the relay."; return; }
+  try {
+    const r = await fetch(base + "/trade/config?token=" + encodeURIComponent(feed.token), {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    if (!r.ok) { $("agentOut").textContent = "Refused: " + (await r.text()); return; }
+    agentRefresh(true);
+  } catch (e) { $("agentOut").textContent = "Relay not reachable."; }
+}
+$("agOff").addEventListener("click", () => agentSet({mode: "off"}));
+$("agPaper").addEventListener("click", () => agentSet({mode: "paper"}));
+$("agDemo").addEventListener("click", () => agentSet({mode: "demo"}));
+$("agLive").addEventListener("click", () => { const c = prompt("This sends real orders with real money. Type LIVE to confirm."); if (c === "LIVE") agentSet({mode: "live", confirm: "LIVE"}); });
+$("agCapSet").addEventListener("click", () => { const v = num($("agCap").value); if (v && v >= 1) { agentSet({perWindowCents: Math.round(v * 100)}); $("agCap").value = ""; } });
+$("agentBox").addEventListener("toggle", () => { if ($("agentBox").open) agentRefresh(true); });
+setInterval(() => { if ($("agentBox").open) agentRefresh(false); }, 30000);
+setTimeout(() => agentRefresh(true), 6000);
 $("recClear").addEventListener("click", () => { record.windows.length = 0; record.cur = null; saveRecord(); $("recOut").textContent = recordText(); $("recLine").textContent = recordLine(); });
 $("bankSet").addEventListener("click", () => {
   const v = num($("bankIn").value);

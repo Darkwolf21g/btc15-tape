@@ -16,6 +16,12 @@ Live view of the BTC 15-minute event contract (Robinhood "BTC 15 min", settled o
 
 With the key set, the relay wakes at 10, 5, 2 and 1 minutes before each close and 90 seconds after it, reads the index's tick history and the market, runs the same projection, and stores the chance, Kalshi's book and later the official result for every window, whether or not a page is open. The page merges that into its Record once a minute. `GET /record` returns the stored windows as JSON, `GET /record.csv` as a spreadsheet, `GET /collector/status` the last run and any errors.
 
+## The trading agent (off by default)
+
+The relay can also trade. From 10 minutes before each close to 15 seconds before it, every 5 seconds, it runs the page's model on the stream and, when a side clears 3¢ at the bad end of the band, sends one limit order at the ask, immediate-or-cancel, sized at a quarter Kelly and capped at $10 a window (hard ceiling $50). One trade a window, 12 a day, nothing after a $30 daily loss, nothing while Kalshi has trading paused. Modes: **off**, **paper** (decides and scores, no orders), **demo** (Kalshi's demo exchange; set `KALSHI_DEMO_KEY_ID` and `KALSHI_DEMO_PRIVATE_KEY` from a demo-environment key), **live**. The page's *Trading agent* panel shows the state, trades and recent looks, and switches modes; switching needs `FEED_TOKEN` set on the Worker and entered in the page, and Live asks you to type LIVE. `GET /trade/status`, `POST /trade/config`.
+
+Run it in paper until the Record shows the model ahead of the market over a few dozen windows, then demo, then live with the cap you can afford to lose.
+
 ## Exact Kalshi data
 
 Browsers are not allowed to read Kalshi directly, so on its own the page estimates the target. Deployed as a Cloudflare Worker (free), the same repo serves the page and relays two read-only Kalshi requests, and the page then shows the exact target, the official 60-second average and Kalshi's own prices.

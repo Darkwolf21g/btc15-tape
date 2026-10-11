@@ -133,7 +133,7 @@ FAKE = r"""
   }
   window.WebSocket = FakeWS;
   window.__trades = true;
-  window.fetch = (u) => {
+  window.fetch = function (u) {
     u = String(u);
     if (u.includes("/trades") && window.__trades) {
       const m = u.match(/after=(\d+)/); let start = m ? +m[1] - 1 : hist.length - 1;
@@ -148,6 +148,9 @@ FAKE = r"""
       return Promise.resolve({ok: true, json: async () => past ? {market: {ticker: tk, status: "finalized", result: past, floor_strike: window.__kTarget}}
         : {market: {ticker: tk, status: "active", strike_type: "greater_or_equal", floor_strike: window.__kTarget, yes_bid_dollars: String(window.__kBid), yes_ask_dollars: String(window.__kAsk)}}});
     }
+    if (u.includes("/trade/status")) return Promise.resolve({ok: true, status: 200, json: async () => ({config: {mode: window.__agentMode || "off", perWindowCents: 1000, dailyLossStopCents: 3000, maxTradesPerDay: 12}, today: {day: "2026-10-10", trades: 1, pnlCents: 1232}, hasDemoKey: false, tokenSet: true, stream: "open", ticks: 1500,
+      windows: [{mk: "X", result: "yes", trades: [{at: Date.now() - 600000, mode: "paper", side: "Up", filled: 22, n: 22, price: 42, offered: 30, edge: 55.6, p: 0.999, pnlCents: 1232}]}], decisions: [{at: Date.now() - 60000, left: 300, p: 0.6, lo: 0.5, hi: 0.7, up: {price: 62, edge: -4, call: "no"}, down: {price: 40, edge: 1, call: "thin"}, note: "no trade"}], errors: []})});
+    if (u.includes("/trade/config")) { window.__agentMode = JSON.parse(arguments[1].body).mode || window.__agentMode; window.__cfgPosts = (window.__cfgPosts || []).concat([arguments[1].body]); return Promise.resolve({ok: true, status: 200, json: async () => ({}), text: async () => ""}); }
     if (u.includes("/brti/history") && window.__stream) {      // the official index's ticks for the hour asked for
       const h = Date.parse(decodeURIComponent(u.match(/timestamp=([^&]+)/)[1]));
       const rows = hist.filter(x => x[0] >= h && x[0] < h + 3600000).filter((x, i) => i % 10 === 0).map(x => ({time: new Date(x[0]).toISOString(), value: (x[1] + 2.0).toFixed(2)}));

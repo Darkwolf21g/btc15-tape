@@ -16,14 +16,14 @@
 const UPSTREAMS = ["https://external-api.kalshi.com/trade-api/v2", "https://api.elections.kalshi.com/trade-api/v2"];
 const WS_UPSTREAM = "https://external-api-ws.kalshi.com/trade-api/ws/v2";   // https + Upgrade header: Workers do not take wss:// in fetch
 const ALLOWED = [/^\/markets\/KXBTC15M-[A-Z0-9-]+$/, /^\/live_data\/events\/KXBTC15M-[A-Z0-9]+$/, /^\/exchange\/status$/];
-const CORS = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS", "Cache-Control": "no-store"};
+const CORS = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Cache-Control": "no-store"};
 const WINDOW = 900;
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url), path = url.pathname.replace(/\/+$/, "");
-    if (request.method === "OPTIONS") return new Response(null, {headers: CORS});
-    if (path === "/feed" || path === "/feed/status" || path === "/record" || path === "/record.csv" || path === "/collector/status") {
+    if (request.method === "OPTIONS") return new Response(null, {headers: {...CORS, "Access-Control-Allow-Headers": "Content-Type"}});
+    if (path === "/feed" || path === "/feed/status" || path === "/record" || path === "/record.csv" || path === "/collector/status" || path === "/trade/status" || path === "/trade/config") {
       if (env.FEED_TOKEN && url.searchParams.get("token") !== env.FEED_TOKEN) return new Response("token", {status: 403, headers: CORS});
       if (!env.FEED) return new Response("feed not configured", {status: 503, headers: CORS});
       return env.FEED.get(env.FEED.idFromName("brti")).fetch(request);
@@ -166,6 +166,22 @@ async function signedGet(env, apiPath, query) {
   if (!r.ok) throw new Error(apiPath + " " + r.status + " " + (await r.text()).slice(0, 100));
   return r.json();
 }
+const HOSTS = {live: "https://external-api.kalshi.com", demo: "https://demo-api.kalshi.co"};
+function keysFor(env, mode) {
+  return mode === "demo" ? {id: env.KALSHI_DEMO_KEY_ID, pem: env.KALSHI_DEMO_PRIVATE_KEY} : {id: env.KALSHI_KEY_ID, pem: env.KALSHI_PRIVATE_KEY};
+}
+async function signedCall(env, mode, method, apiPath, body) {
+  const k = keysFor(env, mode);
+  if (!k.id || !k.pem) throw new Error("no " + mode + " key");
+  const stamp = String(Date.now()), sig = await signHandshake(k.pem, stamp + method + apiPath);
+  const r = await fetch(HOSTS[mode === "demo" ? "demo" : "live"] + apiPath, {method, body: body ? JSON.stringify(body) : undefined,
+    headers: {"Accept": "application/json", "Content-Type": "application/json", "KALSHI-ACCESS-KEY": k.id.trim(), "KALSHI-ACCESS-SIGNATURE": sig, "KALSHI-ACCESS-TIMESTAMP": stamp}});
+  const text = await r.text();
+  if (!r.ok) throw new Error(method + " " + apiPath + " " + r.status + " " + text.slice(0, 160));
+  return text ? JSON.parse(text) : {};
+}
+const etDay = ms => new Intl.DateTimeFormat("en-CA", {timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit"}).format(new Date(ms));
+const tailFromBand = (mean, sd, tgt) => tailCdf((mean - (tgt - 0.005)) / sd);
 function parseTicks(d) {                        // the CF Benchmarks history payload, tolerant of its shape
   const pl = d && d.data ? d.data.payload : d && d.payload;
   const rows = Array.isArray(pl) ? pl : pl && (pl.values || pl.data || pl.items);
@@ -189,6 +205,10 @@ export class KalshiFeed {
     this.books = {};                              // ticker -> {yes: Map(price -> qty), no: Map(price -> qty)}
     this.idleTimer = null; this.retryTimer = null; this.windowTimer = null;
     this.counts = {};
+    this.ticks = [];                              // [[ms, value]] from the stream, last 20 minutes, for the agent
+    this.settleAvg = null;                        // Kalshi's accumulating final-minute average, when streamed
+    this.lastTicker = {};                         // ticker -> {bid, ask, at}
+    this.agentBusy = false;
   }
   status() {
     return {type: "relay", msg: {state: this.upState, since: this.upSince, lastMessage: this.upMsgAt, error: this.lastErr,
@@ -200,6 +220,30 @@ export class KalshiFeed {
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === "/feed/status") { await this.ensureAlarm(); return new Response(JSON.stringify(this.status().msg), {headers: {...CORS, "Content-Type": "application/json"}}); }
+    if (url.pathname === "/trade/status") {
+      const cfg = await this.tradeConfig(), log = await this.tradeLog(), day = (await this.state.storage.get("trade.day")) || null;
+      const all = await this.state.storage.list({prefix: "t:"}), windows = [...all.values()].sort((a, b) => a.close - b.close).slice(-60);
+      return new Response(JSON.stringify({config: cfg, today: day, hasDemoKey: !!(this.env.KALSHI_DEMO_KEY_ID && this.env.KALSHI_DEMO_PRIVATE_KEY), tokenSet: !!this.env.FEED_TOKEN,
+        stream: this.upState, ticks: this.ticks.length, windows, decisions: log.decisions.slice(-30), errors: log.errors.slice(-10)}), {headers: {...CORS, "Content-Type": "application/json"}});
+    }
+    if (url.pathname === "/trade/config") {
+      if (request.method !== "POST") return new Response("POST", {status: 405, headers: CORS});
+      if (!this.env.FEED_TOKEN) return new Response("set FEED_TOKEN on the Worker before controlling the agent", {status: 403, headers: CORS});
+      let body; try { body = await request.json(); } catch (e) { return new Response("json", {status: 400, headers: CORS}); }
+      const cfg = await this.tradeConfig();
+      if (body.mode != null) {
+        if (!["off", "paper", "demo", "live"].includes(body.mode)) return new Response("mode", {status: 400, headers: CORS});
+        if (body.mode === "live" && body.confirm !== "LIVE") return new Response("live needs confirm: LIVE", {status: 400, headers: CORS});
+        if (body.mode === "demo" && !(this.env.KALSHI_DEMO_KEY_ID && this.env.KALSHI_DEMO_PRIVATE_KEY)) return new Response("demo needs KALSHI_DEMO_KEY_ID and KALSHI_DEMO_PRIVATE_KEY", {status: 400, headers: CORS});
+        cfg.mode = body.mode;
+      }
+      for (const k of ["perWindowCents", "dailyLossStopCents", "maxTradesPerDay", "minEdge", "bankrollCents", "firstSeconds", "lastSeconds"]) if (body[k] != null && Number.isFinite(+body[k])) cfg[k] = +body[k];
+      cfg.perWindowCents = Math.min(cfg.perWindowCents, 5000);                 // a hard ceiling of $50 a window, whatever is asked
+      await this.state.storage.put("trade.cfg", cfg);
+      await this.state.storage.setAlarm(this.nextEvent(Date.now(), cfg.mode !== "off", cfg));
+      if (cfg.mode !== "off") this.ensureUpstream();
+      return new Response(JSON.stringify(cfg), {headers: {...CORS, "Content-Type": "application/json"}});
+    }
     if (url.pathname === "/collector/status") { await this.ensureAlarm(); const c = (await this.state.storage.get("collector")) || {}; c.nextAlarm = await this.state.storage.getAlarm(); return new Response(JSON.stringify(c), {headers: {...CORS, "Content-Type": "application/json"}}); }
     if (url.pathname === "/record" || url.pathname === "/record.csv") {
       await this.ensureAlarm();
@@ -233,7 +277,7 @@ export class KalshiFeed {
   }
   maybeIdle() {
     if (this.clients.size || this.idleTimer) return;
-    this.idleTimer = setTimeout(() => { this.idleTimer = null; if (!this.clients.size) this.closeUpstream("idle"); }, 60000);
+    this.idleTimer = setTimeout(async () => { this.idleTimer = null; const cfg = await this.tradeConfig(); if (!this.clients.size && cfg.mode === "off") this.closeUpstream("idle"); }, 60000);
   }
   closeUpstream(why) {
     if (this.windowTimer) { clearTimeout(this.windowTimer); this.windowTimer = null; }
@@ -289,12 +333,17 @@ export class KalshiFeed {
   // ---- the collector: scores every window whether or not a page is open
   async ensureAlarm() {
     if (!(this.env.KALSHI_KEY_ID && this.env.KALSHI_PRIVATE_KEY)) return;
-    if ((await this.state.storage.getAlarm()) == null) await this.state.storage.setAlarm(this.nextEvent(Date.now()));
+    if ((await this.state.storage.getAlarm()) == null) { const cfg = await this.tradeConfig(); await this.state.storage.setAlarm(this.nextEvent(Date.now(), cfg.mode !== "off", cfg)); }
   }
-  nextEvent(nowMs) {                           // the next checkpoint or settlement moment after now, in ms
+  nextEvent(nowMs, agentOn, cfg) {             // the next checkpoint, settlement or agent moment after now, in ms
     const now = nowMs / 1000, close = (Math.floor(now / WINDOW) + 1) * WINDOW, times = [];
     for (const c of [close - WINDOW, close, close + WINDOW]) { for (const k of CHECKS) times.push(c - k); times.push(c + 90, c + 400); }
-    return Math.min(...times.filter(t => t > now + 1)) * 1000;
+    if (agentOn) {
+      const first = cfg ? cfg.firstSeconds : 300, lastS = cfg ? cfg.lastSeconds : 15;
+      const zoneStart = close - WINDOW + first, zoneEnd = close - lastS;
+      if (now < zoneStart - 1) times.push(zoneStart); else if (now < zoneEnd - 1) times.push(now + 5); else times.push(close + first);
+    }
+    return Math.min(...times.filter(t => t > now + 0.5)) * 1000;
   }
   async alarm() {
     const nowMs = Date.now(), now = nowMs / 1000, log = (await this.state.storage.get("collector")) || {runs: 0, errors: []};
@@ -304,11 +353,14 @@ export class KalshiFeed {
       const check = CHECKS.find(k => Math.abs(left - k) < 20);
       if (check) await this.checkpoint(marketTicker(close), close, check, nowMs);
       const prevClose = close - WINDOW, since = now - prevClose;
-      if (since > 60 && since < 450) await this.settle(marketTicker(prevClose), prevClose);
+      if (since > 60 && since < 450) { await this.settle(marketTicker(prevClose), prevClose); await this.settleTrades(marketTicker(prevClose), prevClose); }
       log.lastOk = nowMs;
     } catch (e) { log.errors = (log.errors || []).concat([{at: nowMs, error: String(e.message || e).slice(0, 200)}]).slice(-10); }
     await this.state.storage.put("collector", log);
-    await this.state.storage.setAlarm(this.nextEvent(nowMs));
+    const cfg = await this.tradeConfig(), on = cfg.mode !== "off";
+    if (on) await this.agentTick(nowMs);
+    else if (!this.clients.size && this.up) this.closeUpstream("agent off");
+    await this.state.storage.setAlarm(this.nextEvent(Date.now(), on, cfg));
   }
   async checkpoint(mk, close, check, nowMs) {
     const key = "w:" + mk, w = (await this.state.storage.get(key)) || {mk, close, tgt: null, checks: {}, result: null, src: null, relay: true};
@@ -344,6 +396,115 @@ export class KalshiFeed {
       await this.state.storage.put(key, w);
     }
   }
+  pushTick(ms, v) {
+    const last = this.ticks[this.ticks.length - 1];
+    if (last && Math.abs(v - last[1]) > 0.005 * last[1] && ms - last[0] < 10000) { this.oddTick = (this.oddTick || 0) + 1; if (this.oddTick < 2) return; }
+    this.oddTick = 0;
+    if (!last || ms >= last[0]) this.ticks.push([ms, v]);
+    const cut = ms - 1200000; while (this.ticks.length && this.ticks[0][0] < cut) this.ticks.shift();
+  }
+
+  // ---- the execution agent
+  // Runs from 10 minutes before each close to 15 seconds before it, every 5 seconds, on the stream.
+  // Modes: off (default), paper (decides, logs, scores; no orders), demo (Kalshi's demo exchange,
+  // its own key pair), live. Every order is a limit at the ask, immediate-or-cancel, so nothing rests.
+  async tradeConfig() {
+    const c = (await this.state.storage.get("trade.cfg")) || {};
+    return Object.assign({mode: "off", perWindowCents: 1000, dailyLossStopCents: 3000, maxTradesPerDay: 12, minEdge: 3, bankrollCents: 50000, firstSeconds: 300, lastSeconds: 15}, c);
+  }
+  async tradeLog() { return (await this.state.storage.get("trade.log")) || {decisions: [], errors: []}; }
+  async agentTick(nowMs) {
+    const cfg = await this.tradeConfig();
+    if (cfg.mode === "off" || this.agentBusy) return;
+    this.agentBusy = true;
+    const log = await this.tradeLog();
+    try {
+      const now = nowMs / 1000, close = (Math.floor(now / WINDOW) + 1) * WINDOW, left = close - now, mk = marketTicker(close);
+      if (left > WINDOW - cfg.firstSeconds || left < cfg.lastSeconds) return;
+      if (!this.up) { await this.ensureUpstream(); return; }                    // the stream feeds the model; try again next tick
+      const key = "t:" + mk, w = (await this.state.storage.get(key)) || {mk, close, trades: [], decided: 0};
+      if (w.trades.length) return;                                              // one trade per window
+      const day = etDay(nowMs), today = (await this.state.storage.get("trade.day")) || {day, trades: 0, pnlCents: 0};
+      if (today.day !== day) { today.day = day; today.trades = 0; today.pnlCents = 0; }
+      if (today.trades >= cfg.maxTradesPerDay || today.pnlCents <= -cfg.dailyLossStopCents) return;
+      const last = this.ticks[this.ticks.length - 1];
+      if (!last || nowMs - last[0] > 3000 || this.ticks.length < 200) return;
+      let tgt = w.tgt;
+      if (!tgt) { const d = await signedGet(this.env, "/trade-api/v2/markets/" + mk); tgt = d && d.market && +d.market.floor_strike > 0 ? +d.market.floor_strike : null; if (!tgt) return; w.tgt = tgt; }
+      const vols = volsFrom(this.ticks, nowMs); if (!vols) return;
+      const x = last[1];
+      const projectWith = (xx, vv) => {
+        const pr = projectFrom(this.ticks, nowMs, close, xx, vv);
+        const sa = this.settleAvg;
+        if (sa && nowMs - sa.at < 3000 && Math.abs(sa.end - close * 1000) < 90000 && sa.n >= 1) {    // Kalshi's own count of the settlement minute
+          const m = Math.min(pr.m, SETTLE - sa.n); pr.mean = (sa.v * sa.n + m * xx) / (sa.n + m); pr.official = true;
+        }
+        return pr;
+      };
+      const base = projectWith(x, vols), p = tailFromBand(base.mean, base.sd, tgt);
+      let lo = 1, hi = 0; const adverse = vols.s * Math.sqrt(10);
+      for (const k of [0.7, 1, 1.5]) for (const shift of [-adverse, 0, adverse]) { const pr = projectWith(x + shift, {s: vols.s * k, l: vols.l * k}); const q = tailFromBand(pr.mean, pr.sd, tgt); if (q < lo) lo = q; if (q > hi) hi = q; }
+      const b = this.books[mk], best = m => { let pp = null, q = 0; for (const [px, qty] of m) if (pp == null || px > pp) { pp = px; q = qty; } return pp == null ? null : {price: Math.round((1 - pp) * 100), size: Math.floor(q)}; };
+      const offer = {Up: b ? best(b.no) : null, Down: b ? best(b.yes) : null};
+      const tk = this.lastTicker[mk];
+      if (!offer.Up && tk && tk.ask) offer.Up = {price: Math.round(tk.ask * 100), size: 1};
+      if (!offer.Down && tk && tk.bid) offer.Down = {price: Math.round((1 - tk.bid) * 100), size: 1};
+      const decide = (side, worst, off) => {
+        if (!off || !(off.price > 0 && off.price < 100)) return null;
+        const fee = feeCents(off.price / 100), edge = worst * 100 - off.price - fee;
+        if (edge < cfg.minEdge) return {side, price: off.price, edge: +edge.toFixed(1), call: edge <= 0 ? "no" : "thin"};
+        const c = (off.price + fee) / 100, f = (worst - c) / (1 - c), stake = Math.min(cfg.perWindowCents / 100, 0.02 * cfg.bankrollCents / 100, 0.25 * f * cfg.bankrollCents / 100);
+        const n = Math.min(Math.floor(stake / c), off.size);
+        return {side, price: off.price, edge: +edge.toFixed(1), call: n >= 1 ? "buy" : "thin", n: Math.max(0, n), offered: off.size};
+      };
+      const dUp = decide("Up", lo, offer.Up), dDown = decide("Down", 1 - hi, offer.Down);
+      w.decided++;
+      const pick = dUp && dUp.call === "buy" ? dUp : dDown && dDown.call === "buy" ? dDown : null;
+      if (!pick) {
+        w.holding = null;
+        if (w.decided % 12 === 1) { log.decisions = log.decisions.concat([{at: nowMs, mk, left: Math.round(left), p: +p.toFixed(3), lo: +lo.toFixed(3), hi: +hi.toFixed(3), up: dUp, down: dDown, note: "no trade"}]).slice(-200); await this.state.storage.put("trade.log", log); }
+        await this.state.storage.put(key, w); return;
+      }
+      // a call must hold across two ticks (about 5 s) before anything is sent: a blip must not trade
+      if (!w.holding || w.holding.side !== pick.side) { w.holding = {side: pick.side, since: nowMs}; await this.state.storage.put(key, w); return; }
+      if (nowMs - w.holding.since < 4000) { await this.state.storage.put(key, w); return; }
+      const trade = {at: nowMs, mk, left: Math.round(left), side: pick.side, price: pick.price, n: pick.n, offered: pick.offered, edge: pick.edge, p: +p.toFixed(3), lo: +lo.toFixed(3), hi: +hi.toFixed(3), x: +x.toFixed(2), sd: +base.sd.toFixed(2), official: !!base.official, mode: cfg.mode, filled: 0, cost: 0};
+      if (cfg.mode === "paper") { trade.filled = pick.n; trade.cost = pick.n * pick.price; trade.status = "paper"; }
+      else {
+        const body = {ticker: mk, action: "buy", side: pick.side === "Up" ? "yes" : "no", count: pick.n, type: "limit", time_in_force: "immediate_or_cancel",
+                      client_order_id: crypto.randomUUID(), cancel_order_on_pause: true};
+        if (pick.side === "Up") body.yes_price = pick.price; else body.no_price = pick.price;
+        const r = await signedCall(this.env, cfg.mode, "POST", "/trade-api/v2/portfolio/orders", body);
+        const o = (r && r.order) || {};
+        trade.orderId = o.order_id || null; trade.status = o.status || "sent"; trade.filled = +o.fill_count || 0; trade.cost = +o.taker_fill_cost || 0;
+        trade.feesCents = Math.round((+o.taker_fees || 0) + (+o.maker_fees || 0));
+      }
+      w.trades.push(trade); today.trades++;
+      await this.state.storage.put(key, w); await this.state.storage.put("trade.day", today);
+      log.decisions = log.decisions.concat([Object.assign({note: "TRADE"}, trade)]).slice(-200);
+      await this.state.storage.put("trade.log", log);
+    } catch (e) {
+      log.errors = (log.errors || []).concat([{at: nowMs, error: String(e.message || e).slice(0, 200)}]).slice(-20);
+      await this.state.storage.put("trade.log", log);
+    } finally { this.agentBusy = false; }
+  }
+  async settleTrades(mk, close) {               // after the close: score the window's trade against the official result
+    const key = "t:" + mk, w = await this.state.storage.get(key);
+    if (!w || !w.trades.length || w.settled) return;
+    const d = await signedGet(this.env, "/trade-api/v2/markets/" + mk), m = d && d.market;
+    if (!(m && (m.result === "yes" || m.result === "no"))) return;
+    const yes = m.result === "yes";
+    let pnl = 0;
+    for (const t of w.trades) {
+      if (!t.filled) { t.pnlCents = 0; continue; }
+      const won = t.side === "Up" ? yes : !yes, fee = t.feesCents != null ? t.feesCents : Math.round(t.filled * feeCents(t.price / 100));
+      t.pnlCents = Math.round(t.filled * (won ? 100 - t.price : -t.price)) - fee; pnl += t.pnlCents;
+    }
+    w.result = m.result; w.settled = true;
+    const today = (await this.state.storage.get("trade.day")) || {day: etDay(Date.now()), trades: 0, pnlCents: 0};
+    if (today.day === etDay(close * 1000)) today.pnlCents += pnl;
+    await this.state.storage.put(key, w); await this.state.storage.put("trade.day", today);
+  }
   snapshotOf(tk, b) {
     return {type: "orderbook_snapshot", msg: {market_ticker: tk, yes_dollars_fp: [...b.yes].map(([p, q]) => [p.toFixed(4), q.toFixed(2)]), no_dollars_fp: [...b.no].map(([p, q]) => [p.toFixed(4), q.toFixed(2)])}};
   }
@@ -364,6 +525,13 @@ export class KalshiFeed {
       const m = this.books[d.msg.market_ticker][d.msg.side === "no" ? "no" : "yes"], px = +d.msg.price_dollars, q = (m.get(px) || 0) + +d.msg.delta_fp;
       if (q > 0) m.set(px, q); else m.delete(px);
     }
+    if (d.type === "cfbenchmarks_value_5hz" && d.msg && +d.msg.value_usd > 0) this.pushTick(+d.msg.source_ts_ms || Date.now(), +d.msg.value_usd);
+    if (d.type === "cfbenchmarks_value" && d.msg) {
+      try { const v = +JSON.parse(d.msg.data).value; if (v > 0) this.pushTick(Date.now(), v); } catch (e) {}
+      const f = d.msg.last_60s_windowed_average_15min;
+      this.settleAvg = f && +f.value > 0 ? {v: +f.value, n: +f.window_size, end: +f.window_end_ts_exclusive, at: Date.now()} : null;
+    }
+    if (d.type === "ticker" && d.msg && d.msg.market_ticker) this.lastTicker[d.msg.market_ticker] = {bid: +d.msg.yes_bid_dollars || null, ask: +d.msg.yes_ask_dollars || null, at: Date.now()};
     if (d.type === "error") { this.lastErr = "kalshi error " + JSON.stringify(d.msg).slice(0, 150); this.broadcast(JSON.stringify(this.status())); return; }
     if (d.type === "cfbenchmarks_value" || d.type === "cfbenchmarks_value_5hz" || d.type === "ticker" || d.type === "orderbook_snapshot" || d.type === "orderbook_delta") {
       if (d.type.startsWith("orderbook")) { this.broadcast(data); return; }     // books are rebuilt for newcomers from this.books
