@@ -28,6 +28,27 @@ export default {
       if (!env.FEED) return new Response("feed not configured", {status: 503, headers: CORS});
       return env.FEED.get(env.FEED.idFromName("brti")).fetch(request);
     }
+    // Self-test: sign a cheap authenticated REST call and report what Kalshi says (status codes only).
+    if (path === "/feed/selftest") {
+      if (env.FEED_TOKEN && url.searchParams.get("token") !== env.FEED_TOKEN) return new Response("token", {status: 403, headers: CORS});
+      const out = {keyIdLength: (env.KALSHI_KEY_ID || "").length, keyIdTrimmedLength: (env.KALSHI_KEY_ID || "").trim().length,
+                   keyIdShape: /^[0-9a-f-]{36}$/.test((env.KALSHI_KEY_ID || "").trim()) ? "uuid" : "not a uuid",
+                   pemLines: (env.KALSHI_PRIVATE_KEY || "").replace(/\\n/g, "\n").trim().split("\n").length,
+                   pemHeader: ((env.KALSHI_PRIVATE_KEY || "").match(/-----BEGIN [A-Z ]*-----/) || ["none"])[0]};
+      try {
+        const der = pemToDer((env.KALSHI_PRIVATE_KEY || "").replace(/\\n/g, "\n"));
+        out.derBytes = der.length;                     // an Ed25519 PKCS#8 key is 48 bytes
+        for (const apiPath of ["/trade-api/v2/portfolio/balance", "/trade-api/v2/cfbenchmarks/values"]) {
+          const stamp = String(Date.now());
+          const sig = await signHandshake(env.KALSHI_PRIVATE_KEY, stamp + "GET" + apiPath);
+          const up = await fetch("https://external-api.kalshi.com" + apiPath + (apiPath.endsWith("values") ? "?id=BRTI" : ""),
+                                 {headers: {"Accept": "application/json", "KALSHI-ACCESS-KEY": env.KALSHI_KEY_ID.trim(), "KALSHI-ACCESS-SIGNATURE": sig, "KALSHI-ACCESS-TIMESTAMP": stamp}});
+          const body = await up.text();
+          out[apiPath] = {status: up.status, reply: up.ok ? "ok (" + body.length + " bytes)" : body.slice(0, 160)};
+        }
+      } catch (e) { out.error = String(e.message || e).slice(0, 200); }
+      return new Response(JSON.stringify(out), {headers: {...CORS, "Content-Type": "application/json"}});
+    }
     // Official BRTI history (CF Benchmarks, passed through Kalshi with the key): one hour of ticks.
     // Costs 50 of the 200 read tokens a second, so the page asks for it a few times a window at most.
     if (path === "/brti/history") {
@@ -39,7 +60,7 @@ export default {
       try {
         const sig = await signHandshake(env.KALSHI_PRIVATE_KEY, stamp + "GET" + apiPath);
         const up = await fetch("https://external-api.kalshi.com" + apiPath + "?id=BRTI&timespan=" + span + "&timestamp=" + encodeURIComponent(ts),
-                               {headers: {"Accept": "application/json", "KALSHI-ACCESS-KEY": env.KALSHI_KEY_ID, "KALSHI-ACCESS-SIGNATURE": sig, "KALSHI-ACCESS-TIMESTAMP": stamp},
+                               {headers: {"Accept": "application/json", "KALSHI-ACCESS-KEY": env.KALSHI_KEY_ID.trim(), "KALSHI-ACCESS-SIGNATURE": sig, "KALSHI-ACCESS-TIMESTAMP": stamp},
                                 cf: {cacheTtl: 0, cacheEverything: false}});
         const body = await up.text();
         return new Response(body, {status: up.status, headers: {...CORS, "Content-Type": "application/json"}});
@@ -164,7 +185,7 @@ export class KalshiFeed {
     try {
       const ts = String(Date.now());
       const sig = await signHandshake(this.env.KALSHI_PRIVATE_KEY, ts + "GET" + "/trade-api/ws/v2");
-      const resp = await fetch(WS_UPSTREAM, {headers: {"Upgrade": "websocket", "KALSHI-ACCESS-KEY": this.env.KALSHI_KEY_ID,
+      const resp = await fetch(WS_UPSTREAM, {headers: {"Upgrade": "websocket", "KALSHI-ACCESS-KEY": this.env.KALSHI_KEY_ID.trim(),
                                                        "KALSHI-ACCESS-SIGNATURE": sig, "KALSHI-ACCESS-TIMESTAMP": ts}});
       const ws = resp.webSocket;
       if (!ws) throw new Error("Kalshi refused the handshake: " + resp.status + " " + (await resp.text().catch(() => "")).slice(0, 120));
