@@ -151,6 +151,7 @@ FAKE = r"""
       window.__histReq = (window.__histReq || 0) + 1;
       return Promise.resolve({ok: true, status: 200, json: async () => ({data: {serverTime: new Date().toISOString(), payload: rows}})});
     }
+    if (u.includes("/exchange/status") && window.__kalshi) return Promise.resolve({ok: true, status: 200, json: async () => ({exchange_active: true, trading_active: window.__tradingActive !== false})});
     if (u.includes("/live_data/") && window.__kalshi) return Promise.resolve({ok: true, json: async () => ({live_data: {details: {timeseries: []}}})});
     if (u.includes("candles") && window.__candle) { const m = u.match(/start=([^&]+)/); const t = Date.parse(decodeURIComponent(m[1]))/1000;
       return Promise.resolve({ok: true, json: async () => [[t, 82890, 82910, 82895, 82905, 1]]}); }

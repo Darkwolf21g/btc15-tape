@@ -24,6 +24,11 @@ with sync_playwright() as p:
     run_seconds(pg, 48)
     r = pg.evaluate(probe); print("final minute:", {k: r[k] for k in ("clock", "proj", "why", "p")})
     print("official known part used:", pg.evaluate("() => { const pr = project(Date.now()/1000, bounds(Date.now()/1000)[1], 83000, sigmas(), []); return [pr.official, pr.observed, pr.m, lastNeed && lastNeed.toFixed(2)]; }"))
+    pg.evaluate("() => { window.__tradingActive = false; exch.checked = 0; pollExchange(); }")
+    run_seconds(pg, 2)
+    print("trading paused:", pg.evaluate("() => [tradingPaused(), document.getElementById('vUp').textContent, [...document.querySelectorAll('.sg')].pop().textContent]"))
+    pg.evaluate("() => { window.__tradingActive = true; exch.checked = 0; pollExchange(); }")
+    run_seconds(pg, 2)
     # the stream drops: the page must fall back to the exchange proxy within a few seconds
     pg.evaluate("() => { window.__stream = false; if (feed.ws) feed.ws.close(); }")
     run_seconds(pg, 6)

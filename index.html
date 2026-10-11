@@ -812,7 +812,17 @@ async function kalshiGet(path) {
   if (kalshi.fails >= 3) kalshi.base = null;        // after a run of failures, look for another route
   return null;
 }
+// Whether Kalshi is open for trading at all: paused or in maintenance, a buy call is worthless.
+const exch = {at: 0, trading: null, active: null, resume: null, checked: 0};
+async function pollExchange() {
+  if (Date.now() - exch.checked < 30000) return;
+  exch.checked = Date.now();
+  const d = await kalshiGet("/exchange/status");
+  if (d && typeof d.trading_active === "boolean") { exch.trading = d.trading_active; exch.active = d.exchange_active !== false; exch.resume = d.exchange_estimated_resume_time || null; exch.at = Date.now(); }
+}
+const tradingPaused = () => exch.at && Date.now() - exch.at < 120000 && (exch.trading === false || exch.active === false);
 async function pollKalshi() {
+  pollExchange();
   const now = Date.now() / 1000, [, close] = bounds(now), [ev, mk] = tickers(close);
   const d = await kalshiGet("/markets/" + mk);
   if (!d || !d.market) {
@@ -1560,8 +1570,9 @@ function render() {
   $("edgeHead").textContent = km ? `Kalshi's book now: Up ${upC}¢ · Down ${downC}¢ (Robinhood sells at these). Type over them if Robinhood differs.`
     : "Type what Robinhood's buttons say to see your edge";
   const typedUp = $("rhUp").value ? parseFloat($("rhUp").value) : null, typedDown = $("rhDown").value ? parseFloat($("rhDown").value) : null;
-  const waitReason = !exactTarget ? "WAIT: enter or retrieve the exact target" : "WAIT: incomplete data or model unavailable";
-  const signalP = exactTarget ? p : null;
+  const paused = tradingPaused();
+  const waitReason = paused ? "WAIT: Kalshi has trading paused" + (exch.resume ? " (until about " + ET_CLOCK.format(new Date(exch.resume)) + ")" : "") : !exactTarget ? "WAIT: enter or retrieve the exact target" : "WAIT: incomplete data or model unavailable";
+  const signalP = exactTarget && !paused ? p : null;
   const vUp = verdict($("vUp"), signalP, band && band.lo, typedUp != null ? typedUp : upC, waitReason);
   const vDown = verdict($("vDown"), signalP == null ? null : 1 - signalP, band && 1 - band.hi, typedDown != null ? typedDown : downC, waitReason);
   keepRecord(mk, close, left, tgt, p, proj && tgt != null ? chanceMatched(proj.mean, proj.sd, tgt) : null, km, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, typedUp != null || typedDown != null);
@@ -1653,7 +1664,7 @@ function renderChips(nowMs, mk) {
   const q = kalshi.market && kalshi.market.ticker === mk && kalshi.market.bid ? kalshi.market : null;
   const qtxt = q ? `Kalshi book ${((nowMs - q.at) / 1000).toFixed(1)} s (${kalshi.pushAt && nowMs - kalshi.pushAt < 15000 ? "pushed" : "polled"})` : "";
   const html = group("Price · trades", price.join("")) + group("Liquidations", liq.join(""))
-    + group("Market", (fcls !== "" || feedUrl() ? chip(fcls, ftxt) : "") + (qtxt ? chip(nowMs - q.at < 5000 ? "ok" : "slow", qtxt) : "") + chip(kcls, ktxt + kerr));
+    + group("Market", (exch.at ? chip(tradingPaused() ? "off" : "ok", tradingPaused() ? (exch.active === false ? "Kalshi in maintenance" : "Kalshi trading paused") : "Kalshi trading open") : "") + (fcls !== "" || feedUrl() ? chip(fcls, ftxt) : "") + (qtxt ? chip(nowMs - q.at < 5000 ? "ok" : "slow", qtxt) : "") + chip(kcls, ktxt + kerr));
   if (html !== lastChips) { lastChips = html; $("sources").innerHTML = html; }
   $("mktLegend").hidden = !kalshi.ok;
 }
