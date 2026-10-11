@@ -898,6 +898,15 @@ function feedUrl() {
   return base ? base.replace(/^http/, "ws") + "/feed" + (feed.token ? "?token=" + encodeURIComponent(feed.token) : "") : null;
 }
 const feedLive = () => feed.brti != null && Date.now() - feed.brti.at < FEED_FRESH_MS;
+// A reading more than 0.5% from the last accepted one within a few seconds is a glitch, not a move;
+// two such readings in a row are a move. Counted in the diagnostics.
+function saneTick(v) {
+  if (!(v > 0)) return false;
+  const last = feed.brti;
+  if (!last || Date.now() - last.at > 10000 || Math.abs(v - last.v) <= 0.005 * last.v) { feed.odd = 0; return true; }
+  feed.odd = (feed.odd || 0) + 1; feed.oddTotal = (feed.oddTotal || 0) + 1;
+  return feed.odd >= 2;
+}
 const books = {};                                   // market ticker -> {yes, no: Map(price -> contracts), at}
 // What the book offers: Up is bought from resting No bids (Up price = 1 - best No bid), Down from
 // resting Yes bids. Returns {up: {price, size}, down: {price, size}} or null without a fresh book.
@@ -924,10 +933,10 @@ function connectFeed() {
     const m = d.msg || {};
     if (d.type === "relay") { feed.relay = m; return; }
     if (d.type === "cfbenchmarks_value_5hz") {
-      const v = +m.value_usd; if (v > 0) feed.brti = {v, t: +m.source_ts_ms || 0, at: Date.now()};
+      const v = +m.value_usd; if (saneTick(v)) feed.brti = {v, t: +m.source_ts_ms || 0, at: Date.now()};
     } else if (d.type === "cfbenchmarks_value") {
       let v = null; try { v = +JSON.parse(m.data).value; } catch (e) {}
-      if (v > 0 && (!feed.brti || Date.now() - feed.brti.at > 1200)) feed.brti = {v, t: 0, at: Date.now()};   // the 1/s tick, when the 5/s one is quiet
+      if (saneTick(v) && (!feed.brti || Date.now() - feed.brti.at > 1200)) feed.brti = {v, t: 0, at: Date.now()};   // the 1/s tick, when the 5/s one is quiet
       const a = m.avg_60s_data;
       if (a && +a.value > 0) feed.avg60 = {v: +a.value, n: +a.window_size, end: +a.window_end_ts_exclusive, at: Date.now()};
       const f = m.last_60s_windowed_average_15min;
@@ -1372,6 +1381,8 @@ function verdict(el, fair, worstFair, priceCents, waitReason = "WAIT: model unav
 // averages are diagnostics, never outcome labels. From confirmed results, a Brier score for the model
 // and one for the market at each checkpoint, and what the buy calls would have made.
 const CHECKS = [600, 300, 120, 60];
+const buyHold = {Up: 0, Down: 0};        // when each side's buy call started holding
+let lastInputs = null;                   // the model's inputs at the last render, logged with every buy call
 const record = {windows: store.get("record") || [], cur: null};
 // Older versions scored their own proxy result. Preserve it as a diagnostic and wait for Kalshi.
 for (const w of record.windows) if (w.src !== "kalshi" && w.result) {
@@ -1396,8 +1407,12 @@ function keepRecord(mk, close, left, tgt, p, p2, km, vUp, vDown, upC, downC, typ
     saveRecord();
   }
   for (const [side, v, price] of [["Up", vUp, upC], ["Down", vDown, downC]]) {
-    if (v && v.call === "buy" && left > SETTLE && price > 0 && !r.buys.some(b => b.side === side)) {
-      const b = {side, price, p: +(side === "Up" ? p : 1 - p).toFixed(3), worst: +v.worst.toFixed(1), left: Math.round(left), typed: !!typed, n: v.n};
+    const isBuy = v && v.call === "buy" && left > SETTLE && price > 0;
+    if (!isBuy) { buyHold[side] = 0; continue; }
+    if (!buyHold[side]) buyHold[side] = Date.now();
+    if (Date.now() - buyHold[side] >= 3000 && !r.buys.some(b => b.side === side)) {
+      const b = {side, price, p: +(side === "Up" ? p : 1 - p).toFixed(3), worst: +v.worst.toFixed(1), left: Math.round(left), typed: !!typed, n: v.n,
+                 why: lastInputs};
       r.buys.push(b);
       // the price you would actually have paid: Kalshi's ask one and three seconds after the call
       const later = key => { const m = kalshi.market; if (m && m.ticker === mk && m.bid && m.ask) { b[key] = side === "Up" ? Math.round(m.ask * 100) : Math.round((1 - m.bid) * 100); saveRecord(); } };
@@ -1473,7 +1488,7 @@ function recordText() {
     const when = ET_CLOCK.format(new Date((w.close - WINDOW) * 1000));
     const res = w.src === "kalshi" && w.result ? `${w.result === "yes" ? "Up" : "Down"} (official Kalshi)` : Date.now() / 1000 >= w.close ? "awaiting official result" : "open";
     const ch = [300, 60].map(c => { const k = w.checks[c]; return k ? `${c / 60} min: model ${Math.round(k.p * 100)}%` + (k.ask != null ? ` mkt ${Math.round((k.ask + k.bid) * 50)}¢` : "") : null; }).filter(Boolean).join(" · ");
-    const buys = w.buys.map(b => { const sc = s.buys.find(x => x.mk === w.mk && x.side === b.side); return `buy ${b.side} ${b.price}¢` + (b.after3 != null && b.after3 !== b.price ? ` (${b.after3}¢ 3 s later)` : "") + ` at ${Math.floor(b.left / 60)}:${String(b.left % 60).padStart(2, "0")}` + (sc ? ` → ${cents(sc.pnl)}` : ""); }).join(", ");
+    const buys = w.buys.map(b => { const sc = s.buys.find(x => x.mk === w.mk && x.side === b.side); return `buy ${b.side} ${b.price}¢` + (b.after3 != null && b.after3 !== b.price ? ` (${b.after3}¢ 3 s later)` : "") + ` at ${Math.floor(b.left / 60)}:${String(b.left % 60).padStart(2, "0")}` + (sc ? ` → ${cents(sc.pnl)}` : "") + (b.why ? ` [spot ${b.why.x} ${b.why.src}, ±${b.why.sd}, lean ${b.why.lean}, ${b.why.known}]` : ""); }).join(", ");
     lines.push(`${when}  target ${w.tgt != null ? money(w.tgt) : "?"}  ${res}` + (w.officialCloseAvg != null ? `  official average ${money(w.officialCloseAvg)}` : "") + (w.closeAvg != null ? `  proxy average ${money(w.closeAvg)} (unofficial)` : w.proxyMissing ? `  proxy INCOMPLETE: ${w.proxySamples}/60 samples` : "") + (ch ? `\n     ${ch}` : "") + (buys ? `\n     ${buys}` : ""));
   }
   return lines.join("\n");
@@ -1584,6 +1599,7 @@ function render() {
   $("lvProjNote").textContent = proj ? (proj.observed ? (proj.official ? `${proj.observed}/60 s in Kalshi's own average` : `${proj.observed}/60 proxy samples, ${proj.reconstructed} reconstructed`) + (need != null ? ` · Up needs ≥ ${money(need)} over the last ${proj.m} s` : "") : (live ? "official index; forecast until the final minute" : "exchange-proxy forecast until the final minute")) + ` · ±${proj.sd.toFixed(0)} model scale · vol $${vols.s.toFixed(1)} now, $${vols.l.toFixed(1)}/√s over 15 min` + (lean ? ` · lean ${signed(lean)}` : "")
     : projectionStatus && projectionStatus.missing ? `INCOMPLETE: ${projectionStatus.missing} elapsed proxy samples missing` : vols == null ? "measuring volatility…" : "needs the target";
   lastNeed = need;
+  lastInputs = proj ? {x: +x.toFixed(2), src: live ? "stream" : "exchanges", sd: +proj.sd.toFixed(1), lean: +lean.toFixed(1), known: proj.official ? "official" : proj.observed + "/60", tgt, vol: +vols.s.toFixed(2)} : null;
   // the settlement minute, in one strip
   const inFinal = left <= SETTLE && left > 0 && proj && proj.observed;
   $("settle").hidden = !inFinal;
@@ -1790,7 +1806,7 @@ function diagnostics(now, open) {
   lines.push(`flow 60 s: spot bought ${fmtUsd(f.b)} sold ${fmtUsd(f.s)} · perp bought ${fmtUsd(f.pb)} sold ${fmtUsd(f.ps)} · liquidations kept ${liqs.length} · big prints ${whales.length} · sound ${snd.on ? "on" : "off"}`);
   const fr = feed.relay || {};
   lines.push(`stream: ${feed.state}` + (feedUrl() ? ` to ${feedUrl().replace(/\?.*/, "")}` : " (no relay)") + ` · counts ${JSON.stringify(feed.counts)} · relay ${fr.state || "?"}${fr.error ? " " + fr.error : ""}${fr.hasKey === false ? " · no key set" : ""}`
-    + (feed.brti ? ` · BRTI ${feed.brti.v.toFixed(2)} ${((t - feed.brti.at) / 1000).toFixed(1)}s` : "") + (feed.settle ? ` · settle avg ${feed.settle.v.toFixed(2)} n ${feed.settle.n}` : ""));
+    + (feed.brti ? ` · BRTI ${feed.brti.v.toFixed(2)} ${((t - feed.brti.at) / 1000).toFixed(1)}s` : "") + (feed.oddTotal ? ` · odd ticks ignored ${feed.oddTotal}` : "") + (feed.settle ? ` · settle avg ${feed.settle.v.toFixed(2)} n ${feed.settle.n}` : ""));
   const st = calStats();
   lines.push(`nowcast: samples ${cal.n.toFixed(0)}` + (st ? ` · flow ${st.b1.toFixed(1)} $ per $1M (t ${st.t1.toFixed(1)}, ${st.flowOn ? "on" : "off"}) · perp gap ×${st.b2.toFixed(2)} (t ${st.t2.toFixed(1)}, ${st.leadOn ? "on" : "off"})` : " · needs 120")
     + ` · level sd ${levelSd().toFixed(1)}` + (basisSd != null ? ` (measured ${basisSd.toFixed(2)})` : "") + ` · bankroll $${bankroll}`);
