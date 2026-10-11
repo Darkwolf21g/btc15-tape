@@ -12,6 +12,10 @@ Live view of the BTC 15-minute event contract (Robinhood "BTC 15 min", settled o
 - **Liquidations** from Bybit, OKX, Deribit and BitMEX (Binance refuses US connections): longs liquidated is forced selling, shorts liquidated is forced buying.
 - **Sound.** Tap Sound once. Two rising or falling notes on a sharp move, three notes when Kalshi's price leaves a 3¢ edge, one low note at a minute to go.
 
+## The relay scores every window on its own
+
+With the key set, the relay wakes at 10, 5, 2 and 1 minutes before each close and 90 seconds after it, reads the index's tick history and the market, runs the same projection, and stores the chance, Kalshi's book and later the official result for every window, whether or not a page is open. The page merges that into its Record once a minute. `GET /record` returns the stored windows as JSON, `GET /record.csv` as a spreadsheet, `GET /collector/status` the last run and any errors.
+
 ## Exact Kalshi data
 
 Browsers are not allowed to read Kalshi directly, so on its own the page estimates the target. Deployed as a Cloudflare Worker (free), the same repo serves the page and relays two read-only Kalshi requests, and the page then shows the exact target, the official 60-second average and Kalshi's own prices.

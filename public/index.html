@@ -1449,6 +1449,32 @@ async function settleOfficial(r) {                 // Kalshi's result, usually t
 // Windows left unsettled by an earlier session: ask Kalshi once, a few at a time.
 record.windows.filter(w => w.src !== "kalshi" && Date.now() / 1000 - w.close > 90).slice(-20)
   .forEach((w, i) => setTimeout(() => settleOfficial(w), 8000 + i * 1500));
+// The relay scores every window on its own (it wakes at each checkpoint and after each close). Its
+// windows are merged in: checkpoints this page missed, results it has not fetched, windows it never saw.
+let relayRecordAt = 0;
+async function mergeRelayRecord() {
+  const base = kalshi.relay || SAME_SITE;
+  if (!base || Date.now() - relayRecordAt < 300000) return;
+  relayRecordAt = Date.now();
+  try {
+    const r = await fetch(base + "/record" + (feed.token ? "?token=" + encodeURIComponent(feed.token) : ""), {cache: "no-store"});
+    if (!r.ok) return;
+    const rows = await r.json();
+    if (!Array.isArray(rows)) return;
+    let changed = 0;
+    for (const w of rows) {
+      let local = record.windows.find(x => x.mk === w.mk);
+      if (!local) { local = {mk: w.mk, close: w.close, tgt: w.tgt, checks: {}, buys: [], result: null, src: null, closeAvg: null, relay: true}; record.windows.push(local); changed++; }
+      for (const [c, k] of Object.entries(w.checks || {})) if (!local.checks[c] && k.p != null) { local.checks[c] = {p: k.p, p2: k.p2, ask: k.ask, bid: k.bid, relay: true}; changed++; }
+      if (w.src === "kalshi" && local.src !== "kalshi") { local.result = w.result; local.src = "kalshi"; if (w.officialCloseAvg != null) local.officialCloseAvg = w.officialCloseAvg; changed++; }
+      if (local.tgt == null && w.tgt != null) local.tgt = w.tgt;
+    }
+    if (changed) { record.windows.sort((a, b) => a.close - b.close); saveRecord(); }
+    relayRecordNote = `${rows.length} windows from the relay, ${changed} merged`;
+  } catch (e) { relayRecordNote = "relay record not reachable"; }
+}
+let relayRecordNote = "";
+setInterval(mergeRelayRecord, 60000); setTimeout(mergeRelayRecord, 4000);
 function scoreRecord() {
   const settled = record.windows.filter(w => w.src === "kalshi" && (w.result === "yes" || w.result === "no"));
   const brier = c => {                              // model against the market's mid, where both were seen
@@ -1482,12 +1508,13 @@ function recordText() {
   const s = scoreRecord(), lines = [];
   for (const c of CHECKS) { const b = s.briers[c]; lines.push(`${String(c / 60).padStart(2)} min to go: ` + (b ? `model ${b.model.toFixed(3)}` + (b.matched != null ? ` (variance-matched ${b.matched.toFixed(3)})` : "") + ` vs market ${b.market.toFixed(3)} over ${b.n} windows` : "nothing scored yet")); }
   lines.push(`Brier score: mean squared error of the chance, 0 is perfect, 0.25 is a coin flip. Officially settled ${s.settled} of ${s.total} watched. Proxy results are excluded. Buy calls are scored as one contract bought at Kalshi's price three seconds after the call and held to settlement, entry fees deducted.`);
+  if (relayRecordNote) lines.push(relayRecordNote + ". The relay scores every window on its own, whether or not this page is open.");
   lines.push(`"Variance-matched" is the same model with its curve narrowed by 1.41 (the chance shown keeps that margin). If it scores better over a few dozen windows, the shown chance should switch to it.`);
   lines.push("");
   for (const w of record.windows.slice(-25).reverse()) {
     const when = ET_CLOCK.format(new Date((w.close - WINDOW) * 1000));
     const res = w.src === "kalshi" && w.result ? `${w.result === "yes" ? "Up" : "Down"} (official Kalshi)` : Date.now() / 1000 >= w.close ? "awaiting official result" : "open";
-    const ch = [300, 60].map(c => { const k = w.checks[c]; return k ? `${c / 60} min: model ${Math.round(k.p * 100)}%` + (k.ask != null ? ` mkt ${Math.round((k.ask + k.bid) * 50)}¢` : "") : null; }).filter(Boolean).join(" · ");
+    const ch = [300, 60].map(c => { const k = w.checks[c]; return k ? `${c / 60} min: model ${Math.round(k.p * 100)}%` + (k.ask != null ? ` mkt ${Math.round((k.ask + k.bid) * 50)}¢` : "") + (k.relay ? " (relay)" : "") : null; }).filter(Boolean).join(" · ");
     const buys = w.buys.map(b => { const sc = s.buys.find(x => x.mk === w.mk && x.side === b.side); return `buy ${b.side} ${b.price}¢` + (b.after3 != null && b.after3 !== b.price ? ` (${b.after3}¢ 3 s later)` : "") + ` at ${Math.floor(b.left / 60)}:${String(b.left % 60).padStart(2, "0")}` + (sc ? ` → ${cents(sc.pnl)}` : "") + (b.why ? ` [spot ${b.why.x} ${b.why.src}, ±${b.why.sd}, lean ${b.why.lean}, ${b.why.known}]` : ""); }).join(", ");
     lines.push(`${when}  target ${w.tgt != null ? money(w.tgt) : "?"}  ${res}` + (w.officialCloseAvg != null ? `  official average ${money(w.officialCloseAvg)}` : "") + (w.closeAvg != null ? `  proxy average ${money(w.closeAvg)} (unofficial)` : w.proxyMissing ? `  proxy INCOMPLETE: ${w.proxySamples}/60 samples` : "") + (ch ? `\n     ${ch}` : "") + (buys ? `\n     ${buys}` : ""));
   }
