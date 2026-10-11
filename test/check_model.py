@@ -1,6 +1,6 @@
 """Checks of the model and the record: the projection's variance against the closed form it replaced,
-the chance band and the buy/thin/no verdicts with sizing, a window rolling over, settlement by the
-page and then by Kalshi's result, persistence across a reload. About 4 minutes.
+the chance band and the buy/thin/no verdicts with sizing, a window rolling over, unofficial proxy
+capture and then Kalshi's result, persistence across a reload. About 4 minutes.
 
     python3 test/check_model.py
 """
@@ -20,7 +20,7 @@ with sync_playwright() as p:
     print("projection: new variance sum vs the old closed form (equal volatilities must agree):", pg.evaluate("""() => {
       const now = Date.now()/1000, [open, close] = bounds(now), sig = 2.0;
       const newer = project(now, close, 83000, {s: sig, l: sig}, []);
-      let ahead = []; for (let s = close - SETTLE; s < close; s++) if (s > now) ahead.push(s - now);
+      let ahead = []; for (let s = close - SETTLE + 1; s <= close; s++) if (s > now) ahead.push(s - now);
       const m = ahead.length; let walk = 0; ahead.forEach((d, j) => { walk += d * (2 * (m - (j + 1)) + 1); });
       const oldSd = Math.sqrt(sig * sig * walk / 3600 + levelSd() ** 2);
       const burst = project(now, close, 83000, {s: 2 * sig, l: sig}, []), calm = project(now, close, 83000, {s: sig, l: 2 * sig}, []);
@@ -38,7 +38,7 @@ with sync_playwright() as p:
     pg.evaluate("(mk) => { window.__pastResult = {[mk]: 'yes'}; }", mk)      # Kalshi settles the market
     run_seconds(pg, 3)
     w = json.loads(pg.evaluate("(mk) => JSON.stringify(record.windows.find(w => w.mk === mk))", mk))
-    print("settled by the page:", w["result"], w["src"], "close", w["closeAvg"], "checks", sorted(w["checks"]), "buys", [(x["side"], x["price"]) for x in w["buys"]])
+    print("unofficial proxy capture:", w.get("proxyResult"), "official", w["result"], w["src"], "proxy close", w["closeAvg"], "checks", sorted(w["checks"]), "buys", [(x["side"], x["price"]) for x in w["buys"]])
     run_seconds(pg, 50)
     w = json.loads(pg.evaluate("(mk) => JSON.stringify(record.windows.find(w => w.mk === mk))", mk))
     print("settled by Kalshi:", w["result"], w["src"])
