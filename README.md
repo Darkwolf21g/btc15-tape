@@ -30,7 +30,7 @@ With an API key the Worker also streams Kalshi's own data to the page: the offic
 2. On Cloudflare: the `btc15-tape` Worker → **Settings → Variables and Secrets** → add secrets `KALSHI_KEY_ID` (the key ID) and `KALSHI_PRIVATE_KEY` (the whole key file, including the BEGIN/END lines). Optionally `FEED_TOKEN`: any password; then enter it in the page under *Target and calibration → Stream token*.
 3. Reload the page. The Market chips show `BRTI official 0.3 s` when the stream is live, or why it is not (no key, Kalshi refused, connecting).
 
-The key is only used to sign the WebSocket handshake; the Worker subscribes to the index and the two current market tickers and nothing else. One Durable Object holds the single upstream connection and shares it with every open page; it closes a minute after the last page leaves. Never paste the key anywhere but the Cloudflare secret.
+The key is used to sign the WebSocket handshake and, through `/brti/history`, read-only requests for the index's tick history (used to rebuild minutes the page did not see); the Worker subscribes to the index and the two current market tickers and nothing else. Kalshi notes the CF Benchmarks data needs an entitlement on the account; if it is missing the chips say Kalshi refused. One Durable Object holds the single upstream connection and shares it with every open page; it closes a minute after the last page leaves. Never paste the key anywhere but the Cloudflare secret.
 
 ## Settlement and data completeness
 

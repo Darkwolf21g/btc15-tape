@@ -18,7 +18,10 @@ with sync_playwright() as p:
     r = pg.evaluate(probe); print("streaming, 80 s to go:", r)
     print("basis learned from the stream:", pg.evaluate("() => [basisSrc, basis.toFixed(2), basisSd && basisSd.toFixed(2), levelSd()]"))
     print("stream counts:", pg.evaluate("() => feed.counts"), "pushAt fresh:", pg.evaluate("() => Date.now() - kalshi.pushAt < 5000"))
-    run_seconds(pg, 50)
+    pg.evaluate("() => { backfilledAt = 0; samples.delete(Math.floor(Date.now()/1000) - 30); fetchBackfill(true, bounds(Date.now()/1000)[0] - 60); }")
+    run_seconds(pg, 2)
+    print("official backfill:", pg.evaluate("() => [backfillNote, window.__histReq, backfill.size > 0]"))
+    run_seconds(pg, 48)
     r = pg.evaluate(probe); print("final minute:", {k: r[k] for k in ("clock", "proj", "why", "p")})
     print("official known part used:", pg.evaluate("() => { const pr = project(Date.now()/1000, bounds(Date.now()/1000)[1], 83000, sigmas(), []); return [pr.official, pr.observed, pr.m, lastNeed && lastNeed.toFixed(2)]; }"))
     # the stream drops: the page must fall back to the exchange proxy within a few seconds

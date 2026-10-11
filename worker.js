@@ -28,6 +28,23 @@ export default {
       if (!env.FEED) return new Response("feed not configured", {status: 503, headers: CORS});
       return env.FEED.get(env.FEED.idFromName("brti")).fetch(request);
     }
+    // Official BRTI history (CF Benchmarks, passed through Kalshi with the key): one hour of ticks.
+    // Costs 50 of the 200 read tokens a second, so the page asks for it a few times a window at most.
+    if (path === "/brti/history") {
+      if (env.FEED_TOKEN && url.searchParams.get("token") !== env.FEED_TOKEN) return new Response("token", {status: 403, headers: CORS});
+      if (!env.KALSHI_KEY_ID || !env.KALSHI_PRIVATE_KEY) return new Response("no key", {status: 503, headers: CORS});
+      const ts = url.searchParams.get("timestamp"), span = url.searchParams.get("timespan") || "HOUR";
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(ts || "") || !/^(HOUR|DAY|MINUTE)$/.test(span)) return new Response("bad timestamp", {status: 400, headers: CORS});
+      const apiPath = "/trade-api/v2/cfbenchmarks/history/values", stamp = String(Date.now());
+      try {
+        const sig = await signHandshake(env.KALSHI_PRIVATE_KEY, stamp + "GET" + apiPath);
+        const up = await fetch("https://external-api.kalshi.com" + apiPath + "?id=BRTI&timespan=" + span + "&timestamp=" + encodeURIComponent(ts),
+                               {headers: {"Accept": "application/json", "KALSHI-ACCESS-KEY": env.KALSHI_KEY_ID, "KALSHI-ACCESS-SIGNATURE": sig, "KALSHI-ACCESS-TIMESTAMP": stamp},
+                                cf: {cacheTtl: 0, cacheEverything: false}});
+        const body = await up.text();
+        return new Response(body, {status: up.status, headers: {...CORS, "Content-Type": "application/json"}});
+      } catch (e) { return new Response("upstream unreachable: " + e.message, {status: 502, headers: CORS}); }
+    }
     if (request.method !== "GET" || !ALLOWED.some(re => re.test(path))) {
       if (env && env.ASSETS) return env.ASSETS.fetch(request);     // the page and its files
       return new Response("not found", {status: 404, headers: CORS});

@@ -217,6 +217,7 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
       <p><b>Sync.</b> Another way to measure the same difference: type Robinhood's big number while it is showing.</p>
       <p><b>Closing average, projected.</b> The contract settles on the average of the last 60 seconds. Until that minute starts none of those seconds has happened, and a random walk's best forecast for every one of them is the price now, so the projection sits on spot (plus the lean) and only its uncertainty shrinks as the close nears. In the final minute, available exchange-proxy samples contribute to the projection and future samples follow spot. Missing elapsed samples pause the model. Reconstructed Coinbase samples are identified. Only Kalshi confirms the winning outcome.</p>
       <p><b>Timing.</b> A trailing 60-second average smooths price changes. Its effective delay depends on the price path and is not a measured network delay or a guaranteed trading lead. The fast line here is exchange consensus; the blue line is its complete trailing average. Neither is the official BRTI tick stream.</p>
+      <p><b>Official history.</b> With the same key, any minute the page did not see itself (the one before the open, or after another app was in front) is rebuilt from the index's own tick history rather than from Coinbase trades.</p>
       <p><b>Kalshi's own stream.</b> With an API key set on the relay (two secrets on the Cloudflare Worker; the README says how), the page shows the official BRTI index itself, up to five times a second, Kalshi's official trailing average, and, in the final minute, the settlement average exactly as Kalshi accumulates it, plus the market's prices the moment they change. The spot and average tiles then say "official" with the reading's age. Without the key everything falls back to the exchange estimate.</p>
       <p><b>Relay.</b> Browsers are not allowed to read Kalshi directly. A small relay of your own (a free Cloudflare Worker; the code is in the README) lets this page read the exact target, the official 60-second average and Kalshi's own Up price. Paste its address here once.</p>
       <p><b>Fees.</b> The edge figures take off Robinhood's commission and Kalshi's 1¢ fee, about 2¢ a contract in the middle of the range.</p>
@@ -667,6 +668,40 @@ function flowWords(f) {
 // The minute the page did not see (just opened, or back from another app) comes from Coinbase's
 // public trade list: the last trade in each second, carried forward through seconds without one.
 let backfilling = false, backfilledAt = 0, backfillNote = "not needed";
+// The official index's own history, through the relay (CF Benchmarks via Kalshi, with the key).
+// Ticks for the hour holding `backTo` and, if different, the current hour; the last tick in each
+// second, carried forward, put on the page's footing (minus the basis) so the proxy sums stay consistent.
+let officialNote = "";
+async function fetchOfficialHistory(backTo, sec) {
+  const base = kalshi.relay || SAME_SITE;
+  if (!base || !(feed.relay && feed.relay.hasKey) || basisSrc !== "kalshi") return false;
+  const hours = [...new Set([Math.floor(backTo / 3600) * 3600, Math.floor(sec / 3600) * 3600])];
+  const bySec = new Map();
+  for (const h of hours) {
+    const r = await fetch(base + "/brti/history?timespan=HOUR&timestamp=" + new Date(h * 1000).toISOString() + (feed.token ? "&token=" + encodeURIComponent(feed.token) : ""), {cache: "no-store"});
+    if (!r.ok) { officialNote = "official history: " + r.status; return false; }
+    const d = await r.json(), pl = d && d.data ? d.data.payload : d && d.payload;
+    const rows = Array.isArray(pl) ? pl : pl && (pl.values || pl.data || pl.items);
+    if (!Array.isArray(rows)) { officialNote = "official history: unexpected shape"; return false; }
+    for (const t of rows) {
+      const when = t.time != null ? t.time : t.timestamp != null ? t.timestamp : t.t, v = +(t.value != null ? t.value : t.v);
+      const ms = typeof when === "number" ? (when > 1e11 ? when : when * 1000) : Date.parse(when);
+      if (!(v > 0) || !(ms > 0)) continue;
+      const s = Math.floor(ms / 1000);
+      if (!bySec.has(s) || ms > bySec.get(s)[0]) bySec.set(s, [ms, v]);
+    }
+  }
+  const secs = [...bySec.keys()].sort((a, b) => a - b);
+  if (!secs.length) { officialNote = "official history: no ticks"; return false; }
+  let last = null, n = 0;
+  for (let s = secs[0]; s <= sec; s++) {
+    if (bySec.has(s)) last = bySec.get(s)[1];
+    if (last != null && !samples.has(s)) { backfill.set(s, last - basis); n++; }
+  }
+  officialNote = `official BRTI history: ${secs.length} seconds, ${n} filled`;
+  backfillNote = officialNote;
+  return true;
+}
 async function fetchBackfill(force, backTo) {
   const sec = Math.floor(Date.now() / 1000);
   if (backfilling || sec - backfilledAt < 30 || (!force && avgAt(sec - 1) != null)) return;
@@ -674,6 +709,7 @@ async function fetchBackfill(force, backTo) {
   if (!cb || cb.n < 3) { backfillNote = "waiting for Coinbase"; return; }   // its level against the others first
   backfilling = true;
   try {
+    if (await fetchOfficialHistory(backTo != null ? backTo : sec - 120, sec).catch(() => false)) { backfilledAt = sec; backfilling = false; return; }
     // Pages of 1000 trades, newest first, older pages through the `after` cursor, until `backTo`.
     const rows = [];
     let cursor = null;

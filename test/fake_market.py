@@ -145,6 +145,12 @@ FAKE = r"""
       return Promise.resolve({ok: true, json: async () => past ? {market: {ticker: tk, status: "finalized", result: past, floor_strike: window.__kTarget}}
         : {market: {ticker: tk, status: "active", strike_type: "greater_or_equal", floor_strike: window.__kTarget, yes_bid_dollars: String(window.__kBid), yes_ask_dollars: String(window.__kAsk)}}});
     }
+    if (u.includes("/brti/history") && window.__stream) {      // the official index's ticks for the hour asked for
+      const h = Date.parse(decodeURIComponent(u.match(/timestamp=([^&]+)/)[1]));
+      const rows = hist.filter(x => x[0] >= h && x[0] < h + 3600000).filter((x, i) => i % 10 === 0).map(x => ({time: new Date(x[0]).toISOString(), value: (x[1] + 2.0).toFixed(2)}));
+      window.__histReq = (window.__histReq || 0) + 1;
+      return Promise.resolve({ok: true, status: 200, json: async () => ({data: {serverTime: new Date().toISOString(), payload: rows}})});
+    }
     if (u.includes("/live_data/") && window.__kalshi) return Promise.resolve({ok: true, json: async () => ({live_data: {details: {timeseries: []}}})});
     if (u.includes("candles") && window.__candle) { const m = u.match(/start=([^&]+)/); const t = Date.parse(decodeURIComponent(m[1]))/1000;
       return Promise.resolve({ok: true, json: async () => [[t, 82890, 82910, 82895, 82905, 1]]}); }
