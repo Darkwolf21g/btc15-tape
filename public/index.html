@@ -447,11 +447,20 @@ const kalshi = {ok: null, base: null, via: null, market: null, feed: new Map(), 
 // When this page is served by its own Cloudflare Worker, that Worker is the relay: same address, no setup.
 const SAME_SITE = location.protocol === "https:" && !/github\.io$/.test(location.hostname) ? location.origin : null;
 async function kalshiGet(path) {
-  // Your own relay if you set one; else the site itself; else Kalshi directly (browsers are normally refused);
-  // else a public relay.
-  const tries = kalshi.relay ? [["relay", kalshi.relay + path]]
-    : kalshi.base ? [[kalshi.via, kalshi.base === "public" ? PUBLIC_RELAY(KALSHI[0] + path) : kalshi.base + path]]
-    : (SAME_SITE ? [["site", SAME_SITE + path]] : []).concat(KALSHI.map(b => ["direct", b + path]), [["public", PUBLIC_RELAY(KALSHI[0] + path)]]);
+  // Your own relay if you set one, else the site itself, else Kalshi directly (browsers are normally
+  // refused), else a public relay. A slower route that happened to answer first is not kept for good:
+  // the preferred one is tried again every half minute.
+  const preferred = kalshi.relay ? ["relay", kalshi.relay] : SAME_SITE ? ["site", SAME_SITE] : null;
+  const reprobe = preferred && kalshi.via !== preferred[0] && Date.now() - (kalshi.probed || 0) > 30000;
+  let tries;
+  if (kalshi.base && !reprobe) {
+    tries = [[kalshi.via, kalshi.base === "public" ? PUBLIC_RELAY(KALSHI[0] + path) : kalshi.base + path]];
+  } else {
+    kalshi.probed = Date.now();
+    tries = (preferred ? [[preferred[0], preferred[1] + path]] : [])
+      .concat(kalshi.relay ? [] : KALSHI.map(b => ["direct", b + path]))
+      .concat([["public", PUBLIC_RELAY(KALSHI[0] + path)]]);
+  }
   for (const [via, url] of tries) {
     try {
       const r = await fetch(url, {cache: "no-store"});
