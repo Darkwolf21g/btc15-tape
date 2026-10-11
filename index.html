@@ -74,7 +74,7 @@ header { display: flex; align-items: flex-end; justify-content: space-between; g
 
 .chart { position: relative; margin-top: 14px; }
 canvas { display: block; width: 100%; }
-#main { height: 300px; } #prob { height: 110px; }
+#main { height: 300px; } #prob { height: 190px; }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--dim); margin-top: 6px; }
 .legend i { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 5px; border-radius: 2px; }
 
@@ -148,7 +148,7 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
   </div>
 </div>
 <div class="chart"><canvas id="prob" aria-label="Chance of Up through the window"></canvas>
-  <div class="legend"><span><i style="background:var(--up)"></i>Chance of Up</span><span id="mktLegend" hidden><i style="background:var(--ink)"></i>Market Up price (Kalshi)</span></div>
+  <div class="legend"><span><i style="background:var(--up)"></i>Chance of Up, filled green when Up is favoured, orange when Down is</span><span id="mktLegend" hidden><i style="background:var(--ink)"></i>Up price on Kalshi (what you would pay), with its bid-ask band</span></div>
 </div>
 
 <div class="sources" id="sources"></div>
@@ -496,7 +496,7 @@ async function pollKalshi() {
   if (!(tgt > 0)) { const t = /\$?([\d,]+\.\d\d)/.exec(m.yes_sub_title || m.subtitle || ""); tgt = t ? +t[1].replace(/,/g, "") : null; }
   kalshi.market = {ticker: mk, close, target: tgt > 0 ? tgt : null, status: m.status,
                    bid: +m.yes_bid_dollars || null, ask: +m.yes_ask_dollars || null, at: Date.now()};
-  if (kalshi.market.bid && kalshi.market.ask) kalshi.hist.set(Math.floor(now), (kalshi.market.bid + kalshi.market.ask) / 2);
+  if (kalshi.market.bid && kalshi.market.ask) kalshi.hist.set(Math.floor(now), [kalshi.market.bid, kalshi.market.ask]);
   if (now - kalshi.checked > 20) {
     kalshi.checked = now;
     const f = await kalshiGet("/live_data/events/" + ev);
@@ -605,13 +605,16 @@ function drawMain(open, close, now, tgt, proj) {
   // settlement minute
   g.fillStyle = "rgba(255,200,87,0.07)";
   g.fillRect(X(close - SETTLE), T, X(close) - X(close - SETTLE), H - T - B);
-  // grid and price labels
+  // grid and price labels (labels step aside for the value tags at the right edge)
   g.font = "11px " + css("--mono"); g.textBaseline = "middle";
   const step = niceStep(hi - lo, 5);
+  const tagged = [tgt, avgPts.length ? avgPts[avgPts.length - 1][1] : null, pts.length ? pts[pts.length - 1].p + basis : null]
+    .filter(v => v != null).map(v => Math.min(H - B - 8, Math.max(T + 8, Y(v))));
   g.strokeStyle = css("--line"); g.lineWidth = 1; g.fillStyle = css("--dim");
   for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
     g.beginPath(); g.moveTo(L, Y(v)); g.lineTo(W - R, Y(v)); g.stroke();
-    g.fillText(v.toLocaleString("en-US", {maximumFractionDigits: step < 1 ? 1 : 0}), W - R + 6, Y(v));
+    if (!tagged.some(y => Math.abs(y - Y(v)) < 12))
+      g.fillText(v.toLocaleString("en-US", {maximumFractionDigits: step < 1 ? 1 : 0}), W - R + 6, Y(v));
   }
   // time labels: open, every 5 minutes, close
   g.textBaseline = "alphabetic"; g.textAlign = "center";
@@ -667,30 +670,94 @@ function drawMain(open, close, now, tgt, proj) {
 }
 
 const pHist = new Map();
+// The chance of Up for seconds the page did not see live, worked out from the backfilled prices
+// with today's volatility, so the chart covers the window from its open.
+let probFilledAt = 0;
+function fillProbHistory(open, now, close, tgt, sig) {
+  const sec = Math.floor(now);
+  if (sec - probFilledAt < 5) return;
+  probFilledAt = sec;
+  for (let s = open; s < sec; s++) {
+    if (pHist.has(s)) continue;
+    const x = sampleAt(s);
+    if (x == null) continue;
+    const pr = project(s + 0.5, close, x + basis, sig);
+    pHist.set(s, normCdf((pr.mean - (tgt - 0.005)) / pr.sd));
+  }
+}
 function drawProb(open, close, now) {
   const [g, W, H] = setupCanvas($("prob"));
-  const L = 8, R = 74, T = 6, B = 8;
+  const L = 8, R = 74, T = 10, B = 10;
   g.clearRect(0, 0, W, H);
   const X = t => L + (t - (open - 60)) / (close - (open - 60)) * (W - L - R);
   const Y = p => T + (1 - p) * (H - T - B);
-  g.strokeStyle = css("--line"); g.lineWidth = 1; g.font = "11px " + css("--mono"); g.fillStyle = css("--dim"); g.textBaseline = "middle";
-  for (const p of [0, 0.5, 1]) { g.beginPath(); g.moveTo(L, Y(p)); g.lineTo(W - R, Y(p)); g.stroke(); g.fillText(Math.round(p * 100) + "%", W - R + 6, Y(p)); }
+  const lastP = (() => { for (let s = Math.floor(now); s >= open; s--) if (pHist.has(s)) return pHist.get(s); return null; })();
+  const lastMk = (() => { let best = null; for (const [s, v] of kalshi.hist) if (s >= open && (best == null || s > best[0])) best = [s, v]; return best ? best[1][1] : null; })();
+  const taggedY = [lastP, lastMk].filter(v => v != null).map(v => Math.min(H - B - 8, Math.max(T + 8, Y(v))));
+  g.font = "11px " + css("--mono"); g.textBaseline = "middle"; g.lineWidth = 1;
+  for (const p of [0, 0.25, 0.5, 0.75, 1]) {
+    g.strokeStyle = p === 0.5 ? "rgba(230,235,245,0.35)" : css("--line");
+    g.beginPath(); g.moveTo(L, Y(p)); g.lineTo(W - R, Y(p)); g.stroke();
+    if (p !== 0.25 && p !== 0.75 && !taggedY.some(y => Math.abs(y - Y(p)) < 14)) {
+      g.fillStyle = css("--dim"); g.fillText(Math.round(p * 100) + "%", W - R + 6, Y(p));
+    }
+  }
   g.fillStyle = "rgba(255,200,87,0.07)"; g.fillRect(X(close - SETTLE), T, X(close) - X(close - SETTLE), H - T - B);
-  // market price, if Kalshi is reachable
-  g.fillStyle = css("--ink");
-  for (const [s, m] of kalshi.hist) if (s >= open) { g.fillRect(X(s) - 1, Y(m) - 1, 2, 2); }
-  if (![...pHist.keys()].some(s => s >= open)) {
+  g.strokeStyle = css("--line"); g.beginPath(); g.moveTo(X(open), T); g.lineTo(X(open), H - B); g.stroke();
+
+  // the chance of Up as one continuous line, with the area between it and 50% filled by side
+  const pts = [];
+  for (let s = open; s <= Math.floor(now); s++) { const p = pHist.get(s); if (p != null) pts.push([s, p]); }
+  if (pts.length > 1) {
+    const path = () => {
+      g.beginPath();
+      pts.forEach(([s, p], i) => { i ? g.lineTo(X(s), Y(p)) : g.moveTo(X(s), Y(p)); });
+    };
+    const area = () => {
+      path();
+      g.lineTo(X(pts[pts.length - 1][0]), Y(0.5)); g.lineTo(X(pts[0][0]), Y(0.5)); g.closePath();
+    };
+    g.save(); g.beginPath(); g.rect(L, T, W - L - R, Y(0.5) - T); g.clip();
+    area(); g.fillStyle = "rgba(47,209,124,0.22)"; g.fill(); g.restore();
+    g.save(); g.beginPath(); g.rect(L, Y(0.5), W - L - R, H - B - Y(0.5)); g.clip();
+    area(); g.fillStyle = "rgba(255,106,61,0.22)"; g.fill(); g.restore();
+    g.save(); g.beginPath(); g.rect(L, T, W - L - R, Y(0.5) - T); g.clip();
+    path(); g.strokeStyle = css("--up"); g.lineWidth = 2; g.stroke(); g.restore();
+    g.save(); g.beginPath(); g.rect(L, Y(0.5), W - L - R, H - B - Y(0.5)); g.clip();
+    path(); g.strokeStyle = css("--down"); g.lineWidth = 2; g.stroke(); g.restore();
+  } else {
     g.fillStyle = css("--dim"); g.textAlign = "center";
     g.fillText("Starts once the chance of Up is showing", (W - R) / 2, H / 2); g.textAlign = "left";
   }
-  // chance of Up, coloured by side of 50%
-  let prev = null;
-  g.lineWidth = 2;
-  for (let s = open; s <= Math.floor(now); s++) {
-    const p = pHist.get(s); if (p == null) { prev = null; continue; }
-    if (prev) { g.strokeStyle = p >= 0.5 ? css("--up") : css("--down"); g.beginPath(); g.moveTo(X(prev[0]), Y(prev[1])); g.lineTo(X(s), Y(p)); g.stroke(); }
-    prev = [s, p];
+
+  // Kalshi's book: the bid-ask band, and the ask as the line (that is the price of buying Up)
+  const mk = [];
+  for (const [s, v] of kalshi.hist) if (s >= open && s <= now) mk.push([s, v]);
+  mk.sort((a, b) => a[0] - b[0]);
+  if (mk.length > 1) {
+    g.beginPath();
+    mk.forEach(([s, [bid]], i) => { i ? g.lineTo(X(s), Y(bid)) : g.moveTo(X(s), Y(bid)); });
+    for (let i = mk.length - 1; i >= 0; i--) g.lineTo(X(mk[i][0]), Y(mk[i][1][1]));
+    g.closePath(); g.fillStyle = "rgba(230,235,245,0.15)"; g.fill();
+    g.beginPath();
+    mk.forEach(([s, [, ask]], i) => { i ? g.lineTo(X(s), Y(ask)) : g.moveTo(X(s), Y(ask)); });
+    g.strokeStyle = css("--ink"); g.lineWidth = 1.5; g.stroke();
   }
+
+  // right-edge tags: the model and the market, so the gap between them reads at a glance
+  const tag = (v, color, text, dy) => {
+    const y = Math.min(H - B - 8, Math.max(T + 8, Y(v))) + dy;
+    g.fillStyle = color; g.fillRect(W - R + 2, y - 8, R - 4, 16);
+    g.fillStyle = css("--ground"); g.fillText(text, W - R + 6, y);
+  };
+  if (pts.length) {
+    const p = pts[pts.length - 1][1];
+    const last = mk.length ? mk[mk.length - 1][1][1] : null;
+    const clash = last != null && Math.abs(Y(p) - Y(last)) < 18;
+    tag(p, p >= 0.5 ? css("--up") : css("--down"), Math.round(p * 100) + "%", clash && p >= last ? -9 : clash ? 9 : 0);
+    if (last != null) tag(last, css("--ink"), Math.round(last * 100) + "¢", clash && p >= last ? 9 : clash ? -9 : 0);
+  }
+  g.strokeStyle = "rgba(230,235,245,0.25)"; g.beginPath(); g.moveTo(X(now), T); g.lineTo(X(now), H - B); g.stroke();
 }
 
 // ---------------------------------------------------------------- page
@@ -748,6 +815,7 @@ function render() {
     proj = project(now, close, x, sig);
     p = normCdf((proj.mean - (tgt - 0.005)) / proj.sd);
     pHist.set(Math.floor(now), p);
+    fillProbHistory(open, now, close, tgt, sig);
   }
   $("lvProj").textContent = proj ? money(proj.mean) : "–";
   $("lvProjNote").textContent = proj ? `±${proj.sd.toFixed(0)} (1 sd) · vol $${sig.toFixed(1)}/√s` : sig == null ? "measuring volatility…" : "needs the target";
