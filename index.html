@@ -122,7 +122,7 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
 </section>
 
 <section class="edge" aria-label="Compare with Robinhood">
-  <div class="label" style="grid-column:1/-1">Type what Robinhood's buttons say to see your edge</div>
+  <div class="label" style="grid-column:1/-1" id="edgeHead">Type what Robinhood's buttons say to see your edge</div>
   <label for="rhUp"><span class="label">Up button ¢</span>
     <input id="rhUp" inputmode="numeric" placeholder="type" autocomplete="off">
     <span class="verdict" id="vUp"></span></label>
@@ -441,7 +441,7 @@ function setBasis(value, via) {
 }
 
 // ---------------------------------------------------------------- Kalshi, if the browser may reach it
-const PUBLIC_RELAY = u => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u) + "&t=" + Math.floor(Date.now() / 5000);
+const PUBLIC_RELAY = u => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u + "?_=" + Math.floor(Date.now() / 2000));
 const kalshi = {ok: null, base: null, via: null, market: null, feed: new Map(), checked: 0, hist: new Map(),
                 relay: (store.get("relay") || "").replace(/\/+$/, "")};
 async function kalshiGet(path) {
@@ -467,7 +467,9 @@ async function pollKalshi() {
   if (!d || !d.market) { kalshi.ok = false; kalshi.market = null; setTimeout(pollKalshi, kalshi.relay ? 10000 : 45000); return; }
   const m = d.market;
   kalshi.ok = true;
-  kalshi.market = {ticker: mk, close, target: m.floor_strike != null ? +m.floor_strike : null,
+  let tgt = m.floor_strike != null ? +m.floor_strike : null;
+  if (!(tgt > 0)) { const t = /\$?([\d,]+\.\d\d)/.exec(m.yes_sub_title || m.subtitle || ""); tgt = t ? +t[1].replace(/,/g, "") : null; }
+  kalshi.market = {ticker: mk, close, target: tgt > 0 ? tgt : null, status: m.status,
                    bid: +m.yes_bid_dollars || null, ask: +m.yes_ask_dollars || null, at: Date.now()};
   if (kalshi.market.bid && kalshi.market.ask) kalshi.hist.set(Math.floor(now), (kalshi.market.bid + kalshi.market.ask) / 2);
   if (now - kalshi.checked > 15) {
@@ -742,8 +744,14 @@ function render() {
   }
   lastP = p;
   $("ask").hidden = tgt != null && !askOpen;
-  verdict($("vUp"), p, parseFloat($("rhUp").value));
-  verdict($("vDown"), p == null ? null : 1 - p, parseFloat($("rhDown").value));
+  const km = kalshi.market && kalshi.market.ticker === mk && nowMs - kalshi.market.at < 20000 && kalshi.market.bid && kalshi.market.ask ? kalshi.market : null;
+  const upC = km ? Math.round(km.ask * 100) : null, downC = km ? Math.round((1 - km.bid) * 100) : null;
+  $("rhUp").placeholder = upC != null ? String(upC) : "type";
+  $("rhDown").placeholder = downC != null ? String(downC) : "type";
+  $("edgeHead").textContent = km ? `Kalshi's book now: Up ${upC}¢ · Down ${downC}¢ (Robinhood sells at these). Type over them if Robinhood differs.`
+    : "Type what Robinhood's buttons say to see your edge";
+  verdict($("vUp"), p, $("rhUp").value ? parseFloat($("rhUp").value) : upC);
+  verdict($("vDown"), p == null ? null : 1 - p, $("rhDown").value ? parseFloat($("rhDown").value) : downC);
 
   // sources
   const chips = Object.entries(VENUES).map(([k, spec]) => {
