@@ -180,7 +180,8 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
       <p><b>Why Robinhood looks late.</b> Its big number is the average of the last 60 seconds, the same quantity the contract settles on. When price moves, it trails spot by about 30 seconds. The fast line here is spot. The blue line is that average.</p>
       <p><b>Relay.</b> Browsers are not allowed to read Kalshi directly. A small relay of your own (a free Cloudflare Worker; the code is in the README) lets this page read the exact target, the official 60-second average and Kalshi's own Up price. Paste its address here once.</p>
       <p><b>Fees.</b> The edge figures take off Robinhood's commission and Kalshi's 1¢ fee, about 2¢ a contract in the middle of the range.</p>
-      <p>The chance shown is a model: a random walk from spot with recently measured volatility. It is an estimate, not advice.</p>
+      <p><b>Sharp moves.</b> No model predicts a sudden jump. The chance allows for them with a fat-tailed curve, so it never shows more than about 98% however calm the last minutes were, and the "Sharp move" note appears when spot has just moved several standard deviations in ten seconds. In a sharp move, spot here leads Robinhood's number by about half a minute, and the projection shows where the closing average lands if the price holds.</p>
+      <p>The chance shown is a model: a random walk from spot with recently measured volatility and fat tails. It is an estimate, not advice.</p>
     </div>
   </div>
 </details>
@@ -209,6 +210,11 @@ function normCdf(z) {      // Abramowitz-Stegun 7.1.26 on erf, accurate to about
   const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-z * z / 2);
   return z >= 0 ? (1 + y) / 2 : (1 - y) / 2;
 }
+// Bitcoin moves have fat tails: a jump of several standard deviations happens far more often than the
+// normal curve allows. The chance of Up uses a Student-t curve with four degrees of freedom, so a
+// "sure thing" is shown as about 98%, not 99.9%.
+function tailCdf(z) { return 0.5 + z * (z * z + 6) / (2 * Math.pow(z * z + 4, 1.5)); }
+const chance = (mean, sd, tgt) => tailCdf((mean - (tgt - 0.005)) / sd);
 const ET_PARTS = new Intl.DateTimeFormat("en-US", {timeZone: "America/New_York", year: "2-digit", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23"});
 const ET_CLOCK = new Intl.DateTimeFormat("en-US", {timeZone: "America/New_York", hour: "numeric", minute: "2-digit"});
 function etParts(ts) { const o = {}; for (const p of ET_PARTS.formatToParts(new Date(ts * 1000))) o[p.type] = p.value; return o; }
@@ -344,6 +350,10 @@ function learnOffsets(px) {          // once a second
     v.offset += (v.n < 10 ? 1 / (v.n + 1) : steady) * (v.mid - px - v.offset);   // quick start, then slow
     v.n++;
   }
+  // The level is pinned to Coinbase's: its offset is held at zero and the others are measured against
+  // it. Then a calibration saved an hour ago still means the same thing after a reload.
+  const cb = venue.coinbase;
+  if (cb && isLive(cb, t) && cb.n >= 3) { const shift = cb.offset; for (const v of Object.values(venue)) v.offset -= shift; }
 }
 
 // ---------------------------------------------------------------- per-second record
@@ -595,7 +605,7 @@ function drawMain(open, close, now, tgt, proj) {
   for (let s = Math.ceil(t0); s <= Math.floor(now); s++) { const a = avgAt(s); if (a != null) avgPts.push([s, a + basis]); }
   const ys = pts.map(p => p.p + basis).concat(avgPts.map(p => p[1]));
   if (tgt != null) ys.push(tgt);
-  if (proj) ys.push(proj.mean - 2 * proj.sd, proj.mean + 2 * proj.sd);
+  if (proj) ys.push(proj.mean - proj.sd, proj.mean + proj.sd);
   if (!ys.length) return;
   let lo = Math.min(...ys), hi = Math.max(...ys);
   if (hi - lo < 20) { const c = (hi + lo) / 2; lo = c - 10; hi = c + 10; }
@@ -630,6 +640,7 @@ function drawMain(open, close, now, tgt, proj) {
   // projection to the close: ±2 sd faint, ±1 sd, centre
   if (proj && avgPts.length) {
     const [ls, la] = avgPts[avgPts.length - 1], xc = X(close) - 3;
+    g.save(); g.beginPath(); g.rect(L, T, W - L - R, H - T - B); g.clip();
     g.fillStyle = "rgba(133,146,173,0.14)";
     g.beginPath(); g.moveTo(X(ls), Y(la)); g.lineTo(xc, Y(proj.mean + 2 * proj.sd)); g.lineTo(xc, Y(proj.mean - 2 * proj.sd)); g.closePath(); g.fill();
     g.fillStyle = "rgba(133,146,173,0.22)";
@@ -638,6 +649,7 @@ function drawMain(open, close, now, tgt, proj) {
     g.beginPath(); g.moveTo(X(ls), Y(la)); g.lineTo(xc, Y(proj.mean)); g.stroke(); g.setLineDash([]);
     g.fillStyle = proj.mean >= tgt ? css("--up") : css("--down");
     g.beginPath(); g.arc(xc, Y(proj.mean), 4, 0, 7); g.fill();
+    g.restore();
   }
   // the perpetual future, if it is connected
   const lead = leadTape.filter(p => p.t / 1000 >= t0);
@@ -682,7 +694,7 @@ function fillProbHistory(open, now, close, tgt, sig) {
     const x = sampleAt(s);
     if (x == null) continue;
     const pr = project(s + 0.5, close, x + basis, sig);
-    pHist.set(s, normCdf((pr.mean - (tgt - 0.005)) / pr.sd));
+    pHist.set(s, chance(pr.mean, pr.sd, tgt));
   }
 }
 function drawProb(open, close, now) {
@@ -793,6 +805,7 @@ function render() {
   $("clock").classList.toggle("settling", left <= SETTLE);
 
   // levels
+  const sig = sigma();
   const x = spot != null ? spot + basis : null;
   const a = avgAt(Math.floor(now) - 1);
   const avg = a != null ? a + basis : null;
@@ -804,16 +817,20 @@ function render() {
     : `${nLive} of ${nIndex} exchanges` + (basisSrc === "kalshi" ? ", aligned to Kalshi" : basisSrc === "target" ? ", calibrated by the target" : basisSrc === "synced" ? ", synced to Robinhood" : "")
     + (lead != null ? ` · perp ${signed(lead - spot)}` : "");
   $("lvAvg").textContent = money(avg);
-  $("lvAvgNote").textContent = x != null && avg != null ? `Robinhood's number · spot ${signed(x - avg)}` : "filling in the last minute…";
+  $("lvAvgNote").textContent = x != null && avg != null
+    ? `Robinhood's number · spot ${signed(x - avg)}, so it is heading ${x > avg + 1 ? "up" : x < avg - 1 ? "down" : "sideways"}`
+    : "filling in the last minute…";
+  // momentum: how far spot moved in the last 10 s, against what the volatility says is usual
+  const sec = Math.floor(now), back10 = sampleAt(sec - 10), back60 = sampleAt(sec - 60);
+  const move10 = spot != null && back10 != null ? spot - back10 : null;
+  const sharp = move10 != null && sig != null && Math.abs(move10) > 3 * sig * Math.sqrt(10);
   $("lvTgt").textContent = money(tgt);
   $("lvTgtNote").textContent = tgtSrc;
 
-  // model
-  const sig = sigma();
   let proj = null, p = null;
   if (x != null && tgt != null && sig != null) {
     proj = project(now, close, x, sig);
-    p = normCdf((proj.mean - (tgt - 0.005)) / proj.sd);
+    p = chance(proj.mean, proj.sd, tgt);
     pHist.set(Math.floor(now), p);
     fillProbHistory(open, now, close, tgt, sig);
   }
@@ -832,8 +849,11 @@ function render() {
     $("fairUp").textContent = `Up ${c}¢`;
     $("fairDown").textContent = `Down ${100 - c}¢`;
     const gap = proj.mean - tgt;
-    $("why").textContent = `Closing average heading for ${signed(gap)} vs the target; ±${proj.sd.toFixed(0)} is one standard deviation.`
+    $("why").textContent = (sharp ? `SHARP MOVE: ${signed(move10)} in 10 s. ` : "")
+      + `Closing average heading for ${signed(gap)} vs the target; ±${proj.sd.toFixed(0)} is one standard deviation.`
+      + (move10 != null && back60 != null && !sharp ? ` Spot ${signed(move10)} in 10 s, ${signed(spot - back60)} in 60 s.` : "")
       + (basisSrc === "raw" ? " Typing one target from Robinhood calibrates the level for the hours ahead." : "");
+    $("why").style.color = sharp ? (move10 > 0 ? css("--up") : css("--down")) : "";
   }
   lastP = p;
   $("ask").hidden = tgt != null && !askOpen;
@@ -846,7 +866,13 @@ function render() {
   verdict($("vUp"), p, $("rhUp").value ? parseFloat($("rhUp").value) : upC);
   verdict($("vDown"), p == null ? null : 1 - p, $("rhDown").value ? parseFloat($("rhDown").value) : downC);
 
-  // sources
+  // sources (once a second: rebuilding these is the costliest DOM work on the page)
+  if (nowMs - chipsAt >= 1000) { chipsAt = nowMs; renderChips(nowMs, mk); }
+  if (nowMs - chartsAt >= 200) { chartsAt = nowMs; drawMain(open, close, now, tgt, proj); drawProb(open, close, now); }
+  if ($("diag").open && Math.floor(now) !== diagAt) { diagAt = Math.floor(now); $("diagOut").textContent = diagnostics(now, open); }
+}
+let chipsAt = 0, chartsAt = 0, lastChips = "";
+function renderChips(nowMs, mk) {
   const chips = Object.entries(VENUES).map(([k, spec]) => {
     const v = venue[k] || {}; const age = v.quoteAt ? nowMs - v.quoteAt : null;
     const live = v.ws && isLive(v, nowMs);
@@ -861,12 +887,9 @@ function render() {
     : kalshi.ok === false ? (kalshi.relay ? "Kalshi relay not answering" : "Kalshi not reachable: targets estimated") : "Kalshi checking";
   const kerr = (!kalshi.ok || kstale) && kalshi.lastErr && nowMs - kalshi.lastErr.at < 30000 ? ` (${kalshi.lastErr.status || "no answer"})` : "";
   chips.push(`<span class="chip ${kcls}">${ktxt}${kerr}</span>`);
-  $("sources").innerHTML = chips.join("");
+  const html = chips.join("");
+  if (html !== lastChips) { lastChips = html; $("sources").innerHTML = html; }
   $("mktLegend").hidden = !kalshi.ok;
-
-  drawMain(open, close, now, tgt, proj);
-  drawProb(open, close, now);
-  if ($("diag").open && Math.floor(now) !== diagAt) { diagAt = Math.floor(now); $("diagOut").textContent = diagnostics(now, open); }
 }
 let diagAt = 0;
 function diagnostics(now, open) {
