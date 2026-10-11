@@ -51,6 +51,8 @@ header { display: flex; align-items: flex-end; justify-content: space-between; g
 .fair { display: flex; justify-content: space-between; font-size: 13px; }
 .fair .u { color: var(--up); } .fair .d { color: var(--down); }
 .why { grid-column: 1 / -1; color: var(--dim); font-size: 12px; }
+.ask { grid-column: 1 / -1; display: flex; gap: 8px; }
+.ask input { flex: 1 1 auto; min-width: 0; background: var(--panel); border: 1px solid var(--target); border-radius: 6px; color: var(--ink); font: 16px var(--mono); padding: 9px 10px; }
 
 .edge { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
 .edge label { display: grid; gap: 5px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
@@ -110,6 +112,10 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
     <div class="fair"><span class="u" id="fairUp">Up –</span><span class="d" id="fairDown">Down –</span></div>
   </div>
   <div class="why" id="why">Connecting to exchanges…</div>
+  <div class="ask" id="ask" hidden>
+    <input id="askIn" inputmode="decimal" placeholder="Target from Robinhood, e.g. 82913.71" autocomplete="off">
+    <button id="askSet" type="button">Set target</button>
+  </div>
 </section>
 
 <section class="edge" aria-label="Compare with Robinhood">
@@ -349,15 +355,39 @@ async function pollKalshi() {
 }
 
 // ---------------------------------------------------------------- target
+// If the page opened after the window started, the minute before the open is rebuilt from
+// Coinbase's public one-minute candle: the average of its open, high, low and close.
+const typedTarget = {};
+const candle = {open: null, value: null, busy: false};
+async function fetchCandle(open) {
+  if (candle.busy || candle.open === open) return;
+  candle.busy = true;
+  try {
+    const iso = t => new Date(t * 1000).toISOString();
+    const r = await fetch(`https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=60&start=${iso(open - 60)}&end=${iso(open - 60)}`, {cache: "no-store"});
+    if (r.ok) {
+      const rows = await r.json();            // [time, low, high, open, close, volume]
+      const row = Array.isArray(rows) && rows.find(x => x[0] === open - 60);
+      if (row) { candle.open = open; candle.value = (row[1] + row[2] + row[3] + row[4]) / 4; }
+    }
+  } catch (e) { /* blocked or offline: ask for the target instead */ }
+  candle.busy = false;
+}
 function target(open, mk) {
   if (kalshi.market && kalshi.market.ticker === mk && kalshi.market.target) return [kalshi.market.target, "from Kalshi"];
-  const typed = store.get("target." + mk);
+  const typed = typedTarget[mk] || store.get("target." + mk);
   if (typed) return [typed, "as you entered it"];
   const f = kalshi.feed.get(open - 1);
   if (f) return [Math.round(f * 100) / 100, "from Kalshi's feed"];
   const a = avgAt(open - 1);
   if (a != null) return [Math.round((a + basis) * 100) / 100, basisSrc === "raw" ? "estimated; tap Sync or enter it below" : "estimated from this page"];
-  return [null, "enter it below (page opened after the start)"];
+  if (candle.open === open) {
+    // Coinbase sits a few dollars from the index; use the offset the page has learned for it.
+    const cb = venue.coinbase ? venue.coinbase.offset : 0;
+    return [Math.round((candle.value - cb + basis) * 100) / 100, "estimated from Coinbase; type Robinhood's for exact"];
+  }
+  fetchCandle(open);
+  return [null, "type it above"];
 }
 
 // ---------------------------------------------------------------- model
@@ -481,6 +511,10 @@ function drawProb(open, close, now) {
   // market price, if Kalshi is reachable
   g.fillStyle = css("--ink");
   for (const [s, m] of kalshi.hist) if (s >= open) { g.fillRect(X(s) - 1, Y(m) - 1, 2, 2); }
+  if (![...pHist.keys()].some(s => s >= open)) {
+    g.fillStyle = css("--dim"); g.textAlign = "center";
+    g.fillText("Starts once the chance of Up is showing", (W - R) / 2, H / 2); g.textAlign = "left";
+  }
   // chance of Up, coloured by side of 50%
   let prev = null;
   g.lineWidth = 2;
@@ -493,7 +527,8 @@ function drawProb(open, close, now) {
 
 // ---------------------------------------------------------------- page
 function verdict(el, fair, priceCents) {
-  if (!(priceCents > 0 && priceCents < 100) || fair == null) { el.textContent = ""; el.className = "verdict"; return; }
+  if (!(priceCents > 0 && priceCents < 100)) { el.textContent = ""; el.className = "verdict"; return; }
+  if (fair == null) { el.textContent = "needs the chance of Up first"; el.className = "verdict meh"; return; }
   const edge = fair * 100 - priceCents - feeCents(priceCents / 100);
   el.textContent = (edge >= 0 ? "+" : "−") + Math.abs(edge).toFixed(1) + "¢ a contract after fees";
   el.className = "verdict " + (edge >= 3 ? "good" : edge <= 0 ? "bad" : "meh");
@@ -542,7 +577,7 @@ function render() {
   if (p == null) {
     big.textContent = "–"; big.className = "p none";
     $("fairUp").textContent = "Up –"; $("fairDown").textContent = "Down –";
-    $("why").textContent = spot == null ? "Waiting for exchange prices…" : sig == null ? "Measuring volatility; about 40 seconds after opening." : "Needs the target: open Target and calibration below.";
+    $("why").textContent = spot == null ? "Waiting for exchange prices…" : sig == null ? "Measuring volatility; about 40 seconds after opening." : "Needs this window's target. Type the one Robinhood shows.";
   } else {
     big.textContent = Math.min(99, Math.max(1, Math.round(p * 100))) + "%"; big.className = "p " + (p >= 0.5 ? "up" : "down");
     $("pBar").style.width = (p * 100).toFixed(1) + "%";
@@ -554,6 +589,7 @@ function render() {
       + (basisSrc === "raw" ? " Tap Sync once (below) for a sharper level." : "");
   }
   lastP = p;
+  $("ask").hidden = tgt != null;
   verdict($("vUp"), p, parseFloat($("rhUp").value));
   verdict($("vDown"), p == null ? null : 1 - p, parseFloat($("rhDown").value));
 
@@ -576,11 +612,14 @@ function render() {
 
 // ---------------------------------------------------------------- inputs
 function num(s) { const v = parseFloat(String(s).replace(/[$,\s]/g, "")); return isFinite(v) ? v : null; }
-$("tgtSet").addEventListener("click", () => {
-  const v = num($("tgtIn").value), mk = tickers(bounds(Date.now() / 1000)[1])[1];
-  if (v && v > 1000) { store.set("target." + mk, v); $("tgtIn").value = ""; $("tgtIn").placeholder = "Set: " + money(v); render(); }
-  else $("tgtIn").placeholder = "Type the target, e.g. 82913.71";
-});
+function setTarget(input) {
+  const v = num(input.value), mk = tickers(bounds(Date.now() / 1000)[1])[1];
+  if (v && v > 1000) { store.set("target." + mk, v); typedTarget[mk] = v; input.value = ""; input.placeholder = "Set: " + money(v); input.blur(); render(); }
+  else { input.value = ""; input.placeholder = "Type the target, e.g. 82913.71"; }
+}
+$("tgtSet").addEventListener("click", () => setTarget($("tgtIn")));
+$("askSet").addEventListener("click", () => setTarget($("askIn")));
+for (const id of ["tgtIn", "askIn"]) $(id).addEventListener("keydown", e => { if (e.key === "Enter") setTarget($(id)); });
 $("syncSet").addEventListener("click", () => {
   const v = num($("syncIn").value), a = avgAt(Math.floor(Date.now() / 1000) - 1);
   if (v && v > 1000 && a != null) {
