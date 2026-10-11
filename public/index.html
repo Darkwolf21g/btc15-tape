@@ -17,7 +17,7 @@
   --ink: #e6ebf5;
   --dim: #8592ad;
   --spot: #e6ebf5;      /* exchange spot, the fast line */
-  --avg: #78a0ff;       /* the 60-second average: Robinhood's big number */
+  --avg: #78a0ff;       /* complete 60-second exchange-proxy average */
   --target: #ffc857;
   --up: #2fd17c;        /* Robinhood's Up green */
   --down: #ff6a3d;      /* Robinhood's Down orange */
@@ -140,12 +140,12 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
   <label for="rhDown"><span class="label">Down button ¢</span>
     <input id="rhDown" inputmode="numeric" placeholder="type" autocomplete="off">
     <span class="verdict" id="vDown"></span></label>
-  <div class="notes recline" id="recLine">Record: no settled windows yet. The page scores its chance against Kalshi's price in every window it watches.</div>
+  <div class="notes recline" id="recLine">Record: no official results yet. Scores wait for confirmed Kalshi outcomes.</div>
 </section>
 
 <section class="levels">
-  <div class="lv spot"><span class="label">Spot now</span><b id="lvSpot">–</b><small id="lvSpotNote">median of BRTI exchanges</small></div>
-  <div class="lv avg"><span class="label">60-s average</span><b id="lvAvg">–</b><small id="lvAvgNote">Robinhood's big number</small></div>
+  <div class="lv spot"><span class="label">Spot now</span><b id="lvSpot">–</b><small id="lvSpotNote">exchange consensus; BRTI estimate</small></div>
+  <div class="lv avg"><span class="label">60-s average</span><b id="lvAvg">–</b><small id="lvAvgNote">exchange proxy; needs all 60 samples</small></div>
   <div class="lv tgt" role="button" tabindex="0"><span class="label">Target · tap to edit</span><b id="lvTgt">–</b><small id="lvTgtNote">–</small></div>
   <div class="lv proj"><span class="label">Closing avg, projected</span><b id="lvProj">–</b><small id="lvProjNote">–</small></div>
 </section>
@@ -153,9 +153,9 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
 <div class="chart"><canvas id="main" aria-label="Price this window"></canvas>
   <div class="legend">
     <span><i style="background:var(--spot)"></i>Spot</span>
-    <span><i style="background:var(--avg)"></i>60-s average (settles on this)</span>
+    <span><i style="background:var(--avg)"></i>60-s exchange-proxy average</span>
     <span><i style="background:var(--target)"></i>Target</span>
-    <span><i style="background:var(--dim)"></i>Where the closing average is heading, ±1 and ±2 sd</span>
+    <span><i style="background:var(--dim)"></i>Projected proxy average, ±1 and ±2 model scales</span>
     <span id="leadLegend" hidden><i style="background:var(--lead)"></i>Perpetual future (Hyperliquid), often first to move</span>
   </div>
 </div>
@@ -208,19 +208,19 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
     </div>
     <div class="row"><button id="wake" type="button">Keep screen on</button><span class="notes" id="wakeNote"></span></div>
     <div class="notes">
-      <p><b>Target.</b> Exact when Kalshi can be reached (through a relay). Otherwise it is estimated from the page's own prices over the minute before the open, and the exchanges here sit a few dollars from the official index. Type one target from Robinhood, in either box, and that difference is measured and applied to every window after it. It holds for hours.</p>
+      <p><b>Target.</b> Exact when Kalshi can be reached (through a relay). Otherwise it is estimated from the page's own prices over the minute before the open, and the exchanges here sit a few dollars from the official index. Enter the exact target from Robinhood for this window. It can also estimate the exchange-to-index offset when the opening minute is complete. That offset can change; reconfirm the target each window. Buy signals wait for a retrieved or entered target.</p>
       <p><b>Sync.</b> Another way to measure the same difference: type Robinhood's big number while it is showing.</p>
-      <p><b>Closing average, projected.</b> The contract settles on the average of the last 60 seconds. Until that minute starts none of those seconds has happened, and a random walk's best forecast for every one of them is the price now, so the projection sits on spot (plus the lean) and only its uncertainty shrinks as the close nears. In the last minute the seconds already gone are locked in and only the rest follow spot, so it pulls away from spot and settles on the final number.</p>
-      <p><b>Why Robinhood looks late.</b> Its big number is the average of the last 60 seconds, the same quantity the contract settles on. When price moves, it trails spot by about 30 seconds. The fast line here is spot. The blue line is that average.</p>
+      <p><b>Closing average, projected.</b> The contract settles on the average of the last 60 seconds. Until that minute starts none of those seconds has happened, and a random walk's best forecast for every one of them is the price now, so the projection sits on spot (plus the lean) and only its uncertainty shrinks as the close nears. In the final minute, available exchange-proxy samples contribute to the projection and future samples follow spot. Missing elapsed samples pause the model. Reconstructed Coinbase samples are identified. Only Kalshi confirms the winning outcome.</p>
+      <p><b>Timing.</b> A trailing 60-second average smooths price changes. Its effective delay depends on the price path and is not a measured network delay or a guaranteed trading lead. The fast line here is exchange consensus; the blue line is its complete trailing average. Neither is the official BRTI tick stream.</p>
       <p><b>Relay.</b> Browsers are not allowed to read Kalshi directly. A small relay of your own (a free Cloudflare Worker; the code is in the README) lets this page read the exact target, the official 60-second average and Kalshi's own Up price. Paste its address here once.</p>
       <p><b>Fees.</b> The edge figures take off Robinhood's commission and Kalshi's 1¢ fee, about 2¢ a contract in the middle of the range.</p>
       <p><b>Buy, thin, no.</b> The chance is shown with a band: the range it covers if volatility were 30% lower or 50% higher, if the lean were off, and if spot moved one standard deviation of a ten-second move against you while you placed the order. <b>Buy</b> means the price still leaves 3¢ after fees at the bad end of that band, and comes with a size: a quarter of the Kelly stake on the bad end, never more than 2% of the bankroll set below. <b>Thin</b> means there is an edge at the model's own chance but not at the bad end. <b>No</b> means none at the model's chance.</p>
-      <p><b>Record.</b> At 10, 5, 2 and 1 minutes before each close the page notes its chance and Kalshi's price, and when the market settles it scores both (a Brier score: the squared miss, so 0 is perfect and 0.25 is a coin flip). It also scores every buy call as one contract held to settlement. Until the model's score is below the market's over a few dozen windows, treat buy calls as a hypothesis, not an edge.</p>
-      <p><b>Sharp moves.</b> No model predicts a sudden jump. The chance allows for them with a fat-tailed curve, so it never shows more than about 98% however calm the last minutes were, and the "Sharp move" note appears when spot has just moved several standard deviations in ten seconds. In a sharp move, spot here leads Robinhood's number by about half a minute, and the projection shows where the closing average lands if the price holds.</p>
+      <p><b>Record.</b> At 10, 5, 2 and 1 minutes before each close the page notes its chance and Kalshi's price, and only after Kalshi confirms the outcome it scores both (a Brier score: the squared miss, so 0 is perfect and 0.25 is a coin flip). It also scores every buy call as one contract held to settlement. Until the model's score is below the market's over a few dozen windows, treat buy calls as a hypothesis, not an edge.</p>
+      <p><b>Sharp moves.</b> Sudden jumps can invalidate the forecast. The model uses a fat-tailed curve, with displayed probabilities bounded to 1–99%; that does not prove calibration. The "Sharp move" note appears when spot moves several estimated standard deviations in ten seconds. The projection assumes its remaining price forecast holds.</p>
       <p><b>Order flow.</b> Every trade on the five index exchanges and the Hyperliquid perpetual is sorted by who crossed the spread: a market buy counts as buying, a market sell as selling. The bars are the difference, in dollars, and the line is the running total since the open. A move with heavy flow behind it tends to carry on; a move on balanced flow is more often a sweep that fades. Prints of $200k or more are listed under the chart.</p>
       <p><b>Flow lean.</b> The page also measures, as it runs, how far spot has tended to move in the 30 seconds after a stretch of net buying or selling. Once that relation is clear (about ten minutes of data at the least, usually more) the projection leans the way the flow points, by that measured amount and never by more than two standard deviations of a 30-second move. The flow line says whether the lean is on. It is forgotten slowly, so what it learnt this evening still counts tomorrow morning. Liquidations come from Bybit, OKX, Deribit, BitMEX and Binance (Binance refuses US connections): longs being liquidated is forced selling, shorts being liquidated is forced buying, and a run of them is what makes a move overshoot.</p>
       <p><b>Sound.</b> Tap Sound once (browsers will not play anything until you do). Then: two rising notes for a sharp move up, two falling for down; three notes when Kalshi's own price leaves a 3¢ edge for Up or Down; one low note at one minute to go. On an iPhone the ring/silent switch must be on ring.</p>
-      <p>The chance shown is a model: a random walk from spot with recently measured volatility and fat tails. The flow and the liquidations are shown, not modelled. It is an estimate, not advice.</p>
+      <p>The chance shown is a model: a random walk from spot with recently measured volatility and fat tails. Flow and the perp gap may enter the fitted lean; liquidations are shown as context. This exchange-based probability is uncalibrated and is not the official contract outcome.</p>
     </div>
   </div>
 </details>
@@ -252,8 +252,8 @@ function normCdf(z) {      // Abramowitz-Stegun 7.1.26 on erf, accurate to about
   return z >= 0 ? (1 + y) / 2 : (1 - y) / 2;
 }
 // Bitcoin moves have fat tails: a jump of several standard deviations happens far more often than the
-// normal curve allows. The chance of Up uses a Student-t curve with four degrees of freedom, so a
-// "sure thing" is shown as about 98%, not 99.9%.
+// normal curve allows. The chance of Up uses a Student-t curve with four degrees of freedom.
+// Fat tails do not impose a maximum probability; only the display is clipped to 1–99%.
 function tailCdf(z) { return 0.5 + z * (z * z + 6) / (2 * Math.pow(z * z + 4, 1.5)); }
 // `sd` is used as the curve's scale, which makes its actual standard deviation sd*sqrt(2): a
 // deliberate margin for volatility the last minutes did not show. The alternative, the curve
@@ -498,10 +498,20 @@ function sampleAt(sec) {
   const own = samples.get(sec);
   return own != null ? own : backfill.has(sec) ? backfill.get(sec) : null;
 }
-function avgAt(sec) {           // trailing 60-s average of spot ending at `sec`, if enough seconds are in hand
-  let s = 0, n = 0;
-  for (let k = sec - SETTLE + 1; k <= sec; k++) { const p = sampleAt(k); if (p != null) { s += p; n++; } }
-  return n >= 54 ? s / n : null;
+function windowSamples(end, through = end) {
+  let sum = 0, observed = 0, missing = 0, reconstructed = 0;
+  // Kalshi's final-minute helper uses (end - 60, end]: exclude the start, include the close.
+  for (let s = end - SETTLE + 1; s <= end && s <= through; s++) {
+    const p = sampleAt(s);
+    if (!Number.isFinite(p)) { missing++; continue; }
+    sum += p; observed++;
+    if (!samples.has(s) && backfill.has(s)) reconstructed++;
+  }
+  return {sum, observed, missing, reconstructed};
+}
+function avgAt(sec) {           // complete trailing exchange-proxy average; never divide by fewer than 60
+  const w = windowSamples(sec);
+  return w.observed === SETTLE && !w.missing ? w.sum / SETTLE : null;
 }
 function addVol(px, back) {
   const r2 = (px - back) ** 2 / VOL_STEP;
@@ -712,7 +722,7 @@ function setBasis(value, via, sd) {
 // How far the page's level may be from the official index, in dollars: measured against Kalshi's
 // official average when that is in hand, otherwise a fixed allowance by how the level was set.
 function levelSd() {
-  if (basisSrc === "kalshi") return Math.min(6, Math.max(0.5, basisSd || 1.5));
+  if (basisSrc === "kalshi") return Math.max(0.5, basisSd || 1.5);
   return basisSrc === "target" ? 2.5 : basisSrc === "synced" ? 3 : 6;
 }
 
@@ -813,13 +823,13 @@ async function fetchCandle(open) {
 }
 const r2 = x => Math.round(x * 100) / 100;
 function target(open, mk) {
-  if (kalshi.market && kalshi.market.ticker === mk && kalshi.market.target) return [kalshi.market.target, "from Kalshi" + (kalshi.via === "public" ? " (public relay)" : "")];
+  if (kalshi.market && kalshi.market.ticker === mk && kalshi.market.target) return [kalshi.market.target, "from Kalshi" + (kalshi.via === "public" ? " (public relay)" : ""), true];
   const typed = typedTarget[mk] || store.get("target." + mk);
-  if (typed) return [typed, "as you entered it"];
+  if (typed) return [typed, "as you entered it", true];
   const f = kalshi.feed.get(open - 1);
   if (f) return [r2(f), "from Kalshi's feed"];
   const level = basisSrc === "raw" ? "level not calibrated: tap to correct" : "level calibrated " + Math.round((Date.now() - basisAt) / 60000) + " min ago";
-  const a = avgAt(open - 1);                        // the page's own minute before the open, or Coinbase's
+  const a = avgAt(open);                            // same closing-boundary convention as settlement
   if (a != null) return [r2(a + basis), "estimated; " + level];
   if (candle.open === open) {
     const cb = venue.coinbase ? venue.coinbase.offset : 0;
@@ -838,28 +848,30 @@ function target(open, mk) {
 // hour. `drifts` is a list of [dollars, seconds]: a lean that plays out over that many seconds.
 const VOL_TAU = 180;
 function project(now, close, x, vols, drifts) {
-  let known = 0; const ahead = [];
-  for (let s = close - SETTLE; s < close; s++) {
-    if (s <= now) { const p = sampleAt(s); known += p != null ? p + basis : x; }
-    else ahead.push(s - now);
-  }
+  const w = windowSamples(close, now), ahead = [];
+  // Past gaps are unknown. Current spot is a forecast only for future observations.
+  if (w.missing) return {...w, mean: null, sd: null};
+  for (let s = close - SETTLE + 1; s <= close; s++) if (s > now) ahead.push(s - now);
   const m = ahead.length;
   // Variance of the sum of the future values: the step the index takes `u` seconds from now feeds
   // every settlement second after it, so it counts (how many of those there are) squared.
   let variance = 0;
   if (m) {
-    const vs = vols.s * vols.s, vl = vols.l * vols.l, dmax = Math.ceil(ahead[m - 1]);
-    let c = m, j = 0;
-    for (let u = 1; u <= dmax; u++) {
-      while (j < m && ahead[j] < u - 0.5) { j++; c--; }
-      variance += (vl + (vs - vl) * Math.exp(-u / VOL_TAU)) * c * c;
+    const vs = vols.s * vols.s, vl = vols.l * vols.l;
+    let previous = 0;
+    for (let j = 0; j < m; j++) {
+      const u = ahead[j], c = m - j;
+      // Integrate the variance rate exactly, including a fractional final second.
+      variance += (vl * (u - previous) + (vs - vl) * VOL_TAU *
+        (Math.exp(-previous / VOL_TAU) - Math.exp(-u / VOL_TAU))) * c * c;
+      previous = u;
     }
   }
-  let mean = known + m * x;
+  let mean = w.sum + w.observed * basis + m * x;
   for (const [amount, horizon] of drifts || []) for (const d of ahead) mean += amount * Math.min(1, d / horizon);
   mean /= SETTLE;
   const lv = levelSd();
-  return {mean, sd: Math.sqrt(variance / (SETTLE * SETTLE) + lv * lv), locked: SETTLE - m};
+  return {...w, mean, sd: Math.sqrt(variance / (SETTLE * SETTLE) + lv * lv)};
 }
 
 // ---------------------------------------------------------------- drawing
@@ -920,7 +932,7 @@ function drawMain(open, close, now, tgt, proj) {
     g.strokeStyle = css("--target"); g.setLineDash([6, 4]); g.lineWidth = 1.5;
     g.beginPath(); g.moveTo(L, Y(tgt)); g.lineTo(W - R, Y(tgt)); g.stroke(); g.setLineDash([]);
   }
-  // projection to the close: ±2 sd faint, ±1 sd, centre
+  // projection to the close: ±2 model scales faint, ±1 scale, centre
   if (proj && avgPts.length) {
     const [ls, la] = avgPts[avgPts.length - 1], xc = X(close) - 3;
     g.save(); g.beginPath(); g.rect(L, T, W - L - R, H - T - B); g.clip();
@@ -1042,7 +1054,7 @@ function fillProbHistory(open, now, close, tgt, vols) {
     const x = sampleAt(s);
     if (x == null) continue;
     const pr = project(s + 0.5, close, x + basis, vols, driftsOf(nowcastAt(s, vols)));
-    pHist.set(s, chance(pr.mean, pr.sd, tgt));
+    if (pr.mean != null) pHist.set(s, chance(pr.mean, pr.sd, tgt));
   }
 }
 function drawProb(open, close, now) {
@@ -1130,6 +1142,7 @@ function chanceBand(now, close, x, tgt, vols, drifts) {
   const adverse = vols.s * Math.sqrt(10);
   for (const k of [0.7, 1, 1.5]) for (const dr of drifts.length ? [drifts, []] : [[]]) for (const shift of [-adverse, 0, adverse]) {
     const pr = project(now, close, x + shift, {s: vols.s * k, l: vols.l * k}, dr);
+    if (pr.mean == null) return null;
     const p = chance(pr.mean, pr.sd, tgt);
     if (p < lo) lo = p;
     if (p > hi) hi = p;
@@ -1140,9 +1153,9 @@ const cents = v => (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + "¢";
 let bankroll = store.get("bankroll") || 500;
 // Returns {edge, worst, call, n}: the edge in cents at the model's chance and at the bad end of its
 // band, the call, and a quarter-Kelly size on the worst case, capped at 2% of the bankroll.
-function verdict(el, fair, worstFair, priceCents) {
+function verdict(el, fair, worstFair, priceCents, waitReason = "WAIT: model unavailable") {
   if (!(priceCents > 0 && priceCents < 100)) { el.textContent = ""; el.className = "verdict"; return null; }
-  if (fair == null) { el.textContent = "needs the chance of Up first"; el.className = "verdict meh"; return null; }
+  if (fair == null) { el.textContent = waitReason; el.className = "verdict meh"; return null; }
   const fee = feeCents(priceCents / 100), edge = fair * 100 - priceCents - fee, worst = worstFair * 100 - priceCents - fee;
   const call = worst >= 3 ? "buy" : edge <= 0 ? "no" : "thin";
   let n = 0;
@@ -1157,11 +1170,15 @@ function verdict(el, fair, worstFair, priceCents) {
 }
 // ---------------------------------------------------------------- record: does the model beat the market?
 // For each window: the model's chance and Kalshi's book at fixed points before the close, the first
-// buy call on each side, and the result: Kalshi's own once the market settles, the page's closing
-// average until then (only when it is clearly on one side). From those, a Brier score for the model
+// buy call on each side, and the result: only Kalshi's confirmed result is scored. Proxy closing
+// averages are diagnostics, never outcome labels. From confirmed results, a Brier score for the model
 // and one for the market at each checkpoint, and what the buy calls would have made.
 const CHECKS = [600, 300, 120, 60];
 const record = {windows: store.get("record") || [], cur: null};
+// Older versions scored their own proxy result. Preserve it as a diagnostic and wait for Kalshi.
+for (const w of record.windows) if (w.src !== "kalshi" && w.result) {
+  w.proxyResult = w.result; w.result = null; w.src = null;
+}
 function saveRecord() {
   if (record.windows.length > 300) record.windows.splice(0, record.windows.length - 300);
   store.set("record", record.windows);
@@ -1188,23 +1205,35 @@ function keepRecord(mk, close, left, tgt, p, p2, km, vUp, vDown, upC, downC, typ
   }
 }
 function settleWindow(r) {
-  const a = avgAt(r.close - 1);
-  if (a != null) r.closeAvg = +(a + basis).toFixed(2);
-  if (r.tgt != null && r.closeAvg != null && Math.abs(r.closeAvg - r.tgt) >= 2) { r.result = r.closeAvg >= r.tgt ? "yes" : "no"; r.src = "page"; }
+  captureProxyClose(r);
   saveRecord();
+  // The render loop can change windows before onSecond captures the closing tick.
+  setTimeout(() => { captureProxyClose(r); saveRecord(); }, 1200);
   for (const delay of [45000, 150000, 600000]) setTimeout(() => settleOfficial(r), delay);
+}
+function captureProxyClose(r) {
+  const w = windowSamples(r.close), a = avgAt(r.close);
+  r.proxySamples = w.observed; r.proxyMissing = w.missing;
+  r.closeAvg = a != null ? r2(a + basis) : null;
+  r.proxyResult = r.closeAvg != null && r.tgt != null ? (r.closeAvg >= r.tgt ? "yes" : "no") : null;
 }
 async function settleOfficial(r) {                 // Kalshi's result, usually there within a minute or two of the close
   if (r.src === "kalshi") return;
   const d = await kalshiGet("/markets/" + r.mk);
   const m = d && d.market, res = m && (m.result === "yes" || m.result === "no") ? m.result : null;
-  if (res) { r.result = res; r.src = "kalshi"; if (+m.floor_strike > 0) r.tgt = +m.floor_strike; saveRecord(); }
+  if (res) {
+    r.result = res; r.src = "kalshi";
+    if (+m.floor_strike > 0) r.tgt = +m.floor_strike;
+    const value = m.expiration_value;
+    if (value != null && value !== "" && Number.isFinite(+value)) r.officialCloseAvg = +value;
+    saveRecord();
+  }
 }
 // Windows left unsettled by an earlier session: ask Kalshi once, a few at a time.
 record.windows.filter(w => w.src !== "kalshi" && Date.now() / 1000 - w.close > 90).slice(-20)
   .forEach((w, i) => setTimeout(() => settleOfficial(w), 8000 + i * 1500));
 function scoreRecord() {
-  const settled = record.windows.filter(w => w.result);
+  const settled = record.windows.filter(w => w.src === "kalshi" && (w.result === "yes" || w.result === "no"));
   const brier = c => {                              // model against the market's mid, where both were seen
     let n = 0, sm = 0, sm2 = 0, n2 = 0, sk = 0;
     for (const w of settled) {
@@ -1214,7 +1243,7 @@ function scoreRecord() {
       n++; sm += (k.p - y) ** 2; sk += (mid - y) ** 2;
       if (k.p2 != null) { n2++; sm2 += (k.p2 - y) ** 2; }
     }
-    return n ? {n, model: sm / n, market: sk / n, matched: n2 ? sm2 / n2 : null} : null;
+    return n ? {n, model: sm / n, market: sk / n, matched: n2 ? sm2 / n2 : null, matchedN: n2} : null;
   };
   const buys = [];
   for (const w of settled) for (const b of w.buys) {
@@ -1225,25 +1254,25 @@ function scoreRecord() {
 }
 function recordLine() {
   const s = scoreRecord();
-  if (!s.settled) return `Record: ${s.total} window${s.total === 1 ? "" : "s"} watched, none settled yet. The page scores its chance against Kalshi's price in every window it watches.`;
+  if (!s.settled) return `Record: ${s.total} window${s.total === 1 ? "" : "s"} watched, none confirmed yet. Scores wait for official Kalshi results.`;
   const b = s.briers[300] || s.briers[120] || s.briers[60] || s.briers[600];
   const at = s.briers[300] ? "5 min" : s.briers[120] ? "2 min" : s.briers[60] ? "1 min" : "10 min";
   const wins = s.buys.filter(x => x.won).length, avg = s.buys.length ? s.buys.reduce((a, x) => a + x.pnl, 0) / s.buys.length : 0;
-  return `Record: ${s.settled} settled` + (b ? ` · at ${at} to go the model's Brier is ${b.model.toFixed(3)} vs the market's ${b.market.toFixed(3)} over ${b.n} (lower is better; ${b.model < b.market ? "model ahead" : "market ahead"})` : " · no checkpoint with a Kalshi price yet")
+  return `Record: ${s.settled} officially settled` + (b ? ` · at ${at} to go the model's Brier is ${b.model.toFixed(3)} vs the market's ${b.market.toFixed(3)} over ${b.n} (lower is better; ${b.model < b.market ? "model ahead" : "market ahead"})` : " · no checkpoint with a Kalshi price yet")
     + (s.buys.length ? ` · buy calls ${s.buys.length}: ${wins} right, ${cents(avg)} a contract on average` : " · no buy calls yet");
 }
 function recordText() {
   const s = scoreRecord(), lines = [];
   for (const c of CHECKS) { const b = s.briers[c]; lines.push(`${String(c / 60).padStart(2)} min to go: ` + (b ? `model ${b.model.toFixed(3)}` + (b.matched != null ? ` (variance-matched ${b.matched.toFixed(3)})` : "") + ` vs market ${b.market.toFixed(3)} over ${b.n} windows` : "nothing scored yet")); }
-  lines.push(`Brier score: mean squared error of the chance, 0 is perfect, 0.25 is a coin flip. Settled ${s.settled} of ${s.total} watched. Buy calls are scored as one contract held to settlement, fees off.`);
+  lines.push(`Brier score: mean squared error of the chance, 0 is perfect, 0.25 is a coin flip. Officially settled ${s.settled} of ${s.total} watched. Proxy results are excluded. Buy calls are scored as one contract held to settlement, estimated entry fees deducted.`);
   lines.push(`"Variance-matched" is the same model with its curve narrowed by 1.41 (the chance shown keeps that margin). If it scores better over a few dozen windows, the shown chance should switch to it.`);
   lines.push("");
   for (const w of record.windows.slice(-25).reverse()) {
     const when = ET_CLOCK.format(new Date((w.close - WINDOW) * 1000));
-    const res = w.result ? `${w.result === "yes" ? "Up" : "Down"} (${w.src})` : "open";
+    const res = w.src === "kalshi" && w.result ? `${w.result === "yes" ? "Up" : "Down"} (official Kalshi)` : Date.now() / 1000 >= w.close ? "awaiting official result" : "open";
     const ch = [300, 60].map(c => { const k = w.checks[c]; return k ? `${c / 60} min: model ${Math.round(k.p * 100)}%` + (k.ask != null ? ` mkt ${Math.round((k.ask + k.bid) * 50)}¢` : "") : null; }).filter(Boolean).join(" · ");
     const buys = w.buys.map(b => { const sc = s.buys.find(x => x.mk === w.mk && x.side === b.side); return `buy ${b.side} ${b.price}¢ at ${Math.floor(b.left / 60)}:${String(b.left % 60).padStart(2, "0")}` + (sc ? ` → ${cents(sc.pnl)}` : ""); }).join(", ");
-    lines.push(`${when}  target ${w.tgt != null ? money(w.tgt) : "?"}  ${res}` + (w.closeAvg != null ? `  close ${money(w.closeAvg)}` : "") + (ch ? `\n     ${ch}` : "") + (buys ? `\n     ${buys}` : ""));
+    lines.push(`${when}  target ${w.tgt != null ? money(w.tgt) : "?"}  ${res}` + (w.officialCloseAvg != null ? `  official average ${money(w.officialCloseAvg)}` : "") + (w.closeAvg != null ? `  proxy average ${money(w.closeAvg)} (unofficial)` : w.proxyMissing ? `  proxy INCOMPLETE: ${w.proxySamples}/60 samples` : "") + (ch ? `\n     ${ch}` : "") + (buys ? `\n     ${buys}` : ""));
   }
   return lines.join("\n");
 }
@@ -1311,7 +1340,7 @@ function render() {
   const x = spot != null ? spot + basis : null;
   const a = avgAt(Math.floor(now) - 1);
   const avg = a != null ? a + basis : null;
-  const [tgt, tgtSrc] = target(open, mk);
+  const [tgt, tgtSrc, exactTarget] = target(open, mk);
   const nIndex = Object.values(VENUES).filter(v => !v.lead && !v.liq).length;
   $("lvSpot").textContent = money(x);
   $("lvSpot").parentElement.classList.toggle("thin", x == null);
@@ -1320,8 +1349,8 @@ function render() {
     + (lead != null ? ` · perp ${signed(lead - spot)}` : "");
   $("lvAvg").textContent = money(avg);
   $("lvAvgNote").textContent = x != null && avg != null
-    ? `Robinhood's number · spot ${signed(x - avg)}, so it is heading ${x > avg + 1 ? "up" : x < avg - 1 ? "down" : "sideways"}`
-    : "filling in the last minute…";
+    ? `Exchange proxy · spot ${signed(x - avg)}, so it is heading ${x > avg + 1 ? "up" : x < avg - 1 ? "down" : "sideways"}`
+    : "INCOMPLETE: needs all 60 proxy samples";
   // momentum: how far spot moved in the last 10 s, against what the volatility says is usual
   const sec = Math.floor(now), back10 = sampleAt(sec - 10), back60 = sampleAt(sec - 60);
   const move10 = spot != null && back10 != null ? spot - back10 : null;
@@ -1329,27 +1358,31 @@ function render() {
   $("lvTgt").textContent = money(tgt);
   $("lvTgtNote").textContent = tgtSrc;
 
-  let proj = null, p = null, band = null;
+  let proj = null, p = null, band = null, projectionStatus = null;
   const vols = sigmas(), f30 = flowSum(NOW_H, now);
   const lean = vols ? nowcast((f30.b + f30.pb - f30.s - f30.ps) / 1e6, lead != null && spot != null ? lead - spot : null, vols) : 0;
   if (x != null && tgt != null && vols) {
     const drifts = driftsOf(lean);
-    proj = project(now, close, x, vols, drifts);
-    p = chance(proj.mean, proj.sd, tgt);
-    band = chanceBand(now, close, x, tgt, vols, drifts);
-    pHist.set(Math.floor(now), p);
+    projectionStatus = project(now, close, x, vols, drifts);
+    if (projectionStatus.mean != null) {
+      proj = projectionStatus;
+      p = chance(proj.mean, proj.sd, tgt);
+      band = chanceBand(now, close, x, tgt, vols, drifts);
+      pHist.set(Math.floor(now), p);
+    } else pHist.delete(Math.floor(now));
     fillProbHistory(open, now, close, tgt, vols);
   }
   $("lvProj").textContent = proj ? money(proj.mean) : "–";
-  $("lvProjNote").textContent = proj ? (proj.locked ? `${proj.locked} of 60 s locked in, the rest follow spot` : "follows spot until the last minute") + ` · ±${proj.sd.toFixed(0)} (1 sd) · vol $${vols.s.toFixed(1)} now, $${vols.l.toFixed(1)}/√s over 15 min` + (lean ? ` · lean ${signed(lean)}` : "")
-    : vols == null ? "measuring volatility…" : "needs the target";
+  $("lvProjNote").textContent = proj ? (proj.observed ? `${proj.observed}/60 proxy samples, ${proj.reconstructed} reconstructed; rest forecast` : "exchange-proxy forecast until the final minute") + ` · ±${proj.sd.toFixed(0)} model scale · vol $${vols.s.toFixed(1)} now, $${vols.l.toFixed(1)}/√s over 15 min` + (lean ? ` · lean ${signed(lean)}` : "")
+    : projectionStatus && projectionStatus.missing ? `INCOMPLETE: ${projectionStatus.missing} elapsed proxy samples missing` : vols == null ? "measuring volatility…" : "needs the target";
 
   const fw = flowWords(flowSum(30, now));
   const big = $("pBig");
   if (p == null) {
-    big.textContent = "–"; big.className = "p none";
+    big.textContent = "WAIT"; big.className = "p none";
+    $("pBar").style.width = "0%";
     $("fairUp").textContent = "Up –"; $("fairDown").textContent = "Down –";
-    $("why").textContent = spot == null ? "Waiting for two exchanges to agree on a price…" : sig == null ? "Measuring volatility; about 30 seconds after opening." : "Needs this window's target. Type the one Robinhood shows.";
+    $("why").textContent = projectionStatus && projectionStatus.missing ? `INCOMPLETE: ${projectionStatus.missing} elapsed samples missing. Probability and buy signals paused.` : spot == null ? "Waiting for two exchanges to agree on a price…" : sig == null ? "Measuring volatility; about 30 seconds after opening." : "Needs this window's target. Type the one Robinhood shows.";
     $("why").style.color = "";
   } else {
     big.textContent = Math.min(99, Math.max(1, Math.round(p * 100))) + "%"; big.className = "p " + (p >= 0.5 ? "up" : "down");
@@ -1361,11 +1394,12 @@ function render() {
     // In a sharp move the flow says whether the move has weight behind it or is a sweep of thin books.
     const withFlow = fw && fw.side ? (fw.side === Math.sign(move10) ? " with " + fw.text + " behind it" : " against " + fw.text) : fw ? " on balanced flow" : "";
     $("why").textContent = (sharp ? `SHARP MOVE: ${signed(move10)} in 10 s${withFlow}. ` : "")
-      + `Closing average heading for ${signed(gap)} vs the target; ±${proj.sd.toFixed(0)} is one standard deviation.`
-      + (proj.locked ? ` ${proj.locked} of its 60 seconds are in.` : "")
+      + `UNCALIBRATED EXCHANGE ESTIMATE: closing average heading for ${signed(gap)} vs the target; model scale ±${proj.sd.toFixed(0)}.`
+      + (proj.observed ? ` ${proj.observed}/60 proxy samples are available; ${proj.reconstructed} reconstructed.` : "")
       + (move10 != null && back60 != null && !sharp ? ` Spot ${signed(move10)} in 10 s, ${signed(spot - back60)} in 60 s.` : "")
       + (fw && !sharp ? ` Flow 30 s: ${fw.text}${fw.side ? " " + signedUsd(fw.net) : ""}.` : "")
-      + (basisSrc === "raw" ? " Typing one target from Robinhood calibrates the level for the hours ahead." : "");
+      + (basisSrc === "raw" ? " Enter the exact Robinhood target to estimate the current price offset." : "")
+      + (!exactTarget ? " Target estimated: buy signals paused until confirmed or entered." : "");
     $("why").style.color = sharp ? (move10 > 0 ? css("--up") : css("--down")) : "";
   }
   lastP = p;
@@ -1377,8 +1411,10 @@ function render() {
   $("edgeHead").textContent = km ? `Kalshi's book now: Up ${upC}¢ · Down ${downC}¢ (Robinhood sells at these). Type over them if Robinhood differs.`
     : "Type what Robinhood's buttons say to see your edge";
   const typedUp = $("rhUp").value ? parseFloat($("rhUp").value) : null, typedDown = $("rhDown").value ? parseFloat($("rhDown").value) : null;
-  const vUp = verdict($("vUp"), p, band && band.lo, typedUp != null ? typedUp : upC);
-  const vDown = verdict($("vDown"), p == null ? null : 1 - p, band && 1 - band.hi, typedDown != null ? typedDown : downC);
+  const waitReason = !exactTarget ? "WAIT: enter or retrieve the exact target" : "WAIT: incomplete data or model unavailable";
+  const signalP = exactTarget ? p : null;
+  const vUp = verdict($("vUp"), signalP, band && band.lo, typedUp != null ? typedUp : upC, waitReason);
+  const vDown = verdict($("vDown"), signalP == null ? null : 1 - signalP, band && 1 - band.hi, typedDown != null ? typedDown : downC, waitReason);
   keepRecord(mk, close, left, tgt, p, proj && tgt != null ? chanceMatched(proj.mean, proj.sd, tgt) : null, km, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, typedUp != null || typedDown != null);
 
   // sounds: a sharp move as it starts, a buy call on Kalshi's own prices once it has held for a few
@@ -1506,7 +1542,7 @@ function setTarget(input) {
   store.set("target." + mk, v); typedTarget[mk] = v;
   // The exact target is the official average over the minute before the open. The page has its own
   // average over that same minute, so the difference is the level correction for the hours ahead.
-  const a = avgAt(open - 1);
+  const a = avgAt(open);
   let note = "Set: " + money(v);
   if (a != null && basisSrc !== "kalshi") {
     if (Math.abs(v - (a + basis)) <= 60) { setBasis(v - a, "target"); note += " · level calibrated"; }

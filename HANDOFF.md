@@ -1,6 +1,6 @@
 # BTC 15 Tape — handoff
 
-Written for whoever picks this up next (a person or another assistant). It says what exists, where it is, how it works, what has and has not been verified, and what was decided and why. Read it in full before changing anything.
+Written for whoever picks this up next (a person or another assistant). It says what exists, where it is, how it works, what has and has not been verified, and what was decided and why. Read it in full before changing anything. Settlement-integrity corrections below were added on 11 Oct 2026; see `tests/settlement.test.cjs` for the corresponding regression checks.
 
 ## 1. What this is
 
@@ -68,9 +68,9 @@ Settings at the top: `WINDOW 900`, `SETTLE 60`, `ALIVE_MS`, `FROZEN_MS`, `MAX_DE
 
 1. **Consensus spot** (`consensus`). Each live exchange's mid minus its learned offset; outliers more than 0.05% from the median dropped; needs two. Weighted mean with weight `0.05 + exp(−age_since_last_change / 10 s)`, so the exchanges that just moved carry the price (a plain median stuck to idle exchanges). Offsets (`learnOffsets`) learn each venue's usual distance from the consensus (rate 1/(n+1) for the first 10 samples, then a 120-s half-life) and are then **re-centred so Coinbase's offset is 0**: the level is pinned to Coinbase so a calibration survives reloads and venues dropping out.
 2. **Level** (`basis`, `basisSrc`, `levelSd`). Official index minus consensus. Sources, best first: Kalshi's average feed (median of feed − page average over 3 minutes, with a robust sd `1.4826 × MAD` → `basisSd`), a typed target (`setTarget` calibrates if within $60), a typed Robinhood number (`Sync`), nothing (`raw`). Stored 6 h in `localStorage btc15tape.basis`.
-3. **Per-second record.** `samples` (consensus per second), `backfill`, `leadSamples` (perp on spot's footing), `flow` (dollars bought/sold at market per second, spot and perp separately), `liqs`, `whales`, `tstat` (events per venue). `avgAt(sec)` = trailing 60-s average if ≥ 54 of 60 seconds exist.
+3. **Per-second record.** `samples` (consensus per second), `backfill`, `leadSamples` (perp on spot's footing), `flow` (dollars bought/sold at market per second, spot and perp separately), `liqs`, `whales`, `tstat` (events per venue). `avgAt(sec)` requires all 60 finite readings at seconds `sec−59 … sec`; incomplete averages return null. Reconstructed trade readings are counted separately from live proxy readings; neither is an official BRTI observation.
 4. **Volatility** (`sigmas`). Two EWMAs of squared 5-second changes (per second of variance), half-lives 120 s and 900 s, each floored at $0.50/√s. `sigma()` is their RMS blend for readouts and the sharp-move test (`|move10| > 3σ√10`).
-5. **Target** (`target`): Kalshi's `floor_strike` → typed → Kalshi feed value at open−1 → page's own average at open−1 plus basis → Coinbase candle → "tap to enter".
+5. **Target** (`target`): Kalshi's `floor_strike` → typed → Kalshi feed value at open−1 → page's complete average at open plus basis → Coinbase candle → "tap to enter". Only the first two are confirmed targets for buy indicators; estimated targets leave buy indicators on WAIT.
 6. **Nowcast** (`calibrate`, `calStats`, `nowcast`): section 6.3.
 7. **Projection and chance** (`project`, `chance`, `chanceBand`): section 6.
 8. **Kalshi** (`kalshiGet`, `pollKalshi`): route = user relay → same site (when served by the Worker) → direct → public proxy; re-probes the preferred route every 30 s; market every 3 s (8 s on the public proxy); feed every 20 s; one missed request is tolerated for 60 s; `kalshi.hist` keeps bid/ask per second for the chance chart.
@@ -83,19 +83,19 @@ Settings at the top: `WINDOW 900`, `SETTLE 60`, `ALIVE_MS`, `FROZEN_MS`, `MAX_DE
 
 ## 6. The model, exactly
 
-Let `x` = spot + basis (the page's estimate of the index now), `close` the window's close, the settlement seconds `s = close−60 … close−1`.
+Let `x` = spot + basis (the page's estimate of the index now), `close` the window's close, the settlement seconds `s = close−59 … close` (the interval `(close−60, close]`).
 
-**6.1 Projected closing average.** Seconds already past are locked in at their recorded value; future seconds follow a driftless random walk from `x`, plus a lean (6.3) that plays out linearly over 30 s:
+**6.1 Projected closing average.** Elapsed seconds use their recorded exchange-proxy value; future seconds follow a driftless random walk from `x`, plus a lean (6.4) that plays out linearly over 30 s. A missing elapsed reading pauses the projection, probability and buy indicators (WAIT); it is never substituted with current spot:
 
 `mean = ( Σ_known (sample_s + basis) + m·x + Σ_future lean·min(1, d_s/30) ) / 60`
 
-where `m` is the number of future seconds and `d_s` how far ahead each is. **So with more than a minute to go the projection is spot plus the lean**; it detaches from spot only inside the settlement minute. The tile says how many seconds are locked in.
+where `m` is the number of future seconds and `d_s` how far ahead each is. **So with more than a minute to go the projection is spot plus the lean**; it detaches from spot only inside the settlement minute. The tile counts available proxy readings and reconstructed readings; these are estimates, not locked official observations.
 
 **6.2 Its variance.** The index step taken `u` seconds from now feeds every settlement second after it, so with `c(u)` = number of future settlement seconds at least `u` ahead:
 
-`Var = ( Σ_u v(u)·c(u)² ) / 60² + levelSd²`, `v(u) = σ_L² + (σ_S² − σ_L²)·e^(−u/180)`
+`Var = ( ∫ v(u)·c(u)² du ) / 60² + levelSd²`, `v(u) = σ_L² + (σ_S² − σ_L²)·e^(−u/180)`
 
-(σ_S the 2-minute estimate, σ_L the 15-minute one: the quick estimate governs the next minutes and gives way to the slow one). With σ_S = σ_L this equals the closed form it replaced, `σ² Σ_j d_j (2(m−j)−1) / 60²`; both were checked against Monte Carlo (section 7). `levelSd` = measured `basisSd` (0.5–6) when aligned to Kalshi, else 2.5 (typed target), 3 (synced), 6 (raw).
+(σ_S the 2-minute estimate, σ_L the 15-minute one: the quick estimate governs the next minutes and gives way to the slow one). The integral is evaluated exactly between future observation times, including fractional seconds. With σ_S = σ_L it equals `σ² Σ_j d_j (2(m−j)−1) / 60²` for zero-based ascending `j`. `levelSd` uses measured `basisSd` with a 0.5 floor and no upper cap when aligned to Kalshi, else 2.5 (typed target), 3 (synced), 6 (raw). The Student-t scale below still adds the deliberate margin; the display labels it model scale.
 
 **6.3 Chance of Up.** `P(Up) = F_t4( (mean − (target − 0.005)) / sd )` with `F_t4(z) = ½ + z(z²+6) / (2(z²+4)^1.5)`, the Student-t CDF with 4 degrees of freedom (exact closed form). The 0.005 is the 2-decimal rounding of the settlement value. **Deliberate margin:** `sd` is used as the curve's *scale*, and a t(4) with scale `s` has standard deviation `s·√2`, so the shown chance is built on a spread 41% wider than measured (at +1 sd: 81% shown, 84% normal, 88.5% variance-matched). The variance-matched chance `F_t4(z·√2)` is recorded at every checkpoint and scored beside the shown one; **if it scores better over a few dozen windows, switch the display to it** (one-line change: `chance` → `chanceMatched`).
 
@@ -103,7 +103,7 @@ where `m` is the number of future seconds and `d_s` how far ahead each is. **So 
 
 **6.5 Verdict.** Band: the chance recomputed over volatility × {0.7, 1, 1.5}, lean on/off, and spot shifted by ±σ_S·√10 (one sd of a 10-s move, for the time it takes to place the order); `lo`/`hi` of those 18 values. For a price `c` (cents) and fee `f = feeCents(c/100)`: `edge = p·100 − c − f`, `worst = p_lo·100 − c − f` (for Down use `1 − p` and `1 − p_hi`). **buy** if `worst ≥ 3`; **no** if `edge ≤ 0`; **thin** otherwise. Size on a buy: Kelly for a $1 binary at all-in cost `k = (c+f)/100`, `f* = (p_lo − k)/(1 − k)`; stake = min(2% of bankroll, ¼·f*·bankroll); contracts = floor(stake / k). Bankroll default $500 (the owner's stated figure), settable.
 
-**6.6 Record.** Per window: `checks[600|300|120|60] = {p, p2 (variance-matched), ask, bid}` noted when the clock passes each mark (waits up to 5 s for a Kalshi quote); the first buy call per side (`price, p, worst, left, typed, n`); `closeAvg`; `result` with `src`. Settlement: the page's closing average vs target when they differ by ≥ $2 (`src: page`), replaced by Kalshi's `result` fetched 45 s, 150 s and 600 s after the close (`src: kalshi`); unsettled windows from earlier sessions are retried on load. Scoring: Brier (mean squared error) of `p`, of `p2`, and of the market mid `(bid+ask)/2` over windows with both; buy calls scored as one contract held to settlement: `win → 100 − c − f`, `loss → −c − f`. Kept in `localStorage` (300 windows). **Interpretation rule agreed with the owner:** until the model's Brier is below the market's over a few dozen windows, buy calls are a hypothesis, not an edge.
+**6.6 Record.** Per window: `checks[600|300|120|60] = {p, p2 (variance-matched), ask, bid}` noted when the clock passes each mark (waits up to 5 s for a Kalshi quote); the first buy call per side (`price, p, worst, left, typed, n`). `closeAvg` and `proxyResult` are unofficial diagnostics requiring all 60 proxy readings; capture retries after 1.2 s for the closing tick. Only Kalshi's published yes/no sets `result` and `src: kalshi`, fetched 45 s, 150 s and 600 s after close; `expiration_value` is stored separately as `officialCloseAvg`. Legacy `src: page` outcomes migrate to diagnostics and pending official confirmation. Unsettled windows retry on load. Only official results enter Brier and buy-call P&L. Brier compares `p`, `p2`, and market mid `(bid+ask)/2`; the alternate model has its own sample count. Buy calls score one contract held to settlement: `win → 100 − c − f`, `loss → −c − f`. Kept in `localStorage` (300 windows). **Interpretation rule agreed with the owner:** until the model's Brier is below the market's over a few dozen windows, buy calls are a hypothesis, not an edge.
 
 ## 7. What was verified numerically (11 Oct 2026)
 
@@ -128,7 +128,7 @@ Playwright against a simulated market (`test/fake_market.py` replaces `WebSocket
 - `python3 test/check_model.py` — projection sum vs the old closed form, band and verdicts with sizing, a window rolling over, settlement by the page then by Kalshi, persistence across a reload. ~4 min.
 - `python3 test/check_nowcast.py impact|lag|none` — the three calibration scenarios (20 simulated minutes each, ~5 real minutes; run in parallel).
 
-Each prints what it sees and ends with the page errors it caught (expect none). There is no assertion framework; read the output.
+Each browser script prints what it sees and ends with the page errors it caught (expect none); read the output. These simulator checks do not verify live feeds or network latency. The added assertion suite, `node --test tests/settlement.test.cjs`, runs actual page JavaScript with browser/network effects stubbed and checks settlement boundaries, gaps, fractional variance, official-only scoring and WAIT behavior. All 15 tests passed on 11 Oct 2026; the existing Playwright checks were not rerun for these corrections.
 
 ## 10. Conventions and constraints
 
@@ -145,7 +145,7 @@ Each prints what it sees and ends with the page errors it caught (expect none). 
 - **Freshness-weighted mean, not median**, for spot: a median froze on idle exchanges in quiet markets.
 - **Quotes valid until replaced** while the socket is alive: exchanges push only on change; treating a 3-s-old quote as dead was emptying the consensus on the phone.
 - **Projection = spot until the settlement minute**: a random walk's best forecast of every future second is the current price; the uncertainty, not the centre, is what shrinks.
-- **Fat tails (t4) with a √2 margin**: a sure thing shows ~98%, not 99.9%. Recorded beside the variance-matched alternative so the data can overrule it.
+- **Fat tails (t4) with a √2 margin**: a deliberate wider scale, recorded beside the variance-matched alternative so the data can overrule it. It does not impose a mathematical 98% confidence ceiling; the UI clamps displayed probabilities to 1–99%. All probabilities remain uncalibrated exchange-proxy estimates.
 - **Flow and the perp enter only through a gated, capped, jointly fitted lean**: shown always, applied only when the relation is there. Nothing hand-tuned feeds the chance.
 - **Buy = survives the worst case.** The owner is trading real money by hand; "buy" should be rare and right, "thin" is the honest middle.
 - **Kelly ¼, 2% cap, $500 bankroll** carried over from the paper bot's agreed settings.
