@@ -398,7 +398,7 @@ async function fetchBackfill(force, backTo) {
       if (!Array.isArray(part) || !part.length) break;
       rows.push(...part);
       const oldest = Math.floor(Date.parse(part[part.length - 1].time) / 1000);
-      cursor = r.headers.get("cb-after") || part[part.length - 1].trade_id;
+      cursor = (r.headers && r.headers.get("cb-after")) || part[part.length - 1].trade_id;
       if (backTo == null || oldest <= backTo || !cursor) break;
     }
     if (rows.length) {
