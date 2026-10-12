@@ -209,9 +209,10 @@ function readyPage(missing = false) {
 
 test('render shows WAIT and clears probability and buy indicators after an elapsed gap', () => {
   const {api, node} = readyPage();
+  api.acceptIndex(100,3560000); for(let t=3380;t<=3560;t++) api.officialSeconds.set(t,100+Math.sin(t));
   api.render();
   assert.match(node('pBig').textContent, /%$/);
-  api.samples.delete(3550);
+  api.samples.delete(3550); api.officialSeconds.delete(3550);
   api.render();
   assert.equal(node('pBig').textContent, 'WAIT');
   assert.equal(node('pBar').style.width, '0%');
@@ -223,6 +224,7 @@ test('render shows WAIT and clears probability and buy indicators after an elaps
 
 test('estimated candle target cannot trigger buy calls', () => {
   const {api, node} = readyPage();
+  api.acceptIndex(100,3560000); for(let t=3380;t<=3560;t++) api.officialSeconds.set(t,100+Math.sin(t));
   const mk = api.tickers(3600)[1];
   api.setTarget(mk, null);
   // Kalshi history is a target estimate, not a confirmed market strike.
@@ -272,3 +274,5 @@ test('trailing BRTI average requires sixty readings and excludes current source 
   assert.equal(api.officialTrailing(100).v,100);
   api.officialSeconds.delete(99); assert.equal(api.officialTrailing(100),null);
 });
+
+test('exchange-only data cannot display probability or issue trade signals',()=>{const {api,node}=readyPage();api.render();assert.equal(node('pBig').textContent,'WAIT');assert.match(node('why').textContent,/official BRTI is unavailable/);assert.match(node('vUp').textContent,/WAIT/);assert.equal(api.pHist.size,0);});

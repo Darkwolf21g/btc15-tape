@@ -148,3 +148,9 @@ test('paper report excludes legacy models and separates simulation settings',()=
  const rows=[{close:1,settled:true,trades:[{...base,paperSettings:{paperDelayMs:1000}}]},{close:2,settled:true,trades:[{...base,pnlCents:-20,paperSettings:{paperDelayMs:2000}},{...base,model:'old'}]}];
  const r=h.api.paperReport(rows);assert.equal(r.attempts,2);assert.equal(r.scenarios.length,2);assert.equal(r.pnlCents,-10);assert.equal(r.maxDrawdownCents,20);assert.equal(r.readyForLive,false);
 });
+
+test('collector exceptions become redacted diagnostic 503 responses',async()=>{
+ const h=worker();const env={FEED:{idFromName:()=>1,get:()=>({fetch:async()=>{throw Error("daily storage limit exceeded SECRET");}})}};
+ const response=await h.api.entry.fetch(new Request('https://test/collector/status'),env);const body=await response.json();
+ assert.equal(response.status,503);assert.equal(body.error,'platform_limit');assert.ok(body.trace);assert.ok(!JSON.stringify(body).includes('SECRET'));assert.equal(response.headers.get('Retry-After'),'30');
+});
