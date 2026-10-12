@@ -280,3 +280,9 @@ test('configured public relay uses collector without unsigned fallback on failur
  const h=worker();let path;const env={...h.obj.env,FEED:{idFromName:()=>1,get:()=>({fetch:async req=>{path=new URL(req.url);return new Response('{}',{status:429,headers:{'Retry-After':'30'}})}})}};
  const r=await h.api.entry.fetch(new Request('https://site/exchange/status'),env);assert.equal(r.status,429);assert.equal(path.pathname,'/market-data');assert.equal(path.searchParams.get('path'),'/exchange/status');
 });
+
+test('mixed-version deployment tolerates a collector without the new market route',async()=>{
+ const h=worker();h.context.rolloutReads=[];vm.runInContext('signedGet=async(env,path)=>{rolloutReads.push(path);return {exchange_active:true,trading_active:true}}',h.context);
+ const env={...h.obj.env,FEED:{idFromName:()=>1,get:()=>({fetch:async()=>new Response('expected a websocket',{status:426})})}};
+ const r=await h.api.entry.fetch(new Request('https://site/exchange/status'),env);assert.equal(r.status,200);assert.equal((await r.json()).trading_active,true);assert.equal(h.context.rolloutReads.length,1);
+});
