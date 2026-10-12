@@ -37,7 +37,7 @@ export default {
       try { return await env.FEED.get(env.FEED.idFromName("brti")).fetch(request); }
       catch (e) {
         const message=String(e?.message || e), trace=crypto.randomUUID();
-        const code=/quota|daily|limit exceeded|exceeded.*limit/i.test(message)?"platform_limit":/overload/i.test(message)?"collector_overloaded":/storage|sqlite|database/i.test(message)?"collector_storage":/timeout|timed out/i.test(message)?"collector_timeout":/reset|restart/i.test(message)?"collector_restarting":"collector_exception";
+        const code=/quota|daily|limit exceeded|exceeded.*limit|exceeded allowed volume/i.test(message)?"platform_limit":/overload/i.test(message)?"collector_overloaded":/storage|sqlite|database/i.test(message)?"collector_storage":/timeout|timed out/i.test(message)?"collector_timeout":/reset|restart/i.test(message)?"collector_restarting":"collector_exception";
         // Full exception stays in private Worker logs. Never expose keys or raw upstream errors.
         console.error("btc15 collector failure",{trace,code,path,error:e});
         return new Response(JSON.stringify({healthy:false,error:code,trace,release:"collector-diagnostics-v1"}),{status:503,headers:{...CORS,"Content-Type":"application/json","Retry-After":"30"}});
@@ -253,6 +253,7 @@ export class KalshiFeed {
     this.agentBusy = false;
     this.indexSeconds = new Map(); // Only the 1 Hz BRTI channel can supply settlement readings.
     this.alarmBusy = false;
+    this.agentActive = false; this.depthSubscribed = null;
   }
   status() {
     return {type: "relay", msg: {state: this.upState, since: this.upSince, lastMessage: this.upMsgAt, error: this.lastErr,
@@ -313,6 +314,7 @@ export class KalshiFeed {
     const pair = new WebSocketPair(), client = pair[0], server = pair[1];
     server.accept();
     this.clients.add(server);
+    if(this.up) this.subscribeTickers();
     const drop = () => { this.clients.delete(server); this.maybeIdle(); };
     server.addEventListener("close", drop);
     server.addEventListener("error", drop);
@@ -332,7 +334,7 @@ export class KalshiFeed {
   }
   maybeIdle() {
     if (this.clients.size || this.idleTimer) return;
-    this.idleTimer = setTimeout(async () => { this.idleTimer = null; const cfg = await this.tradeConfig(); if (!this.env.KALSHI_KEY_ID && !this.clients.size && cfg.mode === "off") this.closeUpstream("idle"); }, 60000);
+    this.idleTimer = setTimeout(async () => { this.idleTimer = null; const cfg = await this.tradeConfig(); if (!this.env.KALSHI_KEY_ID && !this.clients.size && cfg.mode === "off") this.closeUpstream("idle"); else await this.ensureAlarm(); }, 60000);
   }
   closeUpstream(why) {
     if (this.windowTimer) { clearTimeout(this.windowTimer); this.windowTimer = null; }
@@ -378,14 +380,15 @@ export class KalshiFeed {
   }
   send(obj) { if (this.up) { obj.id = this.subId++; try { this.up.send(JSON.stringify(obj)); } catch (e) {} } }
   subscribeTickers() {                           // this window's market and the next; renewed at each boundary
-    const tk = currentTickers(), set = tk.join(",");
-    if (set !== this.tickerSet) {
+    const tk = currentTickers().slice(0,1), set = tk.join(","), wantDepth = this.clients.size > 0 || this.agentActive;
+    if (set !== this.tickerSet || wantDepth !== this.depthSubscribed) {
       const old = [this.tickerSid, this.bookSid].filter(x => x != null);
       if (old.length) this.send({cmd: "unsubscribe", params: {sids: old}});
       this.tickerSid = null; this.bookSid = null; this.tickerSet = set;
+      this.depthSubscribed = wantDepth; this.bookSequence = null; this.books = {};
       for (const t of Object.keys(this.books)) if (!tk.includes(t)) delete this.books[t];
       this.send({cmd: "subscribe", params: {channels: ["ticker"], market_tickers: tk, send_initial_snapshot: true}});
-      this.send({cmd: "subscribe", params: {channels: ["orderbook_delta"], market_tickers: tk}});
+      if(wantDepth) this.send({cmd: "subscribe", params: {channels: ["orderbook_delta"], market_tickers: tk}});
     }
     if (this.windowTimer) clearTimeout(this.windowTimer);
     const msToBoundary = WINDOW * 1000 - (Date.now() % (WINDOW * 1000));
@@ -398,7 +401,9 @@ export class KalshiFeed {
     if (!this.alarmBusy && (alarm == null || alarm < now - 60000 || alarm > now + 60000))
       await this.state.storage.setAlarm(now + 1000);
     if (this.up && now - Math.max(this.upMsgAt, this.upSince) > 20000) this.closeUpstream("stale stream");
+    this.agentActive = (await this.tradeConfig()).mode !== "off";
     await this.ensureUpstream();
+    if(this.up) this.subscribeTickers();
   }
   nextEvent(nowMs, agentOn, cfg) {             // the next checkpoint, settlement or agent moment after now, in ms
     const now = nowMs / 1000, close = (Math.floor(now / WINDOW) + 1) * WINDOW, times = [];
