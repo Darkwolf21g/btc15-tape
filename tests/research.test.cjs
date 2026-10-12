@@ -27,7 +27,7 @@ test('research uses only one-Hz observations available at capture and pauses on 
 });
 test('research rejects replayed/future/unknown depth sources and crossed books',()=>{
  const h=harness(),at=h.now();
- for(const sourceAt of [null,at-5000,at+1])assert.equal(h.r.depthSnapshot({...book(at),sourceAt},at).valid,false);
+ for(const sourceAt of [null,at-5000,at+251])assert.equal(h.r.depthSnapshot({...book(at),sourceAt},at).valid,false);
  assert.equal(h.r.depthSnapshot({...book(at),yes:new Map([[.9,10]])},at).valid,false);
  assert.equal(h.r.depthSnapshot({...book(at),at:at+1},at).valid,false);
 });
@@ -160,4 +160,20 @@ test('follow-through midpoint diagnostics sign NO correctly and never count stal
 test('bias drawdown is chronological even when export rows arrive out of order',()=>{
  const h=harness(),rows=tagged(h,3);rows[0].result='no';rows[1].result='no';
  const a=h.r.biasReport(rows).rows,b=h.r.biasReport([...rows].reverse()).rows;assert.deepEqual(a,b);
+});
+test('small upstream clock skew is explicit and bounded; local future receipts still fail',()=>{
+ const h=harness(),at=h.now();
+ const b=h.r.depthSnapshot({...book(at),sourceAt:at+70},at);assert.equal(b.valid,true);assert.equal(b.clockAheadMs,70);assert.equal(b.sourceAgeMs,-70);
+ assert.equal(h.r.depthSnapshot({...book(at),sourceAt:at+250},at).valid,true);
+ assert.equal(h.r.depthSnapshot({...book(at),sourceAt:at+251},at).valid,false);
+ assert.equal(h.r.depthSnapshot({...book(at),at:at+1,sourceAt:at},at).valid,false);
+});
+test('fixed-point deltas remove canceled levels without leaving crossed phantom depth',()=>{
+ const h=harness(),at=h.now(),send=d=>h.obj.onUpstream(JSON.stringify(d));
+ send({type:'orderbook_snapshot',sending_ts_ms:at,msg:{market_ticker:'TEST',yes_dollars_fp:[['0.9000','0.30'],['0.4000','10.00']],no_dollars_fp:[['0.5000','10.00']]}});
+ send({type:'orderbook_delta',msg:{market_ticker:'TEST',side:'yes',price_dollars:'0.9000',delta_fp:'-0.10',ts_ms:at}});
+ send({type:'orderbook_delta',msg:{market_ticker:'TEST',side:'yes',price_dollars:'0.9000',delta_fp:'-0.20',ts_ms:at}});
+ assert.equal(h.obj.books.TEST.yes.has(.9),false);assert.equal(h.r.depthSnapshot(h.obj.books.TEST,at).valid,true);
+ const fractional={...book(at),no:new Map([[.9,1e-12],[.5,.75]])};
+ const asks=h.context.BTC15Model.asks(fractional,'Up');assert.equal(asks.length,1);assert.equal(asks[0].size,.75);
 });

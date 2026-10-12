@@ -107,10 +107,10 @@ References reviewed 2026-10-12:
 - https://docs.kalshi.com/websockets/market-ticker
 - https://kalshi.com/docs/kalshi-fee-schedule.pdf
 
-## Pricing bias phase — btc15-bias-v1
+## Pricing bias phase — btc15-bias-v2
 
 This phase starts prospectively with checkpoints carrying `bias.version` equal to
-`btc15-bias-v1`. Older checkpoints remain in the settlement study but are excluded
+`btc15-bias-v2`. Older checkpoints remain in the settlement study but are excluded
 from the bias study. No historical signals are reconstructed. The live forecast,
 agent mode and order submission permissions do not change.
 
@@ -168,3 +168,20 @@ selection rule and a fresh future holdout period, test dependence-aware uncertai
 and multiple comparisons, and stress fees, fill rates and latency. A positive
 cell in this descriptive report is a hypothesis for that next test, not approval
 for automated real-money trading.
+
+### Depth quality correction
+
+Live export inspection found canceled fractional quantities leaving tiny positive
+floating-point residuals. Those became phantom crossed levels and made every
+initial depth capture unusable. Book deltas now add/subtract integer hundredths
+of a contract; canceled levels disappear exactly. Ask extraction preserves real
+fractional sizes and drops quantities that round to zero. Fill simulation still
+requires whole contracts after the depth haircut. The paper execution version is
+`paper-delayed-depth-v2` so results do not pool with the older depth implementation.
+
+Observed upstream book clocks led local receipt time by roughly 3–70 ms. Research
+allows at most 250 ms of source-clock lead, records the raw signed source age and
+`clockAheadMs`, and still rejects local receipts after capture or source ages over
+1.5 seconds. This is a bounded clock-skew allowance, not a claim of synchronized
+clocks or permission to use data received later. The bias version is v2; v1
+captures are excluded. No prior captured book is repaired retrospectively.

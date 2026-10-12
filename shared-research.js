@@ -1,11 +1,11 @@
 // Canonical research calculations; embedded in worker.js and imported by the offline evaluator.
 (() => {
 const VERSION = 'settlement-research-v1';
-const BIAS_VERSION = 'btc15-bias-v1';
+const BIAS_VERSION = 'btc15-bias-v2';
 const PRICE_BANDS = [0,10,30,50,70,90,100];
 const CHECKS = [600, 300, 120, 60, 30, 15, 5];
 const SETTINGS = Object.freeze({delayMs:1000, maxArrivalLateMs:3000, bookMaxAgeMs:1500,
-  indexMaxAgeMs:3000, depthFraction:0.5, quantity:1, minEdgeCents:3,
+  indexMaxAgeMs:3000, sourceClockSkewMs:250, depthFraction:0.5, quantity:1, minEdgeCents:3,
   feeVenue:'kalshi', feeAssumption:'general taker multiplier 1; whole-cent rounding per fill level',
   checkpointToleranceMs:5000, minTrainWindows:60, testWindows:20});
 const finite = v => typeof v === 'number' && Number.isFinite(v);
@@ -21,10 +21,10 @@ function depthSnapshot(book, at) {
   const no = globalThis.BTC15Model.asks(book,'Down').slice(0,10);
   const bid = no.length ? 100-no[0].price : null, ask = yes[0]?.price ?? null;
   const fresh = age >= 0 && age <= SETTINGS.bookMaxAgeMs && sourceAge != null &&
-    sourceAge >= 0 && sourceAge <= SETTINGS.bookMaxAgeMs;
+    sourceAge >= -SETTINGS.sourceClockSkewMs && sourceAge <= SETTINGS.bookMaxAgeMs;
   const valid = fresh && finite(bid) && finite(ask) && bid <= ask;
   return {receivedAt:book.at, sourceAt, sourceKind:book.sourceKind || null,
-    ageMs:age, sourceAgeMs:sourceAge, valid, bidCents:bid, askCents:ask, yes, no,
+    ageMs:age, sourceAgeMs:sourceAge, clockAheadMs:sourceAge==null?null:Math.max(0,-sourceAge), valid, bidCents:bid, askCents:ask, yes, no,
     reason:!fresh?'missing, stale or future depth timestamp':!valid?'empty or crossed book':null};
 }
 function snapshot({at, close, target, targetAt, ticks, book, exchange, marketStatus}) {
