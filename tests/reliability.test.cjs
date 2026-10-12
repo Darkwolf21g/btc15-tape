@@ -268,3 +268,15 @@ test('definitively rejected demo orders do not require nonexistent fills',async(
  const h=demoFixture();vm.runInContext('const originalDemoCall=signedCall;signedCall=async(...args)=>{if(args[2]==="POST"){const e=Error("bad price increment");e.status=400;throw e;}return originalDemoCall(...args);}',h.context);
  const d=await (await h.req('order')).json();assert.equal(d.order.state,'rejected');assert.equal(d.order.reconciled,true);
 });
+
+test('public market requests share authenticated collector cache and cannot reach portfolio routes',async()=>{
+ const h=worker();h.context.marketCalls=[];vm.runInContext('signedGet=async(env,path)=>{marketCalls.push(path);return {exchange_active:true,trading_active:true}}',h.context);
+ const responses=await Promise.all([h.obj.marketData('/exchange/status'),h.obj.marketData('/exchange/status')]);
+ assert.equal(responses[0].status,200);await h.obj.marketData('/exchange/status');assert.equal(h.context.marketCalls.length,1);
+ assert.equal(h.context.marketCalls[0],'/trade-api/v2/exchange/status');
+ assert.equal((await h.obj.marketData('/portfolio/balance')).status,404);assert.equal(h.context.marketCalls.length,1);
+});
+test('configured public relay uses collector without unsigned fallback on failure',async()=>{
+ const h=worker();let path;const env={...h.obj.env,FEED:{idFromName:()=>1,get:()=>({fetch:async req=>{path=new URL(req.url);return new Response('{}',{status:429,headers:{'Retry-After':'30'}})}})}};
+ const r=await h.api.entry.fetch(new Request('https://site/exchange/status'),env);assert.equal(r.status,429);assert.equal(path.pathname,'/market-data');assert.equal(path.searchParams.get('path'),'/exchange/status');
+});

@@ -128,6 +128,10 @@ export default {
       if (env && env.ASSETS) return env.ASSETS.fetch(request);     // the page and its files
       return new Response("not found", {status: 404, headers: CORS});
     }
+    if(env.FEED&&env.KALSHI_KEY_ID&&env.KALSHI_PRIVATE_KEY){
+      try{return await env.FEED.get(env.FEED.idFromName("brti")).fetch(new Request("https://internal/market-data?path="+encodeURIComponent(path)));}
+      catch{return new Response(JSON.stringify({error:"collector_unavailable"}),{status:503,headers:{...CORS,"Content-Type":"application/json","Retry-After":"30"}});}
+    }
     const result = await publicKalshi(path);
     return new Response(result.body, {status:result.status, headers:{...CORS,"Content-Type":"application/json",...(result.retry?{"Retry-After":String(result.retry)}:{})}});
   },
@@ -341,7 +345,7 @@ export class KalshiFeed {
   constructor(state, env) {
     this.state = state; this.env = env;
     this.clients = new Set();
-    this.bookSequences=new Map(); this.demoBusy=false;
+    this.bookSequences=new Map(); this.demoBusy=false; this.marketCache=new Map(); this.marketPending=new Map();
     this.up = null; this.upState = "off"; this.upSince = 0; this.upMsgAt = 0; this.lastErr = null; this.backoff = 2000;
     this.last = {};                               // last frame of each type, replayed to a phone that just connected
     this.tickerSid = null; this.bookSid = null; this.tickerSet = ""; this.subId = 1;
@@ -365,6 +369,7 @@ export class KalshiFeed {
   }
   async fetch(request) {
     const url = new URL(request.url);
+    if(url.pathname==="/market-data")return this.marketData(url.searchParams.get("path")||"");
     if(url.pathname.startsWith("/demo/"))return this.demoRequest(request,url);
     if (url.pathname === "/watchdog") { await this.ensureAlarm(); return new Response("ok"); }
     if (url.pathname === "/feed/status") { await this.ensureAlarm(); return new Response(JSON.stringify(this.status().msg), {headers: {...CORS, "Content-Type": "application/json"}}); }
@@ -433,6 +438,22 @@ export class KalshiFeed {
     } catch (e) {}
     this.ensureUpstream();
     return new Response(null, {status: 101, webSocket: client});
+  }
+  async marketData(path) {
+    const reply=(d)=>new Response(d.body,{status:d.status,headers:{...CORS,"Content-Type":"application/json",...(d.retry?{"Retry-After":String(d.retry)}:{})}});
+    if(!ALLOWED.some(re=>re.test(path)))return reply({status:404,body:'{"error":"not found"}'});
+    const cached=this.marketCache.get(path);if(cached?.until>Date.now())return reply(cached.result);
+    if(this.marketPending.has(path))return reply(await this.marketPending.get(path));
+    const job=(async()=>{
+      try{
+        const d=await signedGet(this.env,"/trade-api/v2"+path);
+        const result={body:JSON.stringify(d),status:200};
+        for(const [key,v] of this.marketCache)if(v.until<=Date.now())this.marketCache.delete(key);
+        this.marketCache.set(path,{until:Date.now()+(path==="/exchange/status"?10000:2000),result});return result;
+      }catch(e){const budget=apiBudget(this.env,"live"),limited=e.status===429||Date.now()<budget.pauseUntil||/budget exhausted/.test(e.message);
+        return {status:limited?429:503,body:JSON.stringify({error:limited?"rate_limited":"market_data_unavailable"}),retry:limited?Math.max(1,Math.ceil((budget.pauseUntil-Date.now())/1000)):30};}
+      finally{this.marketPending.delete(path);}
+    })();this.marketPending.set(path,job);return reply(await job);
   }
   // Demo is an isolated execution test, never driven by production prices or the model.
   async demoRequest(request,url) {
