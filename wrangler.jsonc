@@ -9,5 +9,6 @@
   "assets": { "directory": "./public", "binding": "ASSETS" },
   "durable_objects": { "bindings": [{ "name": "FEED", "class_name": "KalshiFeed" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["KalshiFeed"] }],
+  "triggers": { "crons": ["* * * * *"] },
   "observability": { "enabled": true }
 }

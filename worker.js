@@ -18,8 +18,16 @@ const WS_UPSTREAM = "https://external-api-ws.kalshi.com/trade-api/ws/v2";   // h
 const ALLOWED = [/^\/markets\/KXBTC15M-[A-Z0-9-]+$/, /^\/live_data\/events\/KXBTC15M-[A-Z0-9]+$/, /^\/exchange\/status$/];
 const CORS = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Cache-Control": "no-store"};
 const WINDOW = 900;
+const MODEL_VERSION = "brti-driftless-v2";
+// Bound network waits so a slow upstream cannot strand the alarm chain.
+const timedFetch = (url, options = {}) => fetch(url, {...options, signal: AbortSignal.timeout(12000)});
 
 export default {
+  async scheduled(event, env, ctx) {
+    if (env.FEED && env.KALSHI_KEY_ID && env.KALSHI_PRIVATE_KEY) {
+      ctx.waitUntil(env.FEED.get(env.FEED.idFromName("brti")).fetch(new Request("https://internal/watchdog")));
+    }
+  },
   async fetch(request, env) {
     const url = new URL(request.url), path = url.pathname.replace(/\/+$/, "");
     if (request.method === "OPTIONS") return new Response(null, {headers: {...CORS, "Access-Control-Allow-Headers": "Content-Type"}});
@@ -41,7 +49,7 @@ export default {
         for (const apiPath of ["/trade-api/v2/portfolio/balance", "/trade-api/v2/cfbenchmarks/values"]) {
           const stamp = String(Date.now());
           const sig = await signHandshake(env.KALSHI_PRIVATE_KEY, stamp + "GET" + apiPath);
-          const up = await fetch("https://external-api.kalshi.com" + apiPath + (apiPath.endsWith("values") ? "?id=BRTI" : ""),
+          const up = await timedFetch("https://external-api.kalshi.com" + apiPath + (apiPath.endsWith("values") ? "?id=BRTI" : ""),
                                  {headers: {"Accept": "application/json", "KALSHI-ACCESS-KEY": env.KALSHI_KEY_ID.trim(), "KALSHI-ACCESS-SIGNATURE": sig, "KALSHI-ACCESS-TIMESTAMP": stamp}});
           const body = await up.text();
           out[apiPath] = {status: up.status, reply: up.ok ? "ok (" + body.length + " bytes)" : body.slice(0, 160)};
@@ -59,7 +67,7 @@ export default {
       const apiPath = "/trade-api/v2/cfbenchmarks/history/values", stamp = String(Date.now());
       try {
         const sig = await signHandshake(env.KALSHI_PRIVATE_KEY, stamp + "GET" + apiPath);
-        const up = await fetch("https://external-api.kalshi.com" + apiPath + "?id=BRTI&timespan=" + span + "&timestamp=" + encodeURIComponent(ts),
+        const up = await timedFetch("https://external-api.kalshi.com" + apiPath + "?id=BRTI&timespan=" + span + "&timestamp=" + encodeURIComponent(ts),
                                {headers: {"Accept": "application/json", "KALSHI-ACCESS-KEY": env.KALSHI_KEY_ID.trim(), "KALSHI-ACCESS-SIGNATURE": sig, "KALSHI-ACCESS-TIMESTAMP": stamp},
                                 cf: {cacheTtl: 0, cacheEverything: false}});
         const body = await up.text();
@@ -74,7 +82,7 @@ export default {
     for (const base of UPSTREAMS) {
       for (let attempt = 0; attempt < 2; attempt++) {           // one quick retry per upstream
         try {
-          const up = await fetch(base + path, {headers: {"Accept": "application/json",
+          const up = await timedFetch(base + path, {headers: {"Accept": "application/json",
                                                          "User-Agent": "Mozilla/5.0 (compatible; btc15-tape relay)"},
                                                cf: {cacheTtl: 0, cacheEverything: false}});
           const body = await up.text();
@@ -146,23 +154,29 @@ function volsFrom(ticks, nowMs) {
   const s = est(120), l = est(900);
   return s && l ? {s, l} : null;
 }
-function projectFrom(ticks, nowMs, closeS, x, vols) {
-  const now = nowMs / 1000;
-  const perSec = new Map(); for (const [ms, v] of ticks) perSec.set(Math.floor(ms / 1000), v);
-  let known = 0, observed = 0; const ahead = [];
+function projectFrom(ticks, nowMs, closeS, x, vols, aggregate = null) {
+  const now = nowMs / 1000, perSec = new Map(ticks.map(([ms, v]) => [Math.floor(ms / 1000), v]));
+  let known = 0, observed = 0, missing = 0; const ahead = [];
   for (let sec = closeS - SETTLE + 1; sec <= closeS; sec++) {
-    if (sec <= now) { const v = perSec.get(sec); if (v != null) { known += v; observed++; } else { known += x; observed++; } }   // a missing elapsed second is carried at spot
+    if (sec <= now) { const v = perSec.get(sec); if (Number.isFinite(v)) { known += v; observed++; } else missing++; }
     else ahead.push(sec - now);
   }
-  const m = ahead.length, vs = vols.s * vols.s, vl = vols.l * vols.l;
+  // A delayed aggregate must never turn a 60-reading contract into a 59-reading contract.
+  const elapsed = SETTLE - ahead.length;
+  if (aggregate && aggregate.n === elapsed && aggregate.n >= 1 && aggregate.n <= 60 &&
+      aggregate.end > (closeS - 60) * 1000 && aggregate.end <= closeS * 1000 &&
+      nowMs - aggregate.end >= -1000 && nowMs - aggregate.end < 3000 && Number.isFinite(aggregate.v)) {
+    known = aggregate.v * aggregate.n; observed = aggregate.n; missing = 0;
+  }
+  if (missing) return {mean: null, sd: null, observed, missing, m: ahead.length};
+  const m = ahead.length, vs = vols.s ** 2, vl = vols.l ** 2;
   let variance = 0, previous = 0;
   for (let j = 0; j < m; j++) { const u = ahead[j], c = m - j; variance += (vl * (u - previous) + (vs - vl) * VOL_TAU * (Math.exp(-previous / VOL_TAU) - Math.exp(-u / VOL_TAU))) * c * c; previous = u; }
-  const mean = (known + m * x) / (observed + m), sd = Math.sqrt(variance / ((observed + m) ** 2) + 0.3 * 0.3);
-  return {mean, sd, observed, m};
+  return {mean: (known + m * x) / SETTLE, sd: Math.sqrt(variance / SETTLE ** 2 + 0.09), observed, missing: 0, m, official: observed > 0};
 }
 async function signedGet(env, apiPath, query) {
   const stamp = String(Date.now()), sig = await signHandshake(env.KALSHI_PRIVATE_KEY, stamp + "GET" + apiPath);
-  const r = await fetch("https://external-api.kalshi.com" + apiPath + (query || ""), {headers: {"Accept": "application/json", "KALSHI-ACCESS-KEY": env.KALSHI_KEY_ID.trim(), "KALSHI-ACCESS-SIGNATURE": sig, "KALSHI-ACCESS-TIMESTAMP": stamp}});
+  const r = await timedFetch("https://external-api.kalshi.com" + apiPath + (query || ""), {headers: {"Accept": "application/json", "KALSHI-ACCESS-KEY": env.KALSHI_KEY_ID.trim(), "KALSHI-ACCESS-SIGNATURE": sig, "KALSHI-ACCESS-TIMESTAMP": stamp}});
   if (!r.ok) throw new Error(apiPath + " " + r.status + " " + (await r.text()).slice(0, 100));
   return r.json();
 }
@@ -174,7 +188,7 @@ async function signedCall(env, mode, method, apiPath, body) {
   const k = keysFor(env, mode);
   if (!k.id || !k.pem) throw new Error("no " + mode + " key");
   const stamp = String(Date.now()), sig = await signHandshake(k.pem, stamp + method + apiPath);
-  const r = await fetch(HOSTS[mode === "demo" ? "demo" : "live"] + apiPath, {method, body: body ? JSON.stringify(body) : undefined,
+  const r = await timedFetch(HOSTS[mode === "demo" ? "demo" : "live"] + apiPath, {method, body: body ? JSON.stringify(body) : undefined,
     headers: {"Accept": "application/json", "Content-Type": "application/json", "KALSHI-ACCESS-KEY": k.id.trim(), "KALSHI-ACCESS-SIGNATURE": sig, "KALSHI-ACCESS-TIMESTAMP": stamp}});
   const text = await r.text();
   if (!r.ok) throw new Error(method + " " + apiPath + " " + r.status + " " + text.slice(0, 160));
@@ -182,7 +196,7 @@ async function signedCall(env, mode, method, apiPath, body) {
 }
 async function notify(env, title, text) {           // a push to the ntfy app, if NTFY_TOPIC is set
   if (!env.NTFY_TOPIC) return;
-  try { await fetch("https://ntfy.sh/" + encodeURIComponent(env.NTFY_TOPIC.trim()), {method: "POST", body: text, headers: {"Title": title, "Tags": "chart_with_upwards_trend"}}); } catch (e) {}
+  try { await timedFetch("https://ntfy.sh/" + encodeURIComponent(env.NTFY_TOPIC.trim()), {method: "POST", body: text, headers: {"Title": title, "Tags": "chart_with_upwards_trend"}}); } catch (e) {}
 }
 const etDay = ms => new Intl.DateTimeFormat("en-CA", {timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit"}).format(new Date(ms));
 const tailFromBand = (mean, sd, tgt) => tailCdf((mean - (tgt - 0.005)) / sd);
@@ -196,6 +210,23 @@ function parseTicks(d) {                        // the CF Benchmarks history pay
     if (v > 0 && ms > 0) out.push([ms, v]);
   }
   return out.sort((a, b) => a[0] - b[0]);
+}
+
+function calibrationReport(rows) {
+  const windows = rows.filter(w => w.src === "kalshi" && ["yes", "no"].includes(w.result) && Object.values(w.checks || {}).some(k => k.model === MODEL_VERSION && Number.isFinite(k.p))).sort((a, b) => a.close - b.close);
+  const holdout = windows.slice(Math.floor(windows.length * 2 / 3));
+  const scores = {};
+  for (const c of CHECKS) {
+    let n = 0, wider = 0, matched = 0, market = 0;
+    for (const w of holdout) {
+      const k = w.checks[c];
+      if (!k || k.model !== MODEL_VERSION || ![k.p, k.p2, k.bid, k.ask].every(Number.isFinite) || k.at >= w.close * 1000) continue;
+      const y = w.result === "yes" ? 1 : 0; n++;
+      wider += (k.p - y) ** 2; matched += (k.p2 - y) ** 2; market += ((k.bid + k.ask) / 2 - y) ** 2;
+    }
+    scores[c] = n ? {n, wider: wider / n, matched: matched / n, market: market / n} : null;
+  }
+  return {model: MODEL_VERSION, settledWindows: windows.length, holdoutWindows: holdout.length, split: "newest third by window; descriptive only", scores, autoPromotion: false};
 }
 
 // ---------------------------------------------------------------- the Durable Object
@@ -213,6 +244,8 @@ export class KalshiFeed {
     this.settleAvg = null;                        // Kalshi's accumulating final-minute average, when streamed
     this.lastTicker = {};                         // ticker -> {bid, ask, at}
     this.agentBusy = false;
+    this.indexSeconds = new Map(); // Only the 1 Hz BRTI channel can supply settlement readings.
+    this.alarmBusy = false;
   }
   status() {
     return {type: "relay", msg: {state: this.upState, since: this.upSince, lastMessage: this.upMsgAt, error: this.lastErr,
@@ -223,6 +256,7 @@ export class KalshiFeed {
   }
   async fetch(request) {
     const url = new URL(request.url);
+    if (url.pathname === "/watchdog") { await this.ensureAlarm(); return new Response("ok"); }
     if (url.pathname === "/feed/status") { await this.ensureAlarm(); return new Response(JSON.stringify(this.status().msg), {headers: {...CORS, "Content-Type": "application/json"}}); }
     if (url.pathname === "/trade/status") {
       const cfg = await this.tradeConfig(), log = await this.tradeLog(), day = (await this.state.storage.get("trade.day")) || null;
@@ -242,13 +276,22 @@ export class KalshiFeed {
         cfg.mode = body.mode;
       }
       for (const k of ["perWindowCents", "dailyLossStopCents", "maxTradesPerDay", "minEdge", "bankrollCents", "firstSeconds", "lastSeconds"]) if (body[k] != null && Number.isFinite(+body[k])) cfg[k] = +body[k];
+      const ranges = {perWindowCents: [100, 5000], dailyLossStopCents: [100, 100000], maxTradesPerDay: [1, 96], minEdge: [3, 99], bankrollCents: [1000, 100000000], firstSeconds: [60, 840], lastSeconds: [15, 60]};
+      for (const [k, [lo, hi]] of Object.entries(ranges)) if (!Number.isFinite(cfg[k]) || cfg[k] < lo || cfg[k] > hi || (k !== "minEdge" && !Number.isInteger(cfg[k]))) return new Response("invalid " + k, {status: 400, headers: CORS});
       cfg.perWindowCents = Math.min(cfg.perWindowCents, 5000);                 // a hard ceiling of $50 a window, whatever is asked
       await this.state.storage.put("trade.cfg", cfg);
       await this.state.storage.setAlarm(this.nextEvent(Date.now(), cfg.mode !== "off", cfg));
       if (cfg.mode !== "off") this.ensureUpstream();
       return new Response(JSON.stringify(cfg), {headers: {...CORS, "Content-Type": "application/json"}});
     }
-    if (url.pathname === "/collector/status") { await this.ensureAlarm(); const c = (await this.state.storage.get("collector")) || {}; c.nextAlarm = await this.state.storage.getAlarm(); return new Response(JSON.stringify(c), {headers: {...CORS, "Content-Type": "application/json"}}); }
+    if (url.pathname === "/collector/status") { await this.ensureAlarm(); const c = (await this.state.storage.get("collector")) || {}; c.nextAlarm = await this.state.storage.getAlarm(); c.now = Date.now(); c.model = MODEL_VERSION;
+      c.healthy = !!c.lastOk && c.now - c.lastOk < 120000; c.stream = this.upState;
+      c.indexAgeMs = this.ticks.length ? c.now - this.ticks[this.ticks.length - 1][0] : null;
+      const rows = [...(await this.state.storage.list({prefix: "w:"})).values()];
+      c.forecasts = rows.reduce((n, w) => n + Object.values(w.checks || {}).filter(k => k.model === MODEL_VERSION && Number.isFinite(k.p)).length, 0);
+      c.settledWindows = rows.filter(w => w.src === "kalshi").length;
+      c.calibration = calibrationReport(rows);
+      return new Response(JSON.stringify(c), {headers: {...CORS, "Content-Type": "application/json"}}); }
     if (url.pathname === "/record" || url.pathname === "/record.csv") {
       await this.ensureAlarm();
       const all = await this.state.storage.list({prefix: "w:"});
@@ -270,8 +313,9 @@ export class KalshiFeed {
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
     try {
       server.send(JSON.stringify(this.status()));
-      for (const f of Object.values(this.last)) server.send(f);
-      for (const [tk, b] of Object.entries(this.books)) server.send(JSON.stringify(this.snapshotOf(tk, b)));   // the books as they stand now
+      if (this.upState === "open" && Date.now() - this.upMsgAt < 3000)
+        for (const [type, f] of Object.entries(this.last)) if (type !== "ticker") server.send(f);
+      for (const [tk, b] of Object.entries(this.books)) if (Date.now() - b.at < 15000) server.send(JSON.stringify(this.snapshotOf(tk, b)));   // the books as they stand now
     } catch (e) {}
     this.ensureUpstream();
     return new Response(null, {status: 101, webSocket: client});
@@ -281,29 +325,35 @@ export class KalshiFeed {
   }
   maybeIdle() {
     if (this.clients.size || this.idleTimer) return;
-    this.idleTimer = setTimeout(async () => { this.idleTimer = null; const cfg = await this.tradeConfig(); if (!this.clients.size && cfg.mode === "off") this.closeUpstream("idle"); }, 60000);
+    this.idleTimer = setTimeout(async () => { this.idleTimer = null; const cfg = await this.tradeConfig(); if (!this.env.KALSHI_KEY_ID && !this.clients.size && cfg.mode === "off") this.closeUpstream("idle"); }, 60000);
   }
   closeUpstream(why) {
     if (this.windowTimer) { clearTimeout(this.windowTimer); this.windowTimer = null; }
-    const ws = this.up; this.up = null; this.upState = "off"; this.tickerSid = null; this.bookSid = null; this.tickerSet = ""; this.books = {};
+    const ws = this.up; this.up = null; this.upState = "off"; this.tickerSid = null; this.bookSid = null; this.tickerSet = ""; this.books = {}; this.lastTicker = {}; this.last = {}; this.settleAvg = null;
     if (ws) { try { ws.close(1000, why); } catch (e) {} }
   }
   async ensureUpstream() {
     if (this.up || this.upState === "connecting") return;
     if (!this.env.KALSHI_KEY_ID || !this.env.KALSHI_PRIVATE_KEY) { this.upState = "no key"; this.broadcast(JSON.stringify(this.status())); return; }
+    if (!this.indexSeconds.size) {
+      const saved = (await this.state.storage.get("index.seconds")) || [];
+      for (const [ms, v] of saved) if (Date.now() - ms < 1200000) this.indexSeconds.set(ms, v);
+      if (!this.ticks.length) this.ticks = [...this.indexSeconds];
+    }
     this.upState = "connecting"; this.broadcast(JSON.stringify(this.status()));
     try {
       const ts = String(Date.now());
       const sig = await signHandshake(this.env.KALSHI_PRIVATE_KEY, ts + "GET" + "/trade-api/ws/v2");
-      const resp = await fetch(WS_UPSTREAM, {headers: {"Upgrade": "websocket", "KALSHI-ACCESS-KEY": this.env.KALSHI_KEY_ID.trim(),
+      const resp = await timedFetch(WS_UPSTREAM, {headers: {"Upgrade": "websocket", "KALSHI-ACCESS-KEY": this.env.KALSHI_KEY_ID.trim(),
                                                        "KALSHI-ACCESS-SIGNATURE": sig, "KALSHI-ACCESS-TIMESTAMP": ts}});
       const ws = resp.webSocket;
       if (!ws) throw new Error("Kalshi refused the handshake: " + resp.status + " " + (await resp.text().catch(() => "")).slice(0, 120));
       ws.accept();
+      this.tickerSet = ""; this.tickerSid = null; this.bookSid = null; this.books = {}; this.lastTicker = {}; this.last = {}; this.bookSequence = null;
       this.up = ws; this.upState = "open"; this.upSince = Date.now(); this.lastErr = null; this.backoff = 2000; this.counts = {};
       ws.addEventListener("message", ev => this.onUpstream(ev.data));
-      ws.addEventListener("close", ev => { if (this.up === ws) { this.up = null; this.upState = "off"; this.lastErr = "closed " + ev.code + " " + (ev.reason || ""); this.retry(); } });
-      ws.addEventListener("error", () => { if (this.up === ws) { this.up = null; this.upState = "off"; this.lastErr = "socket error"; this.retry(); } });
+      ws.addEventListener("close", ev => { if (this.up === ws) { this.closeUpstream("disconnected"); this.lastErr = "closed " + ev.code + " " + (ev.reason || ""); this.retry(); } });
+      ws.addEventListener("error", () => { if (this.up === ws) { this.closeUpstream("socket error"); this.lastErr = "socket error"; this.retry(); } });
       this.send({cmd: "subscribe", params: {channels: ["cfbenchmarks_value"], index_ids: ["BRTI"]}});
       this.send({cmd: "subscribe", params: {channels: ["cfbenchmarks_value_5hz"], index_ids: ["BRTI"]}});
       this.subscribeTickers();
@@ -315,8 +365,8 @@ export class KalshiFeed {
     }
   }
   retry() {
-    if (!this.clients.size || this.retryTimer) return;
-    this.retryTimer = setTimeout(() => { this.retryTimer = null; if (this.clients.size) this.ensureUpstream(); }, this.backoff);
+    if ((!this.clients.size && !this.env.KALSHI_KEY_ID) || this.retryTimer) return;
+    this.retryTimer = setTimeout(() => { this.retryTimer = null; if (this.clients.size || this.env.KALSHI_KEY_ID) this.ensureUpstream(); }, this.backoff);
     this.backoff = Math.min(60000, this.backoff * 2);
   }
   send(obj) { if (this.up) { obj.id = this.subId++; try { this.up.send(JSON.stringify(obj)); } catch (e) {} } }
@@ -337,7 +387,11 @@ export class KalshiFeed {
   // ---- the collector: scores every window whether or not a page is open
   async ensureAlarm() {
     if (!(this.env.KALSHI_KEY_ID && this.env.KALSHI_PRIVATE_KEY)) return;
-    if ((await this.state.storage.getAlarm()) == null) { const cfg = await this.tradeConfig(); await this.state.storage.setAlarm(this.nextEvent(Date.now(), cfg.mode !== "off", cfg)); }
+    const alarm = await this.state.storage.getAlarm(), now = Date.now();
+    if (!this.alarmBusy && (alarm == null || alarm < now - 60000 || alarm > now + 60000))
+      await this.state.storage.setAlarm(now + 1000);
+    if (this.up && now - Math.max(this.upMsgAt, this.upSince) > 20000) this.closeUpstream("stale stream");
+    await this.ensureUpstream();
   }
   nextEvent(nowMs, agentOn, cfg) {             // the next checkpoint, settlement or agent moment after now, in ms
     const now = nowMs / 1000, close = (Math.floor(now / WINDOW) + 1) * WINDOW, times = [];
@@ -347,45 +401,78 @@ export class KalshiFeed {
       const zoneStart = close - WINDOW + first, zoneEnd = close - lastS;
       if (now < zoneStart - 1) times.push(zoneStart); else if (now < zoneEnd - 1) times.push(now + 5); else times.push(close + first);
     }
-    return Math.min(...times.filter(t => t > now + 0.5)) * 1000;
+    return Math.min(now + 30, ...times.filter(t => t > now + 0.5)) * 1000;
   }
   async alarm() {
-    const nowMs = Date.now(), now = nowMs / 1000, log = (await this.state.storage.get("collector")) || {runs: 0, errors: []};
+    if (this.alarmBusy) return;
+    this.alarmBusy = true;
+    const nowMs = Date.now(), now = nowMs / 1000;
+    const log = (await this.state.storage.get("collector")) || {runs: 0, errors: []};
     log.runs++; log.lastRun = nowMs;
+    // Schedule before network work and again in finally: errors must not stop collection.
+    await this.state.storage.setAlarm(nowMs + 30000);
     try {
+      await this.state.storage.put("index.seconds", [...this.indexSeconds].slice(-1200));
+      await this.ensureAlarm();
       const close = (Math.floor(now / WINDOW) + 1) * WINDOW, left = close - now;
-      const check = CHECKS.find(k => Math.abs(left - k) < 20);
+      const check = CHECKS.find(k => left <= k && k - left < 20);
       if (check) await this.checkpoint(marketTicker(close), close, check, nowMs);
-      const prevClose = close - WINDOW, since = now - prevClose;
-      if (since > 60 && since < 450) { await this.settle(marketTicker(prevClose), prevClose); await this.settleTrades(marketTicker(prevClose), prevClose); }
+      // Retry old unresolved windows as well as the most recent close.
+      const rows = await this.state.storage.list({prefix: "w:"});
+      const pending = [...rows.values()].filter(w => w.close < now - 60 && w.src !== "kalshi").slice(-4);
+      for (const w of pending) await this.settle(w.mk, w.close);
+      const prevClose = close - WINDOW;
+      if (now - prevClose > 60) await this.settleTrades(marketTicker(prevClose), prevClose);
       log.lastOk = nowMs;
-    } catch (e) { log.errors = (log.errors || []).concat([{at: nowMs, error: String(e.message || e).slice(0, 200)}]).slice(-10); }
-    await this.state.storage.put("collector", log);
-    const cfg = await this.tradeConfig(), on = cfg.mode !== "off";
-    if (on) await this.agentTick(nowMs);
-    else if (!this.clients.size && this.up) this.closeUpstream("agent off");
-    await this.state.storage.setAlarm(this.nextEvent(Date.now(), on, cfg));
+      log.indexAgeMs = this.ticks.length ? nowMs - this.ticks[this.ticks.length - 1][0] : null;
+      const cfg = await this.tradeConfig();
+      if (cfg.mode !== "off") await this.agentTick(Date.now());
+      // Persist bounded read-only history so a cold object can warm up without a phone.
+
+      if (rows.size > 500) for (const [key] of [...rows].slice(0, rows.size - 500)) await this.state.storage.delete(key);
+    } catch (e) {
+      log.errors = (log.errors || []).concat([{at: Date.now(), error: String(e.message || e).slice(0, 200)}]).slice(-10);
+    } finally {
+      try {
+        await this.state.storage.put("collector", log);
+      } finally {
+        const cfg = await this.tradeConfig().catch(() => ({mode: "off"}));
+        await this.state.storage.setAlarm(this.nextEvent(Date.now(), cfg.mode !== "off", cfg));
+        this.alarmBusy = false;
+      }
+    }
   }
   async checkpoint(mk, close, check, nowMs) {
     const key = "w:" + mk, w = (await this.state.storage.get(key)) || {mk, close, tgt: null, checks: {}, result: null, src: null, relay: true};
     if (w.checks[check]) return;
-    const hour = Math.floor(nowMs / 3600000) * 3600000;
-    const [hist, prev, mkt] = await Promise.all([
-      signedGet(this.env, "/trade-api/v2/cfbenchmarks/history/values", "?id=BRTI&timespan=HOUR&timestamp=" + new Date(hour).toISOString()),
-      nowMs - hour < 1000 * 1000 ? signedGet(this.env, "/trade-api/v2/cfbenchmarks/history/values", "?id=BRTI&timespan=HOUR&timestamp=" + new Date(hour - 3600000).toISOString()) : null,
-      signedGet(this.env, "/trade-api/v2/markets/" + mk)]);
-    const ticks = parseTicks(prev).concat(parseTicks(hist)).filter(t => t[0] <= nowMs);
+    // Snapshot the live stream at the checkpoint before awaiting REST. Later ticks must
+    // not leak into a forecast recorded for an earlier time.
+    const liveTicks = this.ticks.filter(t => t[0] <= nowMs), seconds = [...this.indexSeconds].filter(t => t[0] <= nowMs);
+    const aggregate = this.settleAvg && {...this.settleAvg};
+    let ticks = liveTicks;
+    if (!volsFrom(ticks, nowMs)) {
+      const hour = Math.floor(nowMs / 3600000) * 3600000;
+      try {
+        const hist = await signedGet(this.env, "/trade-api/v2/cfbenchmarks/history/values", "?id=BRTI&timespan=HOUR&timestamp=" + new Date(hour).toISOString());
+        const merged = new Map(parseTicks(hist));
+        for (const [ms, v] of liveTicks) merged.set(ms, v);
+        ticks = [...merged].filter(t => t[0] <= nowMs).sort((a, b) => a[0] - b[0]);
+      } catch (e) { /* Record a missing forecast below instead of losing the checkpoint. */ }
+    }
+    const mkt = await signedGet(this.env, "/trade-api/v2/markets/" + mk);
     const m = mkt && mkt.market;
     if (m && +m.floor_strike > 0) w.tgt = +m.floor_strike;
     const ask = m && +m.yes_ask_dollars > 0 ? +m.yes_ask_dollars : null, bid = m && +m.yes_bid_dollars > 0 ? +m.yes_bid_dollars : null;
     const vols = volsFrom(ticks, nowMs), x = ticks.length ? ticks[ticks.length - 1][1] : null;
-    const entry = {ask, bid, x, at: nowMs, ticks: ticks.length};
-    if (vols && x != null && w.tgt != null) {
-      const pr = projectFrom(ticks, nowMs, close, x, vols);
+    const ageMs = ticks.length ? nowMs - ticks[ticks.length - 1][0] : null;
+    const entry = {ask, bid, x, at: nowMs, ticks: ticks.length, ageMs, model: MODEL_VERSION};
+    const pr = vols && x != null ? projectFrom(seconds, nowMs, close, x, vols, aggregate) : null;
+    if (vols && x != null && w.tgt != null && ageMs >= 0 && ageMs < 3000 && pr.mean != null) {
       entry.p = +tailCdf((pr.mean - (w.tgt - 0.005)) / pr.sd).toFixed(3);
       entry.p2 = +tailCdf((pr.mean - (w.tgt - 0.005)) / (pr.sd / Math.SQRT2)).toFixed(3);
       entry.sd = +pr.sd.toFixed(2); entry.mean = +pr.mean.toFixed(2);
     }
+    entry.status = entry.p != null ? "forecast" : ageMs == null || ageMs >= 3000 ? "stale index" : !vols ? "warming up volatility" : !w.tgt ? "missing target" : "missing settlement readings";
     w.checks[check] = entry;
     await this.state.storage.put(key, w);
   }
@@ -401,7 +488,9 @@ export class KalshiFeed {
     }
   }
   pushTick(ms, v) {
+    if (!Number.isFinite(v) || !(v > 0) || !Number.isFinite(ms) || Date.now() - ms > 5000 || ms > Date.now() + 1000) return;
     const last = this.ticks[this.ticks.length - 1];
+    if (last && ms <= last[0]) return;
     if (last && Math.abs(v - last[1]) > 0.005 * last[1] && ms - last[0] < 10000) { this.oddTick = (this.oddTick || 0) + 1; if (this.oddTick < 2) return; }
     this.oddTick = 0;
     if (!last || ms >= last[0]) this.ticks.push([ms, v]);
@@ -427,7 +516,9 @@ export class KalshiFeed {
       if (left > WINDOW - cfg.firstSeconds || left < cfg.lastSeconds) return;
       if (!this.up) { await this.ensureUpstream(); return; }                    // the stream feeds the model; try again next tick
       const key = "t:" + mk, w = (await this.state.storage.get(key)) || {mk, close, trades: [], decided: 0};
-      if (w.trades.length) return;                                              // one trade per window
+      if (w.trades.length || w.pendingOrder) return;                                              // one trade per window
+      const attempts = await this.state.storage.list({prefix: "t:"});
+      if ([...attempts.values()].some(v => v.pendingOrder)) return; // unresolved execution pauses all further orders
       const day = etDay(nowMs), today = (await this.state.storage.get("trade.day")) || {day, trades: 0, pnlCents: 0};
       if (today.day !== day) { today.day = day; today.trades = 0; today.pnlCents = 0; }
       if (today.trades >= cfg.maxTradesPerDay || today.pnlCents <= -cfg.dailyLossStopCents) return;
@@ -437,20 +528,15 @@ export class KalshiFeed {
       if (!tgt) { const d = await signedGet(this.env, "/trade-api/v2/markets/" + mk); tgt = d && d.market && +d.market.floor_strike > 0 ? +d.market.floor_strike : null; if (!tgt) return; w.tgt = tgt; }
       const vols = volsFrom(this.ticks, nowMs); if (!vols) return;
       const x = last[1];
-      const projectWith = (xx, vv) => {
-        const pr = projectFrom(this.ticks, nowMs, close, xx, vv);
-        const sa = this.settleAvg;
-        if (sa && nowMs - sa.at < 3000 && Math.abs(sa.end - close * 1000) < 90000 && sa.n >= 1) {    // Kalshi's own count of the settlement minute
-          const m = Math.min(pr.m, SETTLE - sa.n); pr.mean = (sa.v * sa.n + m * xx) / (sa.n + m); pr.official = true;
-        }
-        return pr;
-      };
-      const base = projectWith(x, vols), p = tailFromBand(base.mean, base.sd, tgt);
+      const projectWith = (xx, vv) => projectFrom([...this.indexSeconds], nowMs, close, xx, vv, this.settleAvg);
+      const base = projectWith(x, vols);
+      if (base.mean == null) return;
+      const p = tailFromBand(base.mean, base.sd, tgt);
       let lo = 1, hi = 0; const adverse = vols.s * Math.sqrt(10);
       for (const k of [0.7, 1, 1.5]) for (const shift of [-adverse, 0, adverse]) { const pr = projectWith(x + shift, {s: vols.s * k, l: vols.l * k}); const q = tailFromBand(pr.mean, pr.sd, tgt); if (q < lo) lo = q; if (q > hi) hi = q; }
-      const b = this.books[mk], best = m => { let pp = null, q = 0; for (const [px, qty] of m) if (pp == null || px > pp) { pp = px; q = qty; } return pp == null ? null : {price: Math.round((1 - pp) * 100), size: Math.floor(q)}; };
+      const b0 = this.books[mk], b = b0 && nowMs - b0.at < 15000 ? b0 : null, best = m => { let pp = null, q = 0; for (const [px, qty] of m) if (pp == null || px > pp) { pp = px; q = qty; } return pp == null ? null : {price: Math.round((1 - pp) * 100), size: Math.floor(q)}; };
       const offer = {Up: b ? best(b.no) : null, Down: b ? best(b.yes) : null};
-      const tk = this.lastTicker[mk];
+      const tk0 = this.lastTicker[mk], tk = tk0 && nowMs - tk0.at < 5000 ? tk0 : null;
       if (!offer.Up && tk && tk.ask) offer.Up = {price: Math.round(tk.ask * 100), size: 1};
       if (!offer.Down && tk && tk.bid) offer.Down = {price: Math.round((1 - tk.bid) * 100), size: 1};
       const decide = (side, worst, off) => {
@@ -472,18 +558,25 @@ export class KalshiFeed {
       // a call must hold across two ticks (about 5 s) before anything is sent: a blip must not trade
       if (!w.holding || w.holding.side !== pick.side) { w.holding = {side: pick.side, since: nowMs}; await this.state.storage.put(key, w); return; }
       if (nowMs - w.holding.since < 4000) { await this.state.storage.put(key, w); return; }
+      const exchange = await signedGet(this.env, "/trade-api/v2/exchange/status");
+      const market = await signedGet(this.env, "/trade-api/v2/markets/" + mk);
+      if (exchange.trading_active !== true || exchange.exchange_active !== true || market.market?.status !== "active" || Date.now() - nowMs > 3000) return;
       const trade = {at: nowMs, mk, left: Math.round(left), side: pick.side, price: pick.price, n: pick.n, offered: pick.offered, edge: pick.edge, p: +p.toFixed(3), lo: +lo.toFixed(3), hi: +hi.toFixed(3), x: +x.toFixed(2), sd: +base.sd.toFixed(2), official: !!base.official, mode: cfg.mode, filled: 0, cost: 0};
       if (cfg.mode === "paper") { trade.filled = pick.n; trade.cost = pick.n * pick.price; trade.status = "paper"; }
       else {
         const body = {ticker: mk, action: "buy", side: pick.side === "Up" ? "yes" : "no", count: pick.n, type: "limit", time_in_force: "immediate_or_cancel",
                       client_order_id: crypto.randomUUID(), cancel_order_on_pause: true};
         if (pick.side === "Up") body.yes_price = pick.price; else body.no_price = pick.price;
+        // A network timeout can hide an accepted order. Persist intent before sending;
+        // never retry this window automatically until the order is reconciled.
+        w.pendingOrder = {clientOrderId: body.client_order_id, at: Date.now(), mode: cfg.mode};
+        await this.state.storage.put(key, w);
         const r = await signedCall(this.env, cfg.mode, "POST", "/trade-api/v2/portfolio/orders", body);
         const o = (r && r.order) || {};
         trade.orderId = o.order_id || null; trade.status = o.status || "sent"; trade.filled = +o.fill_count || 0; trade.cost = +o.taker_fill_cost || 0;
         trade.feesCents = Math.round((+o.taker_fees || 0) + (+o.maker_fees || 0));
       }
-      w.trades.push(trade); today.trades++;
+      w.pendingOrder = null; w.trades.push(trade); today.trades++;
       await this.state.storage.put(key, w); await this.state.storage.put("trade.day", today);
       await notify(this.env, `BTC 15 ${cfg.mode}: ${trade.side} ${trade.filled}/${trade.n} at ${trade.price}¢`,
         `${mk} with ${Math.floor(trade.left / 60)}:${String(trade.left % 60).padStart(2, "0")} left · edge ${trade.edge}¢ · chance ${Math.round(trade.p * 100)}% (${Math.round(trade.lo * 100)}–${Math.round(trade.hi * 100)}) · cost $${(trade.cost / 100).toFixed(2)}${trade.status ? " · " + trade.status : ""}`);
@@ -504,7 +597,7 @@ export class KalshiFeed {
     for (const t of w.trades) {
       if (!t.filled) { t.pnlCents = 0; continue; }
       const won = t.side === "Up" ? yes : !yes, fee = t.feesCents != null ? t.feesCents : Math.round(t.filled * feeCents(t.price / 100));
-      t.pnlCents = Math.round(t.filled * (won ? 100 - t.price : -t.price)) - fee; pnl += t.pnlCents;
+      t.pnlCents = Math.round(t.filled * (won ? 100 : 0) - (Number.isFinite(t.cost) ? t.cost : t.filled * t.price)) - fee; pnl += t.pnlCents;
     }
     w.result = m.result; w.settled = true;
     const today = (await this.state.storage.get("trade.day")) || {day: etDay(Date.now()), trades: 0, pnlCents: 0};
@@ -522,8 +615,14 @@ export class KalshiFeed {
     if (!d || !d.type) return;
     this.counts[d.type] = (this.counts[d.type] || 0) + 1;
     if (d.type === "subscribed" && d.msg) { if (d.msg.channel === "ticker") this.tickerSid = d.msg.sid; if (d.msg.channel === "orderbook_delta") this.bookSid = d.msg.sid; }
+    if (d.type === "orderbook_snapshot" || d.type === "orderbook_delta") {
+      if (d.type === "orderbook_delta" && Number.isFinite(d.seq) && this.bookSequence != null && d.seq !== this.bookSequence + 1) {
+        this.closeUpstream("order book sequence gap"); this.retry(); return;
+      }
+      if (Number.isFinite(d.seq)) this.bookSequence = d.seq;
+    }
     if (d.type === "orderbook_snapshot" && d.msg && d.msg.market_ticker) {
-      const b = {yes: new Map(), no: new Map()};
+      const b = {yes: new Map(), no: new Map(), at: Date.now()};
       for (const [px, q] of d.msg.yes_dollars_fp || []) if (+q > 0) b.yes.set(+px, +q);
       for (const [px, q] of d.msg.no_dollars_fp || []) if (+q > 0) b.no.set(+px, +q);
       this.books[d.msg.market_ticker] = b;
@@ -531,10 +630,17 @@ export class KalshiFeed {
     if (d.type === "orderbook_delta" && d.msg && d.msg.market_ticker && this.books[d.msg.market_ticker]) {
       const m = this.books[d.msg.market_ticker][d.msg.side === "no" ? "no" : "yes"], px = +d.msg.price_dollars, q = (m.get(px) || 0) + +d.msg.delta_fp;
       if (q > 0) m.set(px, q); else m.delete(px);
+      this.books[d.msg.market_ticker].at = Date.now();
     }
-    if (d.type === "cfbenchmarks_value_5hz" && d.msg && +d.msg.value_usd > 0) this.pushTick(+d.msg.source_ts_ms || Date.now(), +d.msg.value_usd);
+    if (d.type === "cfbenchmarks_value_5hz" && d.msg && d.msg.index_id === "BRTI" && +d.msg.value_usd > 0) this.pushTick(+d.msg.source_ts_ms, +d.msg.value_usd);
     if (d.type === "cfbenchmarks_value" && d.msg) {
-      try { const v = +JSON.parse(d.msg.data).value; if (v > 0) this.pushTick(Date.now(), v); } catch (e) {}
+      try {
+        const raw = JSON.parse(d.msg.data), v = +raw.value, ms = typeof raw.time === "number" ? raw.time : Date.parse(raw.time);
+        if (d.msg.index_id === "BRTI" && v > 0 && Number.isFinite(v) && ms > 0 && Date.now() - ms < 5000 && ms <= Date.now() + 1000) {
+          this.pushTick(ms, v); this.indexSeconds.set(ms, v);
+          for (const t of this.indexSeconds.keys()) if (t < ms - 1200000) this.indexSeconds.delete(t);
+        }
+      } catch (e) {}
       const f = d.msg.last_60s_windowed_average_15min;
       this.settleAvg = f && +f.value > 0 ? {v: +f.value, n: +f.window_size, end: +f.window_end_ts_exclusive, at: Date.now()} : null;
     }

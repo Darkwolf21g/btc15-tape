@@ -49,6 +49,8 @@ header { display: flex; align-items: flex-end; justify-content: space-between; g
 .p.up { color: var(--up); } .p.down { color: var(--down); } .p.none { color: var(--dim); }
 .split { display: grid; gap: 6px; min-width: 0; }
 .bar { height: 10px; border-radius: 5px; background: var(--down); overflow: hidden; }
+.bar.waiting { background: var(--line); }
+.bar.waiting i { visibility: hidden; }
 .bar i { display: block; height: 100%; background: var(--up); width: 50%; transition: width .25s; }
 .fair { display: flex; justify-content: space-between; font-size: 13px; }
 .fair .u { color: var(--up); } .fair .d { color: var(--down); }
@@ -72,7 +74,7 @@ header { display: flex; align-items: flex-end; justify-content: space-between; g
 .edge { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
 .edge label { display: grid; gap: 5px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
 .edge input { width: 100%; background: transparent; border: 0; color: var(--ink); font: 600 22px var(--mono); outline: none; }
-.edge input::placeholder { color: #44506c; }
+.edge input::placeholder { color: var(--ink); opacity: 1; }
 .edge .verdict { font-size: 12px; min-height: 1.4em; }
 .edge .recline { grid-column: 1 / -1; max-width: none; }
 .edge .label.head { text-transform: none; letter-spacing: 0; font: 12px/1.4 var(--mono); }
@@ -121,6 +123,12 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
 .notes { color: var(--dim); font-size: 12px; display: grid; gap: 6px; max-width: 65ch; }
 .notes p { margin: 0; }
 @media (prefers-reduced-motion: reduce) { .bar i { transition: none; } }
+.health { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 10px 12px; margin: 12px 0; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-size: 12px; }
+.health span { overflow-wrap: anywhere; }
+.model-note { color: var(--dim); font-size: 11px; margin: 0 0 8px; }
+button, summary { min-height: 44px; }
+summary { display: list-item; padding-block: 10px; }
+@media (max-width: 420px) { .hero { gap: 8px; } .p { font-size: 68px; } .fair { font-size: 11px; flex-wrap: wrap; gap: 4px; } .settle { padding: 8px; gap: 6px; } .settle b { font-size: 14px; } #main { height: 250px; } }
 </style>
 </head>
 <body>
@@ -136,11 +144,13 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
   <div class="clock" id="clock" aria-live="off">–:––</div>
 </header>
 
+<div class="health" aria-label="Data health"><span id="healthFeed">Index: connecting</span><span id="healthCollector">Collector: checking</span><span id="healthMode">Model: warming up</span></div>
+<p class="model-note">Up / YES: final-minute BRTI average ≥ target. Down / NO: below target. Probabilities are model estimates, not validated win rates.</p>
 <section class="hero" aria-label="Chance of Up">
   <div class="p none" id="pBig">–</div>
   <div class="split">
-    <span class="label">Chance of Up · fair price</span>
-    <div class="bar"><i id="pBar"></i></div>
+    <span class="label">Estimated YES / Up chance</span>
+    <div class="bar waiting" id="probBar"><i id="pBar"></i></div>
     <div class="fair"><span class="u" id="fairUp">Up –</span><span class="d" id="fairDown">Down –</span></div>
   </div>
   <div class="why" id="why">Connecting to exchanges…</div>
@@ -723,10 +733,9 @@ async function fetchOfficialHistory(backTo, sec) {
   }
   const secs = [...bySec.keys()].sort((a, b) => a - b);
   if (!secs.length) { officialNote = "official history: no ticks"; return false; }
-  let last = null, n = 0;
-  for (let s = secs[0]; s <= sec; s++) {
-    if (bySec.has(s)) last = bySec.get(s)[1];
-    if (last != null && !samples.has(s)) { backfill.set(s, last - basis); n++; }
+  let n = 0;
+  for (const s of secs) {
+    if (s <= sec && !samples.has(s)) { backfill.set(s, bySec.get(s)[1] - basis); n++; }
   }
   officialNote = `official BRTI history: ${secs.length} seconds, ${n} filled`;
   backfillNote = officialNote;
@@ -903,7 +912,7 @@ function feedUrl() {
   const base = kalshi.relay || SAME_SITE;
   return base ? base.replace(/^http/, "ws") + "/feed" + (feed.token ? "?token=" + encodeURIComponent(feed.token) : "") : null;
 }
-const feedLive = () => feed.brti != null && Date.now() - feed.brti.at < FEED_FRESH_MS;
+const feedLive = () => feed.brti != null && Date.now() - feed.brti.t >= -1000 && Date.now() - feed.brti.t < FEED_FRESH_MS;
 // A reading more than 0.5% from the last accepted one within a few seconds is a glitch, not a move;
 // two such readings in a row are a move. Counted in the diagnostics.
 function saneTick(v) {
@@ -913,13 +922,30 @@ function saneTick(v) {
   feed.odd = (feed.odd || 0) + 1; feed.oddTotal = (feed.oddTotal || 0) + 1;
   return feed.odd >= 2;
 }
+const officialSeconds = new Map();
+function acceptIndex(v, ms) {
+  if (!Number.isFinite(ms) || Date.now() - ms > FEED_FRESH_MS || ms > Date.now() + 1000 || !saneTick(v)) return false;
+  if (!feed.brti || ms > feed.brti.t) feed.brti = {v, t: ms, at: Date.now()};
+  return true;
+}
+function indexVols() {
+  const n = Math.floor(Date.now() / 1000);
+  const est = span => { let sum = 0, count = 0;
+    for (let t = n - span; t <= n; t++) {
+      const a = officialSeconds.get(t), b = officialSeconds.get(t - VOL_STEP);
+      if (a != null && b != null) { sum += (a - b) ** 2 / VOL_STEP; count++; }
+    }
+    return count >= 12 ? Math.max(0.5, Math.sqrt(sum / count)) : null;
+  };
+  const s = est(120), l = est(900); return s != null && l != null ? {s, l} : null;
+}
 const books = {};                                   // market ticker -> {yes, no: Map(price -> contracts), at}
 // What the book offers: Up is bought from resting No bids (Up price = 1 - best No bid), Down from
 // resting Yes bids. Returns {up: {price, size}, down: {price, size}} or null without a fresh book.
 function depth(mk) {
   const b = books[mk];
   if (!b || Date.now() - b.at > 30000) return null;
-  const best = m => { let p = null, q = 0; for (const [px, qty] of m) if (p == null || px > p) { p = px; q = qty; } return p == null ? null : {price: Math.round((1 - p) * 100), size: Math.floor(q)}; };
+  const best = m => { let p = null, q = 0; for (const [px, qty] of m) if (p == null || px > p) { p = px; q = qty; } return p == null ? null : {price: Math.round((1 - p) * 1000) / 10, size: Math.floor(q)}; };
   return {up: best(b.no), down: best(b.yes)};
 }
 function connectFeed() {
@@ -939,14 +965,17 @@ function connectFeed() {
     const m = d.msg || {};
     if (d.type === "relay") { feed.relay = m; return; }
     if (d.type === "cfbenchmarks_value_5hz") {
-      const v = +m.value_usd; if (saneTick(v)) feed.brti = {v, t: +m.source_ts_ms || 0, at: Date.now()};
+      const v = +m.value_usd; if (m.index_id === "BRTI") acceptIndex(v, +m.source_ts_ms);
     } else if (d.type === "cfbenchmarks_value") {
-      let v = null; try { v = +JSON.parse(m.data).value; } catch (e) {}
-      if (saneTick(v) && (!feed.brti || Date.now() - feed.brti.at > 1200)) feed.brti = {v, t: 0, at: Date.now()};   // the 1/s tick, when the 5/s one is quiet
+      let raw; try { raw = JSON.parse(m.data); } catch (e) { return; }
+      const ms = typeof raw.time === "number" ? raw.time : Date.parse(raw.time), v = +raw.value;
+      if (m.index_id !== "BRTI" || !acceptIndex(v, ms)) return;
+      officialSeconds.set(Math.floor(ms / 1000), v);
+      for (const sec of officialSeconds.keys()) if (sec < Math.floor(ms / 1000) - 1200) officialSeconds.delete(sec);
       const a = m.avg_60s_data;
-      if (a && +a.value > 0) feed.avg60 = {v: +a.value, n: +a.window_size, end: +a.window_end_ts_exclusive, at: Date.now()};
+      if (a && +a.value > 0) feed.avg60 = {v: +a.value, n: +a.window_size, end: +a.window_end_ts_exclusive, at: ms};
       const f = m.last_60s_windowed_average_15min;
-      feed.settle = f && +f.value > 0 ? {v: +f.value, n: +f.window_size, end: +f.window_end_ts_exclusive, at: Date.now()} : null;
+      feed.settle = f && +f.value > 0 ? {v: +f.value, n: +f.window_size, end: +f.window_end_ts_exclusive, at: ms} : null;
     } else if (d.type === "orderbook_snapshot" && m.market_ticker) {
       const b = {yes: new Map(), no: new Map(), at: Date.now()};
       for (const [px, q] of m.yes_dollars_fp || []) if (+q > 0) b.yes.set(+px, +q);
@@ -986,14 +1015,15 @@ setInterval(() => {                                  // the relay answers "ping"
 // The settlement average Kalshi is accumulating for this window, if it is fresh: {sum, n}.
 function officialSettle(close) {
   const f = feed.settle;
-  if (!f || Date.now() - f.at > FEED_FRESH_MS || !(f.n >= 1)) return null;
-  if (Math.abs(f.end - close * 1000) > 90000 && f.end > 0) return null;    // a different quarter hour
+  const elapsed = Math.max(0, Math.min(60, Math.floor(Date.now() / 1000) - close + 60));
+  if (!f || Date.now() - f.at > FEED_FRESH_MS || !Number.isInteger(f.n) || f.n !== elapsed || f.n < 1 || f.n > 60) return null;
+  if (!(f.end > (close - 60) * 1000 && f.end <= close * 1000)) return null;
   return {sum: f.v * f.n, n: f.n};
 }
 function feedWords() {                               // one line on the stream, for the chips and the diagnostics
   const r = feed.relay, t = Date.now();
   if (!feedUrl()) return ["", "BRTI stream needs the relay"];
-  if (feedLive()) return ["ok", `BRTI official ${(Math.max(0, t - feed.brti.at) / 1000).toFixed(1)} s`];
+  if (feedLive()) return ["ok", `BRTI official ${(Math.max(0, t - feed.brti.t) / 1000).toFixed(1)} s`];
   if (feed.state !== "open") return ["off", "BRTI stream " + (feed.state === "connecting" ? "connecting" : feed.state === "no relay" ? "needs the relay" : "not reachable")];
   if (r && !r.hasKey) return ["off", "BRTI stream: no API key on the relay"];
   if (r && r.state !== "open") return ["off", "BRTI stream: relay " + r.state + (r.error ? " (" + String(r.error).slice(0, 60) + ")" : "")];
@@ -1049,7 +1079,14 @@ function project(now, close, x, vols, drifts) {
   const off = officialSettle(close), ahead = [];
   // Kalshi's own accumulating average, when streamed, is the known part exactly; otherwise the
   // page's proxy, and past gaps in it are unknown: spot forecasts only future observations.
-  const w = off ? {sum: off.sum, observed: off.n, missing: 0, reconstructed: 0, official: true} : windowSamples(close, now);
+  let w = off ? {sum: off.sum, observed: off.n, missing: 0, reconstructed: 0, official: true} : windowSamples(close, now);
+  if (!off && feed.brti) {
+    w = {sum: 0, observed: 0, missing: 0, reconstructed: 0, official: true};
+    for (let sec = close - SETTLE + 1; sec <= Math.min(Math.floor(now), close); sec++) {
+      const v = officialSeconds.get(sec);
+      if (Number.isFinite(v)) { w.sum += v; w.observed++; } else w.missing++;
+    }
+  }
   if (w.missing) return {...w, mean: null, sd: null};
   for (let s = close - SETTLE + 1; s <= close; s++) if (s > now) ahead.push(s - now);
   const m = off ? Math.min(ahead.length, SETTLE - off.n) : ahead.length;
@@ -1072,7 +1109,7 @@ function project(now, close, x, vols, drifts) {
   for (const [amount, horizon] of drifts || []) for (const d of ahead) mean += amount * Math.min(1, d / horizon);
   const total = w.observed + m;
   mean /= total;
-  const lv = levelSd();
+  const lv = w.official ? 0.3 : levelSd();
   return {...w, m, mean, sd: Math.sqrt(variance / (total * total) + lv * lv)};
 }
 
@@ -1367,8 +1404,8 @@ let bankroll = store.get("bankroll") || 500;
 // Returns {edge, worst, call, n}: the edge in cents at the model's chance and at the bad end of its
 // band, the call, and a quarter-Kelly size on the worst case, capped at 2% of the bankroll.
 function verdict(el, fair, worstFair, priceCents, waitReason = "WAIT: model unavailable", avail = null) {
-  if (!(priceCents > 0 && priceCents < 100)) { el.textContent = ""; el.className = "verdict"; return null; }
-  if (fair == null) { el.textContent = waitReason; el.className = "verdict meh"; return null; }
+  if (!(priceCents > 0 && priceCents < 100)) { el.textContent = "WAIT: no executable price"; el.className = "verdict"; return null; }
+  if (fair == null || worstFair == null || !Number.isFinite(fair) || !Number.isFinite(worstFair)) { el.textContent = waitReason; el.className = "verdict meh"; return null; }
   const fee = feeCents(priceCents / 100), edge = fair * 100 - priceCents - fee, worst = worstFair * 100 - priceCents - fee;
   const call = worst >= 3 ? "buy" : edge <= 0 ? "no" : "thin";
   let n = 0;
@@ -1457,11 +1494,22 @@ record.windows.filter(w => w.src !== "kalshi" && Date.now() / 1000 - w.close > 9
   .forEach((w, i) => setTimeout(() => settleOfficial(w), 8000 + i * 1500));
 // The relay scores every window on its own (it wakes at each checkpoint and after each close). Its
 // windows are merged in: checkpoints this page missed, results it has not fetched, windows it never saw.
-let relayRecordAt = 0;
+let relayRecordAt = 0, relayRecordBusy = false;
+async function refreshCollector() {
+  const base = kalshi.relay || SAME_SITE; if (!base) return;
+  try {
+    const r = await fetch(base + "/collector/status" + (feed.token ? "?token=" + encodeURIComponent(feed.token) : ""), {cache: "no-store", signal: AbortSignal.timeout(10000)});
+    if (!r.ok) throw Error(r.status === 403 ? "token required" : `HTTP ${r.status}`);
+    const c = await r.json(), age = c.lastOk ? Math.max(0, (Date.now() - c.lastOk) / 1000) : Infinity;
+    $("healthCollector").textContent = age < 120 ? `Collector active · ${Math.round(age)}s ago · ${c.forecasts || 0} forecasts` : `Collector stale · ${Number.isFinite(age) ? Math.round(age / 60) + "m ago" : "no successful run"}`;
+    $("healthCollector").className = age < 120 ? "good" : "bad";
+  } catch (e) { $("healthCollector").textContent = "Collector unavailable · " + e.message; $("healthCollector").className = "bad"; }
+}
+setInterval(refreshCollector, 30000); setTimeout(refreshCollector, 1500);
 async function mergeRelayRecord() {
   const base = kalshi.relay || SAME_SITE;
-  if (!base || Date.now() - relayRecordAt < 300000) return;
-  relayRecordAt = Date.now();
+  if (!base || relayRecordBusy || Date.now() - relayRecordAt < 55000) return;
+  relayRecordBusy = true;
   try {
     const r = await fetch(base + "/record" + (feed.token ? "?token=" + encodeURIComponent(feed.token) : ""), {cache: "no-store"});
     if (!r.ok) return;
@@ -1476,8 +1524,10 @@ async function mergeRelayRecord() {
       if (local.tgt == null && w.tgt != null) local.tgt = w.tgt;
     }
     if (changed) { record.windows.sort((a, b) => a.close - b.close); saveRecord(); }
-    relayRecordNote = `${rows.length} windows from the relay, ${changed} merged`;
-  } catch (e) { relayRecordNote = "relay record not reachable"; }
+    relayRecordAt = Date.now();
+    const forecasts = rows.reduce((n, w) => n + Object.values(w.checks || {}).filter(k => Number.isFinite(k.p)).length, 0);
+    relayRecordNote = `${rows.length} relay windows · ${forecasts} probability forecasts · ${changed} merged`;
+  } catch (e) { relayRecordNote = "relay record not reachable"; } finally { relayRecordBusy = false; }
 }
 let relayRecordNote = "";
 setInterval(mergeRelayRecord, 60000); setTimeout(mergeRelayRecord, 4000);
@@ -1487,7 +1537,7 @@ function scoreRecord() {
     let n = 0, sm = 0, sm2 = 0, n2 = 0, sk = 0;
     for (const w of settled) {
       const k = w.checks[c];
-      if (!k || k.ask == null || k.bid == null) continue;
+      if (!k || !Number.isFinite(k.p) || k.relay || k.ask == null || k.bid == null) continue;
       const y = w.result === "yes" ? 1 : 0, mid = (k.ask + k.bid) / 2;
       n++; sm += (k.p - y) ** 2; sk += (mid - y) ** 2;
       if (k.p2 != null) { n2++; sm2 += (k.p2 - y) ** 2; }
@@ -1513,9 +1563,9 @@ function recordLine() {
 function recordText() {
   const s = scoreRecord(), lines = [];
   for (const c of CHECKS) { const b = s.briers[c]; lines.push(`${String(c / 60).padStart(2)} min to go: ` + (b ? `model ${b.model.toFixed(3)}` + (b.matched != null ? ` (variance-matched ${b.matched.toFixed(3)})` : "") + ` vs market ${b.market.toFixed(3)} over ${b.n} windows` : "nothing scored yet")); }
-  lines.push(`Brier score: mean squared error of the chance, 0 is perfect, 0.25 is a coin flip. Officially settled ${s.settled} of ${s.total} watched. Proxy results are excluded. Buy calls are scored as one contract bought at Kalshi's price three seconds after the call and held to settlement, entry fees deducted.`);
+  lines.push(`Brier score: mean squared error of the chance, 0 is perfect, 0.25 is a coin flip. Officially settled ${s.settled} of ${s.total} watched. Proxy results are excluded. Scores here use page forecasts only; the relay uses a separate driftless model and is not pooled with them. Buy calls are scored as one contract bought at Kalshi's price three seconds after the call and held to settlement, entry fees deducted.`);
   if (relayRecordNote) lines.push(relayRecordNote + ". The relay scores every window on its own, whether or not this page is open.");
-  lines.push(`"Variance-matched" is the same model with its curve narrowed by 1.41 (the chance shown keeps that margin). If it scores better over a few dozen windows, the shown chance should switch to it.`);
+  lines.push(`"Variance-matched" is the same model with its curve narrowed by 1.41 (the chance shown keeps that margin). Compare on future held-out windows before changing the displayed model; a small sample is not validation.`);
   lines.push("");
   for (const w of record.windows.slice(-25).reverse()) {
     const when = ET_CLOCK.format(new Date((w.close - WINDOW) * 1000));
@@ -1616,14 +1666,14 @@ function render() {
   const live = feedLive();
   const x = live ? feed.brti.v : spot != null ? spot + basis : null;
   const a = avgAt(Math.floor(now) - 1);
-  const offAvg = feed.avg60 && nowMs - feed.avg60.at < FEED_FRESH_MS ? feed.avg60 : null;
+  const offAvg = feed.avg60 && feed.avg60.n === 60 && nowMs - feed.avg60.at < FEED_FRESH_MS ? feed.avg60 : null;
   const avg = offAvg ? offAvg.v : a != null ? a + basis : null;
   const [tgt, tgtSrc, exactTarget] = target(open, mk);
   const nIndex = Object.values(VENUES).filter(v => !v.lead && !v.liq).length;
   $("lvSpot").textContent = money(x);
   $("lvSpot").parentElement.classList.toggle("thin", x == null);
   $("lvSpotNote").textContent = x == null ? `${nLive} of ${nIndex} exchanges: need ${MIN_LIVE} that agree`
-    : live ? `official BRTI, ${((nowMs - feed.brti.at) / 1000).toFixed(1)} s old · exchanges ${spot != null ? signed(spot + basis - x) : "–"}` + (lead != null && spot != null ? ` · perp ${signed(lead - spot)}` : "")
+    : live ? `official BRTI, ${((nowMs - feed.brti.t) / 1000).toFixed(1)} s old · exchanges ${spot != null ? signed(spot + basis - x) : "–"}` + (lead != null && spot != null ? ` · perp ${signed(lead - spot)}` : "")
     : `${nLive} of ${nIndex} exchanges` + (basisSrc === "kalshi" ? ", aligned to Kalshi" : basisSrc === "target" ? ", calibrated by the target" : basisSrc === "synced" ? ", synced to Robinhood" : "")
     + (lead != null ? ` · perp ${signed(lead - spot)}` : "");
   $("lvAvg").textContent = money(avg);
@@ -1638,9 +1688,9 @@ function render() {
   $("lvTgtNote").textContent = tgtSrc;
 
   let proj = null, p = null, band = null, projectionStatus = null;
-  const vols = sigmas(), f30 = flowSum(NOW_H, now);
+  const vols = live ? indexVols() : sigmas(), f30 = flowSum(NOW_H, now);
   const lean = vols ? nowcast((f30.b + f30.pb - f30.s - f30.ps) / 1e6, lead != null && spot != null ? lead - spot : null, vols) : 0;
-  if (x != null && tgt != null && vols) {
+  if (x != null && tgt != null && vols && (!feed.brti || live)) {
     const drifts = driftsOf(lean);
     projectionStatus = project(now, close, x, vols, drifts);
     if (projectionStatus.mean != null) {
@@ -1652,7 +1702,7 @@ function render() {
     fillProbHistory(open, now, close, tgt, vols);
   }
   // In the final minute: the average the remaining seconds must reach for Up to win.
-  const need = proj && tgt != null && proj.observed && proj.m > 0 ? (tgt * (proj.observed + proj.m) - (proj.sum + (proj.official ? 0 : proj.observed * basis))) / proj.m : null;
+  const need = proj && tgt != null && proj.observed && proj.m > 0 ? Math.ceil((((tgt - 0.005) * 60 - (proj.sum + (proj.official ? 0 : proj.observed * basis))) / proj.m) * 100 - 1e-7) / 100 : null;
   $("lvProj").textContent = proj ? money(proj.mean) : "–";
   $("lvProjNote").textContent = proj ? (proj.observed ? (proj.official ? `${proj.observed}/60 s in Kalshi's own average` : `${proj.observed}/60 proxy samples, ${proj.reconstructed} reconstructed`) + (need != null ? ` · Up needs ≥ ${money(need)} over the last ${proj.m} s` : "") : (live ? "official index; forecast until the final minute" : "exchange-proxy forecast until the final minute")) + ` · ±${proj.sd.toFixed(0)} model scale · vol $${vols.s.toFixed(1)} now, $${vols.l.toFixed(1)}/√s over 15 min` + (lean ? ` · lean ${signed(lean)}` : "")
     : projectionStatus && projectionStatus.missing ? `INCOMPLETE: ${projectionStatus.missing} elapsed proxy samples missing` : vols == null ? "measuring volatility…" : "needs the target";
@@ -1681,11 +1731,15 @@ function render() {
 
   const fw = flowWords(flowSum(30, now));
   const big = $("pBig");
+  $("probBar").classList.toggle("waiting", p == null);
+  $("healthFeed").textContent = live ? `BRTI live · ${Math.max(0, (nowMs - feed.brti.t) / 1000).toFixed(1)}s old` : feed.brti ? "BRTI stale · signals paused" : "Exchange estimate · BRTI connecting";
+  $("healthFeed").className = live ? "good" : "meh";
+  $("healthMode").textContent = p == null ? "Model: waiting for complete data" : "Model: uncalibrated estimate";
   if (p == null) {
     big.textContent = "WAIT"; big.className = "p none";
     $("pBar").style.width = "0%";
     $("fairUp").textContent = "Up –"; $("fairDown").textContent = "Down –";
-    $("why").textContent = projectionStatus && projectionStatus.missing ? `INCOMPLETE: ${projectionStatus.missing} elapsed samples missing. Probability and buy signals paused.` : spot == null ? "Waiting for two exchanges to agree on a price…" : sig == null ? "Measuring volatility; about 30 seconds after opening." : "Needs this window's target. Type the one Robinhood shows.";
+    $("why").textContent = feed.brti && !live ? "BRTI is stale. Probability and signals pause until fresh index readings return." : projectionStatus && projectionStatus.missing ? `INCOMPLETE: ${projectionStatus.missing} elapsed samples missing. Probability and buy signals paused.` : x == null ? "Waiting for a fresh BRTI price or two exchanges…" : vols == null ? "Warming up volatility from fresh readings; usually 20–40 seconds." : "Needs this window's target. Type the one Robinhood shows.";
     $("why").style.color = "";
   } else {
     big.textContent = Math.min(99, Math.max(1, Math.round(p * 100))) + "%"; big.className = "p " + (p >= 0.5 ? "up" : "down");
@@ -1700,7 +1754,7 @@ function render() {
     const zs = Math.abs(gap) / proj.sd;
     const line1 = (sharp ? `SHARP MOVE: ${signed(move10)} in 10 s${withFlow}. ` : "")
       + (live ? "" : "Exchange estimate: ") + `closing average heading for ${signed(gap)} vs the target, ±${proj.sd.toFixed(0)}: target ${zs.toFixed(1)} sd away`
-      + (zs < 1 && left > 120 ? " · close call; most of the decision comes in the last two minutes." : zs >= 2 ? " · clear." : ".")
+      + (zs < 1 && left > 120 ? " · close call; most of the decision comes in the last two minutes." : zs >= 2 ? " · model favours this side; outcome remains uncertain." : ".")
       + (proj.observed && !proj.official ? ` ${proj.observed}/60 proxy samples; ${proj.reconstructed} rebuilt.` : "");
     const line2 = (move10 != null && back60 != null && !sharp ? `Spot ${signed(move10)} in 10 s, ${signed(spot - back60)} in 60 s.` : "")
       + (fw && !sharp ? ` Flow 30 s: ${fw.text}${fw.side ? " " + signedUsd(fw.net) : ""}.` : "")
@@ -1712,7 +1766,7 @@ function render() {
   lastP = p;
   $("ask").hidden = tgt != null && !askOpen;
   const km = kalshi.market && kalshi.market.ticker === mk && nowMs - kalshi.market.at < 20000 && kalshi.market.bid && kalshi.market.ask ? kalshi.market : null;
-  const upC = km ? Math.round(km.ask * 100) : null, downC = km ? Math.round((1 - km.bid) * 100) : null;
+  const upC = km ? Math.round(km.ask * 1000) / 10 : null, downC = km ? Math.round((1 - km.bid) * 1000) / 10 : null;
   $("rhUp").placeholder = upC != null ? String(upC) : "type";
   $("rhDown").placeholder = downC != null ? String(downC) : "type";
   const dp = depth(mk);
@@ -1725,7 +1779,7 @@ function render() {
   const dep = depth(mk);
   const vUp = verdict($("vUp"), signalP, band && band.lo, typedUp != null ? typedUp : upC, waitReason, dep && dep.up);
   const vDown = verdict($("vDown"), signalP == null ? null : 1 - signalP, band && 1 - band.hi, typedDown != null ? typedDown : downC, waitReason, dep && dep.down);
-  decisionLine(p, band, vUp, vDown, upC, downC, left);
+  decisionLine(signalP, band, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, left);
   keepRecord(mk, close, left, tgt, p, proj && tgt != null ? chanceMatched(proj.mean, proj.sd, tgt) : null, km, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, typedUp != null || typedDown != null);
 
   // sounds: a sharp move as it starts, a buy call on Kalshi's own prices once it has held for a few
@@ -1766,8 +1820,8 @@ function decisionLine(p, band, vUp, vDown, upC, downC, left) {
     if (vUp && vUp.call === "buy") txt = `Buy Up at ${upC}¢: ${cents(vUp.worst)} a contract even at the bad end of the band.`;
     else if (vDown && vDown.call === "buy") txt = `Buy Down at ${downC}¢: ${cents(vDown.worst)} a contract even at the bad end of the band.`;
     else if (upC != null && downC != null) txt = `No trade now: Kalshi's ${upC}¢ / ${downC}¢ ${Math.abs(p * 100 - upC) <= 4 ? "matches" : "is within the band of"} the model's ${Math.round(p * 100)}%.`
-      + ` Up becomes a buy below ${lu != null ? lu + "¢" : "nothing realistic"}, Down below ${ld != null ? ld + "¢" : "nothing realistic"}.`;
-    else txt = `Up becomes a buy below ${lu != null ? lu + "¢" : "–"}, Down below ${ld != null ? ld + "¢" : "–"}.`;
+      + ` Up qualifies at or below ${lu != null ? lu + "¢" : "no available price"}, Down at or below ${ld != null ? ld + "¢" : "no available price"}.`;
+    else txt = `Up qualifies at or below ${lu != null ? lu + "¢" : "–"}, Down at or below ${ld != null ? ld + "¢" : "–"}.`;
     if (left <= SETTLE) txt += " Settlement minute: watch the strip above.";
   }
   if (txt !== el.textContent) el.textContent = txt;

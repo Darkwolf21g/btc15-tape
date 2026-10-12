@@ -1,5 +1,20 @@
 # BTC 15 Tape — handoff
 
+## Reliability review — October 12, 2026
+
+This section supersedes older operational claims below. The collector now keeps the read-only BRTI stream connected without a phone, wakes at least every 30 seconds, and has a one-minute Cloudflare cron watchdog. It repairs overdue alarms, schedules recovery before network work, bounds upstream requests to 12 seconds, and retains up to 20 minutes of actual one-second observations. This creates ongoing Durable Object usage; check your Cloudflare usage rather than assuming it is free. Trading mode is not changed by these improvements.
+
+Forecasts use fresh stream snapshots captured before REST requests. Historical ticks may seed volatility, but stale history cannot produce a probability. Missing forecasts have a reason instead of looking successful. Previously missing forecasts are not reconstructed after outcomes are known. New collector forecasts carry model version `brti-driftless-v2`; `/collector/status` reports freshness, forecast count, and separate descriptive Brier scores on the newest third of settled windows. There is no automatic model promotion. Page forecasts include a flow lean and are scored separately from relay forecasts.
+
+Final-minute maths requires all elapsed one-second BRTI readings or an official aggregate with exactly the expected count. Five-Hz readings are for live price/volatility, not settlement observations. Missing elapsed ticks pause signals. Source timestamps prevent replayed frames appearing fresh. The required remaining mean includes cent rounding, with the displayed threshold rounded upward to cents. The UI shows data/collector health, a neutral WAIT bar, fractional-cent quotes, explicit YES/NO rules, and uncalibrated model labels. Agent-page refreshes do not overlap.
+
+Reconnects resubscribe to contract channels and discard old books/quotes. Missing order-book sequence numbers trigger a rebuild. Existing execution code gains stale-quote and exchange-status gates, input bounds, persisted order intent before sending (an uncertain request is not automatically retried), and P&L based on actual fill cost. An uncertain order requires manual reconciliation with Kalshi; automatic order reconciliation is not implemented. No trading modes are enabled by deployment. The existing direct-Kalshi fee estimate still needs venue-specific fee-schedule validation before live use.
+
+Validation: `npm ci` (Node 22+), `npm test` (36 regression checks), `npm run check`, and `npm run test:runtime` (Worker build, SQLite health, authentication, default OFF, control validation and record endpoints). The root and `public/` page copies are checked byte-for-byte. Live deployment verification is recorded in the change report; unit tests do not establish predictive accuracy.
+
+Remaining work: five spot-venue depth signals, server-side flow/lean learning, longer out-of-sample calibration, and execution reconciliation. Kalshi contract depth is already present; it is not five-venue spot depth.
+
+
 Written for whoever picks this up next (a person or another assistant). It says what exists, where it is, how it works, what has and has not been verified, and what was decided and why. Read it in full before changing anything. Settlement-integrity corrections below were added on 11 Oct 2026; see `tests/settlement.test.cjs` for the corresponding regression checks.
 
 ## 1. What this is

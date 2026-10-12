@@ -37,7 +37,7 @@ function page(savedRecord = []) {
     globalThis.api = {
       avgAt, project, windowSamples, captureProxyClose, settleWindow, settleOfficial,
       scoreRecord, recordLine, recordText, verdict, render, target, tickers, record,
-      samples, backfill, venue, kalshi, pHist,
+      samples, backfill, venue, kalshi, pHist, feed, feedLive, officialSeconds, officialSettle, acceptIndex, indexVols, decisionLine,
       setBasisValue(v, sd = 0.5) { basis = v; basisSrc = 'kalshi'; basisSd = sd; },
       setMarketResponse(market) { kalshiGet = async () => ({market}); },
       seedVol() { volN = 60; for (const row of vol) { row[0] = 4; row[1] = 1; } },
@@ -230,4 +230,38 @@ test('estimated candle target cannot trigger buy calls', () => {
   api.render();
   assert.match(node('pBig').textContent, /%$/);
   assert.match(node('vUp').textContent, /WAIT: enter or retrieve the exact target/);
+});
+
+
+test('source timestamps reject replayed index frames rather than freshening their age', () => {
+  const {api}=page();
+  assert.equal(api.acceptIndex(100,3550000),false);
+  assert.equal(api.feedLive(),false);
+  assert.equal(api.acceptIndex(100,3560000),true);
+  assert.equal(api.feedLive(),true);
+});
+test('official aggregate must contain exactly the elapsed number of seconds', () => {
+  const {api,setTime}=page(); setTime(90500);
+  api.feed.settle={v:100,n:29,end:89000,at:89000};
+  assert.equal(api.officialSettle(120),null);
+  api.feed.settle={v:100,n:30,end:90000,at:90000};
+  assert.equal(api.officialSettle(120).n,30);
+});
+test('official model never fills a missing BRTI tick from exchange samples', () => {
+  const {api,setTime}=page(); setTime(90500); fill(api,61,90,100);
+  api.acceptIndex(100,90000);
+  const p=api.project(90.5,120,100,{s:2,l:2},[]);
+  assert.equal(p.mean,null); assert.equal(p.missing,30);
+});
+test('index volatility warms independently of exchange consensus', () => {
+  const {api,setTime}=page(); setTime(100000);
+  for(let t=60;t<=100;t++) api.officialSeconds.set(t,100+Math.sin(t));
+  assert.ok(api.indexVols().s>0);
+});
+test('decision line uses the supplied manual quote and clears when model is paused', () => {
+  const {api,node}=page();
+  api.decisionLine(.8,{lo:.7,hi:.9},{call:'buy',worst:4},null,61,40,100);
+  assert.match(node('decision').textContent,/61¢/);
+  api.decisionLine(null,null,null,null,61,40,100);
+  assert.equal(node('decision').textContent,'');
 });
