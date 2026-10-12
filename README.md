@@ -17,7 +17,11 @@ The collector runs through Durable Object alarms and the cron watchdog with the 
 
 Keep the model/settings frozen during a forward trial. Review results by whole contract window and day, including fees and missed fills; test slower execution and lower available depth before concluding an edge exists. There is no automatic promotion to live and no profit guarantee. More sophisticated depth signals should be added only if held-out results improve. This chat itself is not an always-running trading service.
 
-Validation: `npm test` (43 checks), `npm run check`, `npm run test:runtime`. Runtime tests cover authentication and SQLite-backed endpoints; deterministic tests cover settlement boundaries, missing ticks, delayed/partial/no fills, halt handling, fee scenarios and model-separated reports. These checks validate software behavior, not predictive accuracy.
+Validation: `npm test` (47 checks), `npm run check`, `npm run test:runtime`. Runtime tests cover authentication and SQLite-backed endpoints; deterministic tests cover settlement boundaries, missing ticks, delayed/partial/no fills, halt handling, fee scenarios and model-separated reports. These checks validate software behavior, not predictive accuracy.
+
+### Cloudflare preview builds
+
+Non-production branches use `npx wrangler preview`; production uses `npx wrangler deploy`. The `previews` block explicitly binds `FEED` to `KalshiFeed`, giving each preview its own Durable Object namespace and storage. Do not add `script_name` pointing at production. Assets and migrations remain top-level. Cron triggers do not run on previews; verify the continuous collector on production after deployment. Production secrets are not inherited: a preview without separately configured index credentials will show unavailable index data and WAIT. It must not be treated as a live-feed or profitability test. Configure any preview secrets securely in Cloudflare, never in git.
 
 ## Reliability review — October 12, 2026
 
