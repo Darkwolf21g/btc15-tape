@@ -928,6 +928,13 @@ function acceptIndex(v, ms) {
   if (!feed.brti || ms > feed.brti.t) feed.brti = {v, t: ms, at: Date.now()};
   return true;
 }
+function officialTrailing(sec) {
+  let sum = 0;
+  for (let t = sec - 60; t < sec; t++) {
+    const v = officialSeconds.get(t); if (!Number.isFinite(v)) return null; sum += v;
+  }
+  return {v: sum / 60, n: 60, at: sec * 1000, derived: true};
+}
 function indexVols() {
   const n = Math.floor(Date.now() / 1000);
   const est = span => { let sum = 0, count = 0;
@@ -1666,7 +1673,7 @@ function render() {
   const live = feedLive();
   const x = live ? feed.brti.v : spot != null ? spot + basis : null;
   const a = avgAt(Math.floor(now) - 1);
-  const offAvg = feed.avg60 && feed.avg60.n === 60 && nowMs - feed.avg60.at < FEED_FRESH_MS ? feed.avg60 : null;
+  const offAvg = feed.avg60 && feed.avg60.n === 60 && nowMs - feed.avg60.at < FEED_FRESH_MS ? feed.avg60 : live ? officialTrailing(Math.floor(now)) : null;
   const avg = offAvg ? offAvg.v : a != null ? a + basis : null;
   const [tgt, tgtSrc, exactTarget] = target(open, mk);
   const nIndex = Object.values(VENUES).filter(v => !v.lead && !v.liq).length;
@@ -1678,7 +1685,7 @@ function render() {
     + (lead != null ? ` · perp ${signed(lead - spot)}` : "");
   $("lvAvg").textContent = money(avg);
   $("lvAvgNote").textContent = x != null && avg != null
-    ? (offAvg ? `official, ${((nowMs - offAvg.at) / 1000).toFixed(1)} s old` : "Exchange proxy") + ` · spot ${signed(x - avg)}, so it is heading ${x > avg + 1 ? "up" : x < avg - 1 ? "down" : "sideways"}`
+    ? (offAvg ? `${offAvg.derived ? "60 BRTI readings" : "official"}, ${((nowMs - offAvg.at) / 1000).toFixed(1)} s old` : "Exchange proxy") + ` · spot ${signed(x - avg)}, so it is heading ${x > avg + 1 ? "up" : x < avg - 1 ? "down" : "sideways"}`
     : "INCOMPLETE: needs all 60 proxy samples";
   // momentum: how far spot moved in the last 10 s, against what the volatility says is usual
   const sec = Math.floor(now), back10 = sampleAt(sec - 10), back60 = sampleAt(sec - 60);

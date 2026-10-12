@@ -37,7 +37,7 @@ function page(savedRecord = []) {
     globalThis.api = {
       avgAt, project, windowSamples, captureProxyClose, settleWindow, settleOfficial,
       scoreRecord, recordLine, recordText, verdict, render, target, tickers, record,
-      samples, backfill, venue, kalshi, pHist, feed, feedLive, officialSeconds, officialSettle, acceptIndex, indexVols, decisionLine,
+      samples, backfill, venue, kalshi, pHist, feed, feedLive, officialSeconds, officialSettle, officialTrailing, acceptIndex, indexVols, decisionLine,
       setBasisValue(v, sd = 0.5) { basis = v; basisSrc = 'kalshi'; basisSd = sd; },
       setMarketResponse(market) { kalshiGet = async () => ({market}); },
       seedVol() { volN = 60; for (const row of vol) { row[0] = 4; row[1] = 1; } },
@@ -264,4 +264,11 @@ test('decision line uses the supplied manual quote and clears when model is paus
   assert.match(node('decision').textContent,/61¢/);
   api.decisionLine(null,null,null,null,61,40,100);
   assert.equal(node('decision').textContent,'');
+});
+
+test('trailing BRTI average requires sixty readings and excludes current source second', () => {
+  const {api}=page(); for(let t=40;t<100;t++) api.officialSeconds.set(t,100);
+  api.officialSeconds.set(100,200);
+  assert.equal(api.officialTrailing(100).v,100);
+  api.officialSeconds.delete(99); assert.equal(api.officialTrailing(100),null);
 });
