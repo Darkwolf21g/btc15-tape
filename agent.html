@@ -52,7 +52,7 @@ a { color: var(--ink); }
 <section>
   <h2>Controls</h2>
   <div class="row">
-    <button id="bOff" type="button">Off</button><button id="bPaper" type="button">Paper</button><button id="bDemo" type="button" disabled>Demo · deferred</button><button id="bLive" type="button" disabled>Live · deferred</button>
+    <button id="bOff" type="button">Off</button><button id="bPaper" type="button">Paper</button><button id="bDemo" type="button">Demo test panel</button><button id="bLive" type="button" disabled>Live · deferred</button>
   </div>
   <div class="row"><input id="cap" inputmode="decimal" placeholder="Max $ per window"><input id="first" inputmode="numeric" placeholder="Start trading at minute (1–14)"><input id="bank" inputmode="decimal" placeholder="Bankroll $ for sizing"><button id="bSet" type="button">Apply</button></div>
   <div class="row"><input id="tok" inputmode="text" placeholder="Stream token (FEED_TOKEN on the Worker)"><button id="bTok" type="button">Save token</button></div>
@@ -61,6 +61,12 @@ a { color: var(--ink); }
   <div class="notes" id="ctlNote"></div>
 </section>
 
+<section id="demoPanel"><h2>Kalshi demo · mock funds only</h2>
+<p class="notes">Separate from the paper model. Test one contract at a time against demo markets. Maximum 10 test orders per day. Reconcile each order before another submission.</p>
+<div class="row"><button id="demoLoad">Load demo markets</button><select id="demoMarket" aria-label="Demo market"><option value="">Load markets first</option></select></div>
+<div class="row"><select id="demoSide" aria-label="Demo side"><option value="yes">Buy YES</option><option value="no">Buy NO</option></select><input id="demoPrice" aria-label="Demo limit price in cents" inputmode="decimal" placeholder="Limit price ¢ (1–99)"><button id="demoSubmit" disabled>Submit 1 demo contract</button></div>
+<div class="row"><button id="demoReconcile" disabled>Reconcile last order</button><button id="demoCancel" disabled>Cancel last order</button></div>
+<pre id="demoResult">Demo not connected. Requires separate demo credentials in Worker secrets.</pre></section>
 <section><h2>Paper research · current model only</h2><pre id="paperReport">Waiting for status…</pre><p class="notes">Forward simulation, not actual fills. No automatic promotion to real trading. Results from older models are excluded below.</p></section>
 <section>
   <h2>Trades</h2>
@@ -87,7 +93,7 @@ a { color: var(--ink); }
 <section>
   <div class="notes">
     <p>The agent runs in the relay when enabled: from the start minute you set (default minute 5) to 15 seconds before each close, every 5 seconds, on Kalshi's own index and book. Its uncalibrated model considers a trade when a side clears 3¢ after fees at the bad end of the model's band and the call has held for two looks: one limit order at the ask, immediate-or-cancel, a quarter Kelly, capped per window. One trade a window, 12 a day, nothing after the daily loss stop, nothing while Kalshi has trading paused.</p>
-    <p><b>Paper</b> queues a simulated IOC order, waits for the configured delay, then checks fresh depth at or below the original limit. It can fill partially or not at all. Default: 1 second minimum delay, 50% of displayed quantity, conservative whole-cent fees. Demo and live execution are deferred pending a separate integration and performance review. Controls require the stream token.</p>
+    <p><b>Paper</b> queues a simulated IOC order, waits for the configured delay, then checks fresh depth at or below the original limit. It can fill partially or not at all. Default: 1 second minimum delay, 50% of displayed quantity, conservative whole-cent fees. The separate demo panel tests real API order handling with mock funds; it does not follow production signals. Live execution remains disabled. Controls require the stream token.</p>
   </div>
 </section>
 
@@ -143,6 +149,7 @@ async function refresh() {
   try {
     const c = await (await fetch("./collector/status" + q(), {cache: "no-store", signal: AbortSignal.timeout(10000)})).json();
     $("collector").textContent = `${c.lastOk && Date.now() - c.lastOk < 120000 ? "ACTIVE" : "STALE — collection needs attention"} · runs ${c.runs || 0} · last ${c.lastRun ? ET.format(new Date(c.lastRun)) : "never"} · next ${c.nextAlarm ? ET.format(new Date(c.nextAlarm)) : "–"}` + (c.errors && c.errors.length ? `\nlast error: ${c.errors[c.errors.length - 1].error}` : "");
+    if(c.api)$("collector").textContent+="\nAPI limits: "+(c.api.limits?`${c.api.limits.usage_tier} · read ${c.api.limits.read?.refill_rate} tokens/s · write ${c.api.limits.write?.refill_rate} tokens/s`:"unknown")+(c.api.error?" · last check failed":"");
   } catch (e) { $("collector").textContent = "Collector unavailable"; }
   refreshing = false;
 }
@@ -170,6 +177,37 @@ $("bSet").addEventListener("click", () => {
 });
 $("bTok").addEventListener("click", () => { token = $("tok").value.trim(); store.set("feedToken", token); $("tok").value = ""; $("ctlNote").textContent = token ? "Token saved (shared with the tape page)." : "Token cleared."; refresh(); });
 $("csv").href = "./record.csv" + q(); $("json").href = "./record" + q();
+let demoLast=null,demoReady=false,demoSending=false,demoIntent=null;
+async function demoAction(path,body) {
+  if(!token)throw Error("Save the stream token first");
+  const r=await fetch("./demo/"+path+q(),{method:body?"POST":"GET",headers:{"Content-Type":"application/json"},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(30000)});
+  const d=await r.json();if(!r.ok)throw Error(d.error||"Demo request failed");return d;
+}
+function demoShow(order){
+  demoLast=order;$("demoReconcile").disabled=!order;$("demoCancel").disabled=!order?.orderId;
+  $("demoSubmit").disabled=!demoReady||!!(order&&!order.reconciled);
+  $("demoResult").textContent=order?JSON.stringify(order,null,2):"Demo ready. No test orders.";
+}
+$("bDemo").onclick=()=>$("demoPanel").scrollIntoView({behavior:"smooth"});
+$("demoLoad").onclick=async()=>{
+  try{const d=await demoAction("status");demoReady=d.exchange.exchange_active===true&&d.exchange.trading_active===true;
+    const select=$("demoMarket");select.replaceChildren();for(const m of d.markets){const o=document.createElement("option");o.value=m.ticker;o.textContent=`${m.ticker} · YES ${m.yes_ask??"—"} / NO ${m.no_ask??"—"} dollars`;select.appendChild(o);}
+    demoReady=demoReady&&d.markets.length>0;if(demoIntent&&d.ledger.some(o=>o.clientId===demoIntent.clientId))demoIntent=null;demoShow(d.ledger.at(-1)||null);
+    if(!demoReady)$("demoResult").textContent="Demo trading paused or no open BTC15 demo markets. No orders can be submitted.";
+  }catch(e){demoReady=false;$("demoSubmit").disabled=true;$("demoResult").textContent=e.message;}
+};
+$("demoSubmit").onclick=async()=>{
+  if(demoSending)return;demoSending=true;$("demoSubmit").disabled=true;
+  // Keep the same ID after a browser/network timeout; reloading retrieves its durable ledger entry.
+  demoIntent=demoIntent||{clientId:"btc15-demo-"+crypto.randomUUID(),ticker:$("demoMarket").value,side:$("demoSide").value,priceCents:Number($("demoPrice").value)};
+  try{const d=await demoAction("order",demoIntent);demoIntent=null;demoShow(d.order);}
+  catch(e){$("demoResult").textContent=e.message+" · Load demo markets to recover the order record before continuing.";}
+  finally{demoSending=false;}
+};
+for(const [id,path] of [["demoReconcile","reconcile"],["demoCancel","cancel"]])$(id).onclick=async()=>{
+  if(!demoLast||demoSending)return;demoSending=true;
+  try{demoShow((await demoAction(path,{clientId:demoLast.clientId})).order);}catch(e){$("demoResult").textContent=e.message;}finally{demoSending=false;}
+};
 refresh(); setInterval(refresh, 10000);
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(); });
 </script>

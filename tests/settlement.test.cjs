@@ -46,7 +46,7 @@ function page(savedRecord = []) {
   `, context);
   const api = context.api;
   api.setBasisValue(0);
-  return {api, node, timers, setTime: value => { now = value; }};
+  return {api, node, timers, context, setTime: value => { now = value; }};
 }
 
 function fill(api, start, end, value = 100) {
@@ -358,4 +358,12 @@ test('a held estimate cannot survive a change of target or contract window', () 
   api.setTarget(api.tickers(3600)[1],101);api.render();assert.equal(node('pBig').textContent,'WAIT');
   setTime(3600100);api.render();assert.equal(node('pBig').textContent,'WAIT');
   assert.equal(node('settle').hidden,true);
+});
+
+test('exchange health becomes unknown after failed checks or ninety seconds',()=>{
+ const h=page();
+ vm.runInContext('exch.at=Date.now();exch.active=true;exch.trading=true;exch.failed=false',h.context);
+ assert.equal(vm.runInContext('exchangeHealth()',h.context),'open');
+ vm.runInContext('exch.failed=true',h.context);assert.equal(vm.runInContext('exchangeHealth()',h.context),'unknown');
+ vm.runInContext('exch.failed=false;exch.at=Date.now()-90000',h.context);assert.equal(vm.runInContext('exchangeHealth()',h.context),'unknown');
 });
