@@ -90,6 +90,7 @@ header { display: flex; align-items: flex-end; justify-content: space-between; g
 .lv.spot.thin b { color: var(--dim); }
 
 .chart { position: relative; margin-top: 14px; }
+select { background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:6px;min-height:44px;padding:8px;font:inherit;max-width:100%; }
 canvas { display: block; width: 100%; }
 #main { height: 300px; } #prob { height: 190px; } #flow { height: 110px; }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--dim); margin-top: 6px; }
@@ -177,6 +178,8 @@ summary { display: list-item; padding-block: 10px; }
   <div class="notes recline" id="recLine">Record: no official results yet. Scores wait for confirmed Kalshi outcomes.</div>
 </section>
 
+<div class="row" style="margin:12px 0"><label for="feeVenue">Cost estimate </label><select id="feeVenue" aria-label="Cost estimate venue"><option value="robinhood">Robinhood</option><option value="robinhood-gold">Robinhood Gold</option><option value="kalshi">Direct Kalshi</option></select></div>
+<p class="notes">Quotes below come from Kalshi unless entered. Robinhood costs assume a 1¢ exchange fee; confirm your order preview. One-contract fees are rounded conservatively.</p>
 <section class="levels">
   <div class="lv spot"><span class="label">Spot now</span><b id="lvSpot">–</b><small id="lvSpotNote">exchange consensus; BRTI estimate</small></div>
   <div class="lv avg"><span class="label">60-s average</span><b id="lvAvg">–</b><small id="lvAvgNote">exchange proxy; needs all 60 samples</small></div>
@@ -184,6 +187,7 @@ summary { display: list-item; padding-block: 10px; }
   <div class="lv proj"><span class="label">Closing avg, projected</span><b id="lvProj">–</b><small id="lvProjNote">–</small></div>
 </section>
 
+<div class="row" style="margin:12px 0"><button id="chartFocus" type="button">View: full window</button><button id="chartDelta" type="button">Axis: distance from target</button></div>
 <div class="chart"><canvas id="main" aria-label="Price this window"></canvas>
   <div class="legend">
     <span><i style="background:var(--spot)"></i>Spot</span>
@@ -267,13 +271,96 @@ summary { display: list-item; padding-block: 10px; }
       <p><b>Order flow.</b> Every trade on the five index exchanges and the Hyperliquid perpetual is sorted by who crossed the spread: a market buy counts as buying, a market sell as selling. The bars are the difference, in dollars, and the line is the running total since the open. A move with heavy flow behind it tends to carry on; a move on balanced flow is more often a sweep that fades. Prints of $200k or more are listed under the chart.</p>
       <p><b>Flow lean.</b> The page also measures, as it runs, how far spot has tended to move in the 30 seconds after a stretch of net buying or selling. Once that relation is clear (about ten minutes of data at the least, usually more) the projection leans the way the flow points, by that measured amount and never by more than two standard deviations of a 30-second move. The flow line says whether the lean is on. It is forgotten slowly, so what it learnt this evening still counts tomorrow morning. Liquidations come from Bybit, OKX, Deribit, BitMEX and Binance (Binance refuses US connections): longs being liquidated is forced selling, shorts being liquidated is forced buying, and a run of them is what makes a move overshoot.</p>
       <p><b>Sound.</b> Tap Sound once (browsers will not play anything until you do). Then: two rising notes for a sharp move up, two falling for down; three notes when Kalshi's own price leaves a 3¢ edge for Up or Down; one low note at one minute to go. On an iPhone the ring/silent switch must be on ring.</p>
-      <p>The chance shown is a model: a random walk from spot with recently measured volatility and fat tails. Flow and the perp gap may enter the fitted lean; liquidations are shown as context. This exchange-based probability is uncalibrated and is not the official contract outcome.</p>
+      <p>The chance shown is a model: a random walk from spot with recently measured volatility and fat tails. The same frozen BRTI model runs on the page and collector. Flow, the experimental lean, and liquidations are research context and do not alter its official forecast. This probability is uncalibrated and is not the official contract outcome.</p>
     </div>
   </div>
 </details>
 
 <script>
 "use strict";
+// BEGIN SHARED BTC15 MODEL
+// Canonical model. scripts/sync-model.cjs embeds this exact source in Worker and page.
+// Frozen baseline: no fitted flow lean; all parameters recorded under VERSION.
+(() => {
+const VERSION = "brti-driftless-v3";
+const EXECUTION_VERSION = "paper-delayed-depth-v1";
+const SETTLE = 60, VOL_TAU = 180;
+const tailCdf = z => 0.5 + z * (z*z+6) / (2*Math.pow(z*z+4,1.5));
+const chance = (mean, sd, target) => tailCdf((mean - (target - .005)) / sd);
+function volsFrom(ticks, nowMs) {
+  const perSec = new Map();
+  for (const [ms, v] of ticks) perSec.set(Math.floor(ms / 1000), v);
+  const est = span => { let sum = 0, n = 0; const from = Math.floor(nowMs / 1000) - span;
+    for (let t = from; t <= Math.floor(nowMs / 1000); t++) { const a = perSec.get(t), b = perSec.get(t - 5); if (a != null && b != null) { sum += (a - b) ** 2 / 5; n++; } }
+    return n >= 12 ? Math.max(0.5, Math.sqrt(sum / n)) : null; };
+  const s = est(120), l = est(900);
+  return s && l ? {s, l} : null;
+}
+function projectFrom(ticks, nowMs, closeS, x, vols, aggregate = null) {
+  const now = nowMs / 1000, perSec = new Map(ticks.map(([ms, v]) => [Math.floor(ms / 1000), v]));
+  let known = 0, observed = 0, missing = 0; const ahead = [];
+  for (let sec = closeS - SETTLE + 1; sec <= closeS; sec++) {
+    if (sec <= now) { const v = perSec.get(sec); if (Number.isFinite(v)) { known += v; observed++; } else missing++; }
+    else ahead.push(sec - now);
+  }
+  // A delayed aggregate must never turn a 60-reading contract into a 59-reading contract.
+  const elapsed = SETTLE - ahead.length;
+  if (aggregate && aggregate.n === elapsed && aggregate.n >= 1 && aggregate.n <= 60 &&
+      aggregate.end > (closeS - 60) * 1000 && aggregate.end <= closeS * 1000 &&
+      nowMs - aggregate.end >= -1000 && nowMs - aggregate.end < 3000 && Number.isFinite(aggregate.v)) {
+    known = aggregate.v * aggregate.n; observed = aggregate.n; missing = 0;
+  }
+  if (missing) return {mean: null, sd: null, observed, missing, m: ahead.length};
+  const m = ahead.length, vs = vols.s ** 2, vl = vols.l ** 2;
+  let variance = 0, previous = 0;
+  for (let j = 0; j < m; j++) { const u = ahead[j], c = m - j; variance += (vl * (u - previous) + (vs - vl) * VOL_TAU * (Math.exp(-previous / VOL_TAU) - Math.exp(-u / VOL_TAU))) * c * c; previous = u; }
+  return {sum: known, reconstructed: 0, mean: (known + m * x) / SETTLE, sd: Math.sqrt(variance / SETTLE ** 2 + 0.09), observed, missing: 0, m, official: observed > 0};
+}
+
+function band(ticks, nowMs, close, x, vols, target, aggregate=null) {
+ let lo=1, hi=0; const adverse=vols.s*Math.sqrt(10);
+ for(const k of [.7,1,1.5]) for(const shift of [-adverse,0,adverse]) {
+  const pr=projectFrom(ticks,nowMs,close,x+shift,{s:vols.s*k,l:vols.l*k},aggregate);
+  if(pr.mean==null)return null;
+  const p=chance(pr.mean,pr.sd,target);lo=Math.min(lo,p);hi=Math.max(hi,p);
+ }
+ return {lo,hi};
+}
+// Conservative whole-cent rounding for simulation. Actual fees reconcile from fills later.
+// Robinhood exchange fee is an explicit assumption, not a fetched executable fee quote.
+function feesCents(priceCents,n=1,venue="kalshi",exchangeFeeCents=1) {
+ if(!(priceCents>0&&priceCents<100&&n>0))return 0;
+ const p=priceCents/100;
+ const commission=venue==="kalshi" ? .07*n*p*(1-p)*100 : Math.min(n,(venue==="robinhood-gold"?.05:.10)*n*p*(1-p)*100);
+ return Math.ceil(commission-1e-9)+(venue==="kalshi"?0:Math.ceil(n*exchangeFeeCents-1e-9));
+}
+function asks(book,side) {
+ const levels=side==="Up"?book?.no:book?.yes;
+ if(!levels)return [];
+ return [...levels].filter(([p,n])=>Number.isFinite(p)&&p>0&&p<1&&Number.isFinite(n)&&n>0)
+  .map(([p,n])=>({price:Math.round((1-p)*10000)/100,size:Math.floor(n)})).sort((a,b)=>a.price-b.price);
+}
+function paperFill(intent,book,nowMs,cfg) {
+ const empty=reason=>({filled:0,cost:0,feesCents:0,status:"paper-no-fill",reason,levels:[],filledAt:nowMs,latencyMs:nowMs-intent.at});
+ if(nowMs<intent.readyAt)return null;
+ if(nowMs>=intent.close*1000)return empty("contract closed before simulated arrival");
+ if(nowMs-intent.readyAt>10000)return empty("execution checkpoint missed");
+ if(!book||nowMs-book.at>cfg.paperBookMaxAgeMs||book.at>nowMs)return empty("no fresh depth at simulated arrival");
+ let remaining=intent.n, cost=0, fees=0;const levels=[];
+ for(const level of asks(book,intent.side)) {
+  if(level.price>intent.price+1e-8)break;
+  const n=Math.min(remaining,Math.floor(level.size*cfg.paperDepthFraction));
+  if(n<=0)continue;
+  levels.push({price:level.price,n});cost+=n*level.price;
+  fees+=feesCents(level.price,n,cfg.paperVenue,cfg.paperExchangeFeeCents);remaining-=n;if(!remaining)break;
+ }
+ const filled=intent.n-remaining;
+ if(!filled)return empty("no quantity at limit after depth haircut");
+ return {filled,cost:Math.round(cost*100)/100,feesCents:fees,levels,status:remaining?"paper-partial":"paper-filled",reason:remaining?"available depth below requested size":"filled at arrival book",filledAt:nowMs,latencyMs:nowMs-intent.at};
+}
+globalThis.BTC15Model=Object.freeze({VERSION,EXECUTION_VERSION,tailCdf,chance,volsFrom,projectFrom,band,feesCents,asks,paperFill});
+})();
+// END SHARED BTC15 MODEL
 // ---------------------------------------------------------------- settings
 const KALSHI = ["https://external-api.kalshi.com/trade-api/v2", "https://api.elections.kalshi.com/trade-api/v2"];
 const WINDOW = 900, SETTLE = 60;
@@ -306,7 +393,7 @@ function tailCdf(z) { return 0.5 + z * (z * z + 6) / (2 * Math.pow(z * z + 4, 1.
 // deliberate margin for volatility the last minutes did not show. The alternative, the curve
 // scaled so that its standard deviation is exactly `sd`, is recorded and scored alongside (see
 // the Record), so the data can decide which is better calibrated.
-const chance = (mean, sd, tgt) => tailCdf((mean - (tgt - 0.005)) / sd);
+const chance = globalThis.BTC15Model.chance;
 const chanceMatched = (mean, sd, tgt) => tailCdf((mean - (tgt - 0.005)) / (sd / Math.SQRT2));
 const ET_PARTS = new Intl.DateTimeFormat("en-US", {timeZone: "America/New_York", year: "2-digit", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23"});
 const ET_CLOCK = new Intl.DateTimeFormat("en-US", {timeZone: "America/New_York", hour: "numeric", minute: "2-digit"});
@@ -317,9 +404,9 @@ function tickers(closeTs) {          // KXBTC15M-26OCT102015 / KXBTC15M-26OCT102
   return [ev, `${ev}-${p.minute}`];
 }
 const bounds = now => { const close = (Math.floor(now / WINDOW) + 1) * WINDOW; return [close - WINDOW, close]; };
-function feeCents(price) {            // Robinhood commission (10% x p x (1-p), max 1c) + Kalshi 1c, per contract
-  return 100 * (Math.min(0.01, 0.10 * price * (1 - price)) + 0.01);
-}
+let feeVenue=store.get("feeVenue")||"robinhood";
+function feeCents(price) { return globalThis.BTC15Model.feesCents(price*100,1,feeVenue); }
+
 
 // ---------------------------------------------------------------- exchanges (all BRTI constituents)
 // Each message handler gets: the message, q(bid, ask) for a quote, the socket, a scratch object,
@@ -936,15 +1023,7 @@ function officialTrailing(sec) {
   return {v: sum / 60, n: 60, at: sec * 1000, derived: true};
 }
 function indexVols() {
-  const n = Math.floor(Date.now() / 1000);
-  const est = span => { let sum = 0, count = 0;
-    for (let t = n - span; t <= n; t++) {
-      const a = officialSeconds.get(t), b = officialSeconds.get(t - VOL_STEP);
-      if (a != null && b != null) { sum += (a - b) ** 2 / VOL_STEP; count++; }
-    }
-    return count >= 12 ? Math.max(0.5, Math.sqrt(sum / count)) : null;
-  };
-  const s = est(120), l = est(900); return s != null && l != null ? {s, l} : null;
+ return globalThis.BTC15Model.volsFrom([...officialSeconds].map(([s,v])=>[s*1000,v]),Date.now());
 }
 const books = {};                                   // market ticker -> {yes, no: Map(price -> contracts), at}
 // What the book offers: Up is bought from resting No bids (Up price = 1 - best No bid), Down from
@@ -1083,6 +1162,8 @@ function target(open, mk) {
 // hour. `drifts` is a list of [dollars, seconds]: a lean that plays out over that many seconds.
 const VOL_TAU = 180;
 function project(now, close, x, vols, drifts) {
+  if(feed.brti) return globalThis.BTC15Model.projectFrom([...officialSeconds].map(([s,v])=>[s*1000,v]),now*1000,close,x,vols,feed.settle);
+
   const off = officialSettle(close), ahead = [];
   // Kalshi's own accumulating average, when streamed, is the known part exactly; otherwise the
   // page's proxy, and past gaps in it are unknown: spot forecasts only future observations.
@@ -1135,18 +1216,27 @@ function niceStep(range, target) {
   return 10 * mag;
 }
 
+let chartFocus=false,chartDelta=true;
+$("chartFocus").addEventListener("click",()=>{chartFocus=!chartFocus;$("chartFocus").textContent=chartFocus?"View: last 90s + next 30s":"View: full window";});
+$("chartDelta").addEventListener("click",()=>{chartDelta=!chartDelta;$("chartDelta").textContent=chartDelta?"Axis: distance from target":"Axis: BTC price";});
+$("feeVenue").value=feeVenue;
+$("feeVenue").addEventListener("change",()=>{feeVenue=$("feeVenue").value;store.set("feeVenue",feeVenue);});
+const manualQuoteAt={Up:0,Down:0};
+for(const [id,side] of [["rhUp","Up"],["rhDown","Down"]])$(id).addEventListener("input",()=>{manualQuoteAt[side]=Date.now();});
 function drawMain(open, close, now, tgt, proj) {
   const [g, W, H] = setupCanvas($("main"));
   const L = 8, R = 74, T = 10, B = 22;
   g.clearRect(0, 0, W, H);
-  const t0 = open - 60, t1 = close;
+  const t0 = chartFocus?Math.max(open-60,now-90):open-60, t1 = chartFocus?Math.min(close,now+30):close;
+  const priceLabel=v=>chartDelta&&tgt!=null?(Math.abs(v-tgt)<.005?"TARGET":signed(v-tgt)):Math.round(v).toLocaleString("en-US");
   const X = t => L + (t - t0) / (t1 - t0) * (W - L - R);
-  const pts = tape.filter(p => p.t / 1000 >= t0);
+  const pts = tape.filter(p => p.t / 1000 >= t0).map(p=>({...p,p:(p.brti??(p.p+basis))-basis}));
   const avgPts = [];
-  for (let s = Math.ceil(t0); s <= Math.floor(now); s++) { const a = avgAt(s); if (a != null) avgPts.push([s, a + basis]); }
+  for (let s = Math.ceil(t0); s <= Math.floor(now); s++) { const a = feed.brti?officialTrailing(s)?.v:avgAt(s); if (a != null) avgPts.push([s, a + (feed.brti?0:basis)]); }
   const ys = pts.map(p => p.p + basis).concat(avgPts.map(p => p[1]));
   if (tgt != null) ys.push(tgt);
-  if (proj) ys.push(proj.mean - proj.sd, proj.mean + proj.sd);
+  if(lastNeed!=null)ys.push(lastNeed);
+  if (proj && close<=t1) ys.push(proj.mean - proj.sd, proj.mean + proj.sd);
   if (!ys.length) return;
   let lo = Math.min(...ys), hi = Math.max(...ys);
   if (hi - lo < 20) { const c = (hi + lo) / 2; lo = c - 10; hi = c + 10; }
@@ -1165,11 +1255,11 @@ function drawMain(open, close, now, tgt, proj) {
   for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
     g.beginPath(); g.moveTo(L, Y(v)); g.lineTo(W - R, Y(v)); g.stroke();
     if (!tagged.some(y => Math.abs(y - Y(v)) < 12))
-      g.fillText(v.toLocaleString("en-US", {maximumFractionDigits: step < 1 ? 1 : 0}), W - R + 6, Y(v));
+      g.fillText(priceLabel(v), W - R + 6, Y(v));
   }
   // time labels: open, every 5 minutes, close
   g.textBaseline = "alphabetic"; g.textAlign = "center";
-  for (let t = open; t <= close; t += 300) g.fillText(ET_CLOCK.format(new Date(t * 1000)).replace(/ [AP]M/, ""), X(t), H - 6);
+  for (let t = Math.ceil(t0/(chartFocus?30:300))*(chartFocus?30:300); t <= t1; t += chartFocus?30:300) g.fillText(ET_CLOCK.format(new Date(t * 1000)).replace(/ [AP]M/, ""), X(t), H - 6);
   g.textAlign = "left";
   // open marker
   g.strokeStyle = css("--line"); g.beginPath(); g.moveTo(X(open), T); g.lineTo(X(open), H - B); g.stroke();
@@ -1184,7 +1274,7 @@ function drawMain(open, close, now, tgt, proj) {
     g.beginPath(); g.moveTo(X(close - SETTLE), Y(lastNeed)); g.lineTo(W - R, Y(lastNeed)); g.stroke(); g.setLineDash([]);
   }
   // projection to the close: ±2 model scales faint, ±1 scale, centre
-  if (proj && avgPts.length) {
+  if (proj && avgPts.length && close<=t1) {
     const [ls, la] = avgPts[avgPts.length - 1], xc = X(close) - 3;
     g.save(); g.beginPath(); g.rect(L, T, W - L - R, H - T - B); g.clip();
     g.fillStyle = "rgba(133,146,173,0.14)";
@@ -1215,7 +1305,7 @@ function drawMain(open, close, now, tgt, proj) {
   g.stroke();
   // 60-s average
   g.strokeStyle = css("--avg"); g.lineWidth = 2.5; g.beginPath();
-  avgPts.forEach(([s, a], i) => { const x = X(s), y = Y(a); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+  avgPts.forEach(([s, a], i) => { const x = X(s), y = Y(a); i && s-avgPts[i-1][0]===1 ? g.lineTo(x, y) : g.moveTo(x, y); });
   g.stroke();
   // right-edge tags
   const tag = (v, color, text) => {
@@ -1225,10 +1315,10 @@ function drawMain(open, close, now, tgt, proj) {
     g.fillStyle = css("--ground"); g.textBaseline = "middle";
     g.fillText(text, W - R + 6, y); g.textBaseline = "alphabetic";
   };
-  if (tgt != null) tag(tgt, css("--target"), Math.round(tgt).toLocaleString("en-US"));
-  if (lastNeed != null && Math.abs(lastNeed - (tgt || 0)) > (hi - lo) * 0.04) tag(lastNeed, css("--warn"), "≥" + Math.round(lastNeed).toLocaleString("en-US"));
-  if (avgPts.length) tag(avgPts[avgPts.length - 1][1], css("--avg"), Math.round(avgPts[avgPts.length - 1][1]).toLocaleString("en-US"));
-  if (pts.length) tag(pts[pts.length - 1].p + basis, css("--spot"), Math.round(pts[pts.length - 1].p + basis).toLocaleString("en-US"));
+  if (tgt != null) tag(tgt, css("--target"), priceLabel(tgt));
+  if (lastNeed != null && Math.abs(lastNeed - (tgt || 0)) > (hi - lo) * 0.04) tag(lastNeed, css("--warn"), "≥" + priceLabel(lastNeed));
+  if (avgPts.length) tag(avgPts[avgPts.length - 1][1], css("--avg"), priceLabel(avgPts[avgPts.length - 1][1]));
+  if (pts.length) tag(pts[pts.length - 1].p + basis, css("--spot"), priceLabel(pts[pts.length - 1].p + basis));
   // now
   g.strokeStyle = "rgba(230,235,245,0.25)"; g.beginPath(); g.moveTo(X(now), T); g.lineTo(X(now), H - B); g.stroke();
 }
@@ -1299,21 +1389,7 @@ function drawFlow(open, close, now) {
 }
 
 const pHist = new Map();
-// The chance of Up for seconds the page did not see live, worked out from the backfilled prices
-// with today's volatility, so the chart covers the window from its open.
-let probFilledAt = 0;
-function fillProbHistory(open, now, close, tgt, vols) {
-  const sec = Math.floor(now);
-  if (sec - probFilledAt < 5) return;
-  probFilledAt = sec;
-  for (let s = open; s < sec; s++) {
-    if (pHist.has(s)) continue;
-    const x = sampleAt(s);
-    if (x == null) continue;
-    const pr = project(s + 0.5, close, x + basis, vols, driftsOf(nowcastAt(s, vols)));
-    if (pr.mean != null) pHist.set(s, chance(pr.mean, pr.sd, tgt));
-  }
-}
+// Forecasts are observed in real time only; empty history stays empty.
 function drawProb(open, close, now) {
   const [g, W, H] = setupCanvas($("prob"));
   const L = 8, R = 74, T = 10, B = 10;
@@ -1340,11 +1416,15 @@ function drawProb(open, close, now) {
   if (pts.length > 1) {
     const path = () => {
       g.beginPath();
-      pts.forEach(([s, p], i) => { i ? g.lineTo(X(s), Y(p)) : g.moveTo(X(s), Y(p)); });
+      pts.forEach(([s, p], i) => { i && s-pts[i-1][0]<=2 ? g.lineTo(X(s), Y(p)) : g.moveTo(X(s), Y(p)); });
     };
     const area = () => {
-      path();
-      g.lineTo(X(pts[pts.length - 1][0]), Y(0.5)); g.lineTo(X(pts[0][0]), Y(0.5)); g.closePath();
+      g.beginPath();let first=0;
+      for(let i=0;i<pts.length;i++) {
+        const [s,p]=pts[i];if(i===0||s-pts[i-1][0]>2){first=i;g.moveTo(X(s),Y(.5));}
+        g.lineTo(X(s),Y(p));
+        if(i===pts.length-1||pts[i+1][0]-s>2){g.lineTo(X(s),Y(.5));g.lineTo(X(pts[first][0]),Y(.5));g.closePath();}
+      }
     };
     g.save(); g.beginPath(); g.rect(L, T, W - L - R, Y(0.5) - T); g.clip();
     area(); g.fillStyle = "rgba(47,209,124,0.22)"; g.fill(); g.restore();
@@ -1395,6 +1475,8 @@ function drawProb(open, close, now) {
 // placed. "Buy" has to clear the fee and 3c at the bad end of that band; "thin" clears only the
 // middle; "no" does not clear the middle.
 function chanceBand(now, close, x, tgt, vols, drifts) {
+  if(feed.brti) return globalThis.BTC15Model.band([...officialSeconds].map(([s,v])=>[s*1000,v]),now*1000,close,x,vols,tgt,feed.settle);
+
   let lo = 1, hi = 0;
   const adverse = vols.s * Math.sqrt(10);
   for (const k of [0.7, 1, 1.5]) for (const dr of drifts.length ? [drifts, []] : [[]]) for (const shift of [-adverse, 0, adverse]) {
@@ -1420,8 +1502,9 @@ function verdict(el, fair, worstFair, priceCents, waitReason = "WAIT: model unav
     const c = (priceCents + fee) / 100, f = (worstFair - c) / (1 - c);        // Kelly for a contract paying $1
     n = Math.floor(Math.min(0.02 * bankroll, 0.25 * f * bankroll) / c);
   }
+  let maxEntry=null;for(let c=99.9;c>=.1;c-=.1){const rounded=Math.round(c*10)/10;if(worstFair*100-rounded-feeCents(rounded/100)>=3){maxEntry=rounded;break;}}
   const sizeTxt = n >= 1 ? ` ${n} (about $${(n * (priceCents + fee) / 100).toFixed(2)})` + (avail && avail.price === priceCents ? (avail.size >= n ? ` · ${avail.size} offered` : ` · only ${avail.size} offered at this price`) : "") : "";
-  el.textContent = `${cents(edge)} a contract after fees · worst case ${cents(worst)} · ${call}` + sizeTxt;
+  el.textContent = `${cents(edge)} a contract after fees · worst case ${cents(worst)} · ${call}` + (maxEntry!=null?` · max entry ${maxEntry.toFixed(1)}¢`:" · no qualifying entry") + sizeTxt;
   el.className = "verdict " + (call === "buy" ? "good" : call === "no" ? "bad" : "meh");
   return {edge, worst, call, n};
 }
@@ -1453,7 +1536,7 @@ function keepRecord(mk, close, left, tgt, p, p2, km, vUp, vDown, upC, downC, typ
   if (tgt != null) r.tgt = tgt;
   // a checkpoint waits up to 5 s for a Kalshi quote, so the market is scored on the same moment
   if (p != null) for (const c of CHECKS) if (left <= c && left > c - 20 && !r.checks[c] && (km || left <= c - 5)) {
-    r.checks[c] = {p: +p.toFixed(3), p2: p2 != null ? +p2.toFixed(3) : null, ask: km ? km.ask : null, bid: km ? km.bid : null};
+    r.checks[c] = {model:feedLive()?globalThis.BTC15Model.VERSION:"proxy-experimental",at:Date.now(),p: +p.toFixed(3), p2: p2 != null ? +p2.toFixed(3) : null, ask: km ? km.ask : null, bid: km ? km.bid : null};
     saveRecord();
   }
   for (const [side, v, price] of [["Up", vUp, upC], ["Down", vDown, downC]]) {
@@ -1461,10 +1544,10 @@ function keepRecord(mk, close, left, tgt, p, p2, km, vUp, vDown, upC, downC, typ
     if (!isBuy) { buyHold[side] = 0; continue; }
     if (!buyHold[side]) buyHold[side] = Date.now();
     if (Date.now() - buyHold[side] >= 3000 && !r.buys.some(b => b.side === side)) {
-      const b = {side, price, p: +(side === "Up" ? p : 1 - p).toFixed(3), worst: +v.worst.toFixed(1), left: Math.round(left), typed: !!typed, n: v.n,
+      const b = {model:globalThis.BTC15Model.VERSION,feeVenue,side, price, p: +(side === "Up" ? p : 1 - p).toFixed(3), worst: +v.worst.toFixed(1), left: Math.round(left), typed: !!typed, n: v.n,
                  why: lastInputs};
       r.buys.push(b);
-      // the price you would actually have paid: Kalshi's ask one and three seconds after the call
+      // Diagnostic quote markouts only, not evidence an order would have filled.
       const later = key => { const m = kalshi.market; if (m && m.ticker === mk && m.bid && m.ask) { b[key] = side === "Up" ? Math.round(m.ask * 100) : Math.round((1 - m.bid) * 100); saveRecord(); } };
       setTimeout(() => later("after1"), 1000); setTimeout(() => later("after3"), 3000);
       saveRecord();
@@ -1526,7 +1609,7 @@ async function mergeRelayRecord() {
     for (const w of rows) {
       let local = record.windows.find(x => x.mk === w.mk);
       if (!local) { local = {mk: w.mk, close: w.close, tgt: w.tgt, checks: {}, buys: [], result: null, src: null, closeAvg: null, relay: true}; record.windows.push(local); changed++; }
-      for (const [c, k] of Object.entries(w.checks || {})) if (!local.checks[c] && k.p != null) { local.checks[c] = {p: k.p, p2: k.p2, ask: k.ask, bid: k.bid, relay: true}; changed++; }
+      for (const [c, k] of Object.entries(w.checks || {})) if (!local.checks[c] && k.p != null) { local.checks[c] = {model:k.model,at:k.at,p: k.p, p2: k.p2, ask: k.ask, bid: k.bid, relay: true}; changed++; }
       if (w.src === "kalshi" && local.src !== "kalshi") { local.result = w.result; local.src = "kalshi"; if (w.officialCloseAvg != null) local.officialCloseAvg = w.officialCloseAvg; changed++; }
       if (local.tgt == null && w.tgt != null) local.tgt = w.tgt;
     }
@@ -1544,7 +1627,7 @@ function scoreRecord() {
     let n = 0, sm = 0, sm2 = 0, n2 = 0, sk = 0;
     for (const w of settled) {
       const k = w.checks[c];
-      if (!k || !Number.isFinite(k.p) || k.relay || k.ask == null || k.bid == null) continue;
+      if (!k || !Number.isFinite(k.p) || k.model!==globalThis.BTC15Model.VERSION || k.relay || k.ask == null || k.bid == null) continue;
       const y = w.result === "yes" ? 1 : 0, mid = (k.ask + k.bid) / 2;
       n++; sm += (k.p - y) ** 2; sk += (mid - y) ** 2;
       if (k.p2 != null) { n2++; sm2 += (k.p2 - y) ** 2; }
@@ -1553,8 +1636,9 @@ function scoreRecord() {
   };
   const buys = [];
   for (const w of settled) for (const b of w.buys) {
+    if(b.model!==globalThis.BTC15Model.VERSION)continue;
     const y = w.result === "yes", won = b.side === "Up" ? y : !y, paid = b.after3 != null ? b.after3 : b.price;   // scored at the price 3 s after the call
-    buys.push(Object.assign({won, paid, pnl: (won ? 100 - paid : -paid) - feeCents(paid / 100), mk: w.mk, close: w.close}, b));
+    buys.push(Object.assign({won, paid, pnl: (won ? 100 - paid : -paid) - globalThis.BTC15Model.feesCents(paid,1,b.feeVenue||"robinhood"), mk: w.mk, close: w.close}, b));
   }
   return {settled: settled.length, total: record.windows.length, briers: Object.fromEntries(CHECKS.map(c => [c, brier(c)])), buys};
 }
@@ -1565,12 +1649,12 @@ function recordLine() {
   const at = s.briers[300] ? "5 min" : s.briers[120] ? "2 min" : s.briers[60] ? "1 min" : "10 min";
   const wins = s.buys.filter(x => x.won).length, avg = s.buys.length ? s.buys.reduce((a, x) => a + x.pnl, 0) / s.buys.length : 0;
   return `Record: ${s.settled} officially settled` + (b ? ` · at ${at} to go the model's Brier is ${b.model.toFixed(3)} vs the market's ${b.market.toFixed(3)} over ${b.n} (lower is better; ${b.model < b.market ? "model ahead" : "market ahead"})` : " · no checkpoint with a Kalshi price yet")
-    + (s.buys.length ? ` · buy calls ${s.buys.length}: ${wins} right, ${cents(avg)} a contract on average` : " · no buy calls yet");
+    + (s.buys.length ? ` · ${s.buys.length} hypothetical signals, ${wins} correct · see Agent for execution-based paper P&L` : " · no buy calls yet");
 }
 function recordText() {
   const s = scoreRecord(), lines = [];
   for (const c of CHECKS) { const b = s.briers[c]; lines.push(`${String(c / 60).padStart(2)} min to go: ` + (b ? `model ${b.model.toFixed(3)}` + (b.matched != null ? ` (variance-matched ${b.matched.toFixed(3)})` : "") + ` vs market ${b.market.toFixed(3)} over ${b.n} windows` : "nothing scored yet")); }
-  lines.push(`Brier score: mean squared error of the chance, 0 is perfect, 0.25 is a coin flip. Officially settled ${s.settled} of ${s.total} watched. Proxy results are excluded. Scores here use page forecasts only; the relay uses a separate driftless model and is not pooled with them. Buy calls are scored as one contract bought at Kalshi's price three seconds after the call and held to settlement, entry fees deducted.`);
+  lines.push(`Brier score: mean squared error of the chance, 0 is perfect, 0.25 is a coin flip. Officially settled ${s.settled} of ${s.total} watched. Proxy results are excluded. Scores here use current-version page forecasts only; the collector uses the same frozen model on its own observations. Old model versions are excluded. Signal markouts below are hypothetical diagnostics, not paper fills. Use the Agent report for delayed, depth-limited execution results.`);
   if (relayRecordNote) lines.push(relayRecordNote + ". The relay scores every window on its own, whether or not this page is open.");
   lines.push(`"Variance-matched" is the same model with its curve narrowed by 1.41 (the chance shown keeps that margin). Compare on future held-out windows before changing the displayed model; a small sample is not validation.`);
   lines.push("");
@@ -1648,7 +1732,7 @@ let lastP = null, lastMk = null, lastNeed = null;
 function render() {
   const nowMs = Date.now(), now = nowMs / 1000, [open, close] = bounds(now), [, mk] = tickers(close);
   spot = consensus();
-  if (feedLive()) tape.push({t: nowMs, p: feed.brti.v - basis});          // the official index, on the tape's footing
+  if (feedLive()) tape.push({t: nowMs, p: feed.brti.v - basis, brti:feed.brti.v});          // the official index, on the tape's footing
   else if (spot != null) {
     tape.push({t: nowMs, p: spot});
   }
@@ -1659,7 +1743,7 @@ function render() {
     while (leadTape.length && leadTape[0].t < (open - 120) * 1000) leadTape.shift();
   }
   $("leadLegend").hidden = lead == null;
-  if (mk !== lastMk) { lastMk = mk; pHist.clear(); for (const k of kalshi.hist.keys()) if (k < open - 60) kalshi.hist.delete(k); for (const t of Object.keys(books)) if (t < mk) delete books[t]; }
+  if (mk !== lastMk) { if(lastMk){$("rhUp").value="";$("rhDown").value="";} lastMk = mk; pHist.clear(); for (const k of kalshi.hist.keys()) if (k < open - 60) kalshi.hist.delete(k); for (const t of Object.keys(books)) if (t < mk) delete books[t]; }
 
   // header
   $("winLabel").textContent = ET_CLOCK.format(new Date(open * 1000)).replace(/ [AP]M/, "") + "–" + ET_CLOCK.format(new Date(close * 1000)) + " ET";
@@ -1698,7 +1782,7 @@ function render() {
   const vols = live ? indexVols() : sigmas(), f30 = flowSum(NOW_H, now);
   const lean = vols ? nowcast((f30.b + f30.pb - f30.s - f30.ps) / 1e6, lead != null && spot != null ? lead - spot : null, vols) : 0;
   if (x != null && tgt != null && vols && (!feed.brti || live)) {
-    const drifts = driftsOf(lean);
+    const drifts = []; // Frozen baseline; flow lean is research context only.
     projectionStatus = project(now, close, x, vols, drifts);
     if (projectionStatus.mean != null) {
       proj = projectionStatus;
@@ -1706,12 +1790,12 @@ function render() {
       band = chanceBand(now, close, x, tgt, vols, drifts);
       pHist.set(Math.floor(now), p);
     } else pHist.delete(Math.floor(now));
-    fillProbHistory(open, now, close, tgt, vols);
+    // Record only forecasts actually observed; never paint newer knowledge into the past.
   }
   // In the final minute: the average the remaining seconds must reach for Up to win.
   const need = proj && tgt != null && proj.observed && proj.m > 0 ? Math.ceil((((tgt - 0.005) * 60 - (proj.sum + (proj.official ? 0 : proj.observed * basis))) / proj.m) * 100 - 1e-7) / 100 : null;
   $("lvProj").textContent = proj ? money(proj.mean) : "–";
-  $("lvProjNote").textContent = proj ? (proj.observed ? (proj.official ? `${proj.observed}/60 s in Kalshi's own average` : `${proj.observed}/60 proxy samples, ${proj.reconstructed} reconstructed`) + (need != null ? ` · Up needs ≥ ${money(need)} over the last ${proj.m} s` : "") : (live ? "official index; forecast until the final minute" : "exchange-proxy forecast until the final minute")) + ` · ±${proj.sd.toFixed(0)} model scale · vol $${vols.s.toFixed(1)} now, $${vols.l.toFixed(1)}/√s over 15 min` + (lean ? ` · lean ${signed(lean)}` : "")
+  $("lvProjNote").textContent = proj ? (proj.observed ? (proj.official ? `${proj.observed}/60 s in Kalshi's own average` : `${proj.observed}/60 proxy samples, ${proj.reconstructed} reconstructed`) + (need != null ? ` · Up needs ≥ ${money(need)} over the last ${proj.m} s` : "") : (live ? "official index; forecast until the final minute" : "exchange-proxy forecast until the final minute")) + ` · ±${proj.sd.toFixed(0)} model scale · vol $${vols.s.toFixed(1)} now, $${vols.l.toFixed(1)}/√s over 15 min` + (lean ? ` · experimental lean ${signed(lean)} (not applied)` : "")
     : projectionStatus && projectionStatus.missing ? `INCOMPLETE: ${projectionStatus.missing} elapsed proxy samples missing` : vols == null ? "measuring volatility…" : "needs the target";
   lastNeed = need;
   lastInputs = proj ? {x: +x.toFixed(2), src: live ? "stream" : "exchanges", sd: +proj.sd.toFixed(1), lean: +lean.toFixed(1), known: proj.official ? "official" : proj.observed + "/60", tgt, vol: +vols.s.toFixed(2)} : null;
@@ -1727,7 +1811,7 @@ function render() {
     $("stNeed").textContent = need != null ? money(need) : "–"; $("stNeed").className = need != null && x != null ? (x >= need ? "up" : "down") : "";
     $("stNeedNote").textContent = need != null && x != null ? `over the last ${proj.m} s · spot ${signed(x - need)}` : "";
   }
-  $("avgLegend").textContent = offAvg ? "60-s average (official)" : "60-s average (exchange estimate)";
+  $("avgLegend").textContent = feed.brti ? "60-s BRTI average · gaps stay empty" : "60-s average (exchange estimate)";
   // the slim bar, once the hero has scrolled away
   const bar = $("bar2");
   if (bar.classList.contains("on")) {
@@ -1741,7 +1825,7 @@ function render() {
   $("probBar").classList.toggle("waiting", p == null);
   $("healthFeed").textContent = live ? `BRTI live · ${Math.max(0, (nowMs - feed.brti.t) / 1000).toFixed(1)}s old` : feed.brti ? "BRTI stale · signals paused" : "Exchange estimate · BRTI connecting";
   $("healthFeed").className = live ? "good" : "meh";
-  $("healthMode").textContent = p == null ? "Model: waiting for complete data" : "Model: uncalibrated estimate";
+  $("healthMode").textContent = p == null ? "Model: waiting for complete data" : globalThis.BTC15Model.VERSION + " · uncalibrated";
   if (p == null) {
     big.textContent = "WAIT"; big.className = "p none";
     $("pBar").style.width = "0%";
@@ -1772,7 +1856,7 @@ function render() {
   }
   lastP = p;
   $("ask").hidden = tgt != null && !askOpen;
-  const km = kalshi.market && kalshi.market.ticker === mk && nowMs - kalshi.market.at < 20000 && kalshi.market.bid && kalshi.market.ask ? kalshi.market : null;
+  const km = kalshi.market && kalshi.market.ticker === mk && nowMs - kalshi.market.at < 5000 && kalshi.market.bid && kalshi.market.ask ? kalshi.market : null;
   const upC = km ? Math.round(km.ask * 1000) / 10 : null, downC = km ? Math.round((1 - km.bid) * 1000) / 10 : null;
   $("rhUp").placeholder = upC != null ? String(upC) : "type";
   $("rhDown").placeholder = downC != null ? String(downC) : "type";
@@ -1782,10 +1866,10 @@ function render() {
   const typedUp = $("rhUp").value ? parseFloat($("rhUp").value) : null, typedDown = $("rhDown").value ? parseFloat($("rhDown").value) : null;
   const paused = tradingPaused();
   const waitReason = paused ? "WAIT: Kalshi has trading paused" + (exch.resume ? " (until about " + ET_CLOCK.format(new Date(exch.resume)) + ")" : "") : !exactTarget ? "WAIT: enter or retrieve the exact target" : "WAIT: incomplete data or model unavailable";
-  const signalP = exactTarget && !paused ? p : null;
+  const signalP = exactTarget && !paused && live ? p : null;
   const dep = depth(mk);
-  const vUp = verdict($("vUp"), signalP, band && band.lo, typedUp != null ? typedUp : upC, waitReason, dep && dep.up);
-  const vDown = verdict($("vDown"), signalP == null ? null : 1 - signalP, band && 1 - band.hi, typedDown != null ? typedDown : downC, waitReason, dep && dep.down);
+  const vUp = verdict($("vUp"), typedUp!=null&&nowMs-manualQuoteAt.Up>15000?null:signalP, band && band.lo, typedUp != null ? typedUp : upC, signalP!=null&&typedUp!=null&&nowMs-manualQuoteAt.Up>15000?"WAIT: refresh the entered quote (older than 15s)":waitReason, dep && dep.up);
+  const vDown = verdict($("vDown"), typedDown!=null&&nowMs-manualQuoteAt.Down>15000?null:signalP == null ? null : 1 - signalP, band && 1 - band.hi, typedDown != null ? typedDown : downC, signalP!=null&&typedDown!=null&&nowMs-manualQuoteAt.Down>15000?"WAIT: refresh the entered quote (older than 15s)":waitReason, dep && dep.down);
   decisionLine(signalP, band, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, left);
   keepRecord(mk, close, left, tgt, p, proj && tgt != null ? chanceMatched(proj.mean, proj.sd, tgt) : null, km, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, typedUp != null || typedDown != null);
 

@@ -1,5 +1,24 @@
 # BTC 15 Tape
 
+## Paper research release — October 12, 2026 (v3)
+
+This section supersedes the earlier release notes below.
+
+- The chart and server now embed the identical frozen `brti-driftless-v3` model from `shared-model.js`. Run `npm run sync:model` after editing it; `npm run check` rejects diverging copies. Official one-second BRTI drives volatility and settlement; faster BRTI can supply current spot. Flow lean remains experimental and is not applied to the official baseline.
+- Forecast history records only estimates actually observed at that time. It does not reconstruct earlier probabilities using later inputs. Missing observations leave gaps. The chart supports a close-up view and distance from target; its official rolling average requires all 60 observations.
+- Paper simulation records an intent, waits (default 1,000 ms), checks exchange/market status again, and uses fresh contract depth at arrival. It preserves the original limit, uses only 50% of displayed whole-contract quantity by default, and records partial fills and no fills. Stale depth, missed checkpoints, closed markets and unconfirmed status produce no fill. This is an assumption-based simulation, not measured execution performance or a queue-position model.
+- Fee scenarios distinguish direct Kalshi, Robinhood standard and Robinhood Gold. Estimates use conservative whole-cent rounding. Robinhood scenarios still use Kalshi depth, not Robinhood executable liquidity; the exchange charge is configurable. Actual account fees need reconciliation before any future exchange execution.
+- The Agent report separates model/execution versions and settings, and shows attempts, fills, settled net P&L, fees, drawdown and observed simulation delay. Mixed settings are not one validated strategy. Old page signals are hypothetical and excluded from the new paper report.
+- Only OFF and PAPER are enabled. Demo/live requests are rejected, including old persisted live settings. No portfolio order submission is reachable in this release. Deployment does not turn paper on.
+
+### Enable the paper trial
+
+The collector runs through Durable Object alarms and the cron watchdog with the existing index data entitlement. Set `FEED_TOKEN` securely as a Cloudflare Worker secret if it is not already configured. Open Agent, save that same token locally, review simulation settings and select PAPER. Do not commit tokens or private keys. A phone does not need to stay open. Missing credentials, entitlement or fresh data remain visible and suppress entries.
+
+Keep the model/settings frozen during a forward trial. Review results by whole contract window and day, including fees and missed fills; test slower execution and lower available depth before concluding an edge exists. There is no automatic promotion to live and no profit guarantee. More sophisticated depth signals should be added only if held-out results improve. This chat itself is not an always-running trading service.
+
+Validation: `npm test` (43 checks), `npm run check`, `npm run test:runtime`. Runtime tests cover authentication and SQLite-backed endpoints; deterministic tests cover settlement boundaries, missing ticks, delayed/partial/no fills, halt handling, fee scenarios and model-separated reports. These checks validate software behavior, not predictive accuracy.
+
 ## Reliability review — October 12, 2026
 
 This section supersedes older operational claims below. The collector now keeps the read-only BRTI stream connected without a phone, wakes at least every 30 seconds, and has a one-minute Cloudflare cron watchdog. It repairs overdue alarms, schedules recovery before network work, bounds upstream requests to 12 seconds, and retains up to 20 minutes of actual one-second observations. This creates ongoing Durable Object usage; check your Cloudflare usage rather than assuming it is free. Trading mode is not changed by these improvements.

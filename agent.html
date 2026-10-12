@@ -27,6 +27,8 @@ th { color: var(--dim); font-weight: 500; }
 .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
 input { flex: 1 1 140px; min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; color: var(--ink); font: 15px var(--mono); padding: 8px 10px; }
 button { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; font: 600 14px var(--display); letter-spacing: .06em; text-transform: uppercase; padding: 9px 12px; cursor: pointer; }
+button:disabled {opacity:.45;cursor:default;}
+select {background:var(--panel);color:var(--ink);min-height:44px;max-width:100%;border:1px solid var(--line);border-radius:6px;padding:8px;}
 button.on { border-color: var(--up); color: var(--up); }
 button.danger { border-color: var(--down); color: var(--down); }
 .notes { color: var(--dim); font-size: 12px; }
@@ -42,7 +44,7 @@ a { color: var(--ink); }
 
 <div class="tiles">
   <div class="tile"><span class="label">Today</span><b id="tToday">–</b><small class="notes" id="tTodayNote"></small></div>
-  <div class="tile"><span class="label">All time</span><b id="tAll">–</b><small class="notes" id="tAllNote"></small></div>
+  <div class="tile"><span class="label">Recent trades · all modes</span><b id="tAll">–</b><small class="notes" id="tAllNote"></small></div>
   <div class="tile"><span class="label">Stream</span><b id="tStream">–</b><small class="notes" id="tStreamNote"></small></div>
   <div class="tile"><span class="label">Limits</span><b id="tLimits">–</b><small class="notes" id="tLimitsNote"></small></div>
 </div>
@@ -50,13 +52,16 @@ a { color: var(--ink); }
 <section>
   <h2>Controls</h2>
   <div class="row">
-    <button id="bOff" type="button">Off</button><button id="bPaper" type="button">Paper</button><button id="bDemo" type="button">Demo</button><button id="bLive" type="button" class="danger">Live</button>
+    <button id="bOff" type="button">Off</button><button id="bPaper" type="button">Paper</button><button id="bDemo" type="button" disabled>Demo · deferred</button><button id="bLive" type="button" disabled>Live · deferred</button>
   </div>
   <div class="row"><input id="cap" inputmode="decimal" placeholder="Max $ per window"><input id="first" inputmode="numeric" placeholder="Start trading at minute (1–14)"><input id="bank" inputmode="decimal" placeholder="Bankroll $ for sizing"><button id="bSet" type="button">Apply</button></div>
   <div class="row"><input id="tok" inputmode="text" placeholder="Stream token (FEED_TOKEN on the Worker)"><button id="bTok" type="button">Save token</button></div>
+  <div class="row"><label>Simulated delay (ms) <input id="delay" inputmode="numeric" placeholder="1000"></label><label>Available depth fraction <input id="depthFraction" inputmode="decimal" placeholder="0.5"></label></div>
+  <div class="row"><label for="paperVenue">Paper fee scenario</label><select id="paperVenue"><option value="kalshi">Direct Kalshi · conservative fees</option><option value="robinhood">Robinhood costs · Kalshi book proxy</option><option value="robinhood-gold">Robinhood Gold costs · Kalshi book proxy</option></select><button id="bPaperSettings" type="button">Apply paper settings</button></div>
   <div class="notes" id="ctlNote"></div>
 </section>
 
+<section><h2>Paper research · current model only</h2><pre id="paperReport">Waiting for status…</pre><p class="notes">Forward simulation, not actual fills. No automatic promotion to real trading. Results from older models are excluded below.</p></section>
 <section>
   <h2>Trades</h2>
   <table id="trades"><thead><tr><th>When</th><th>Mode</th><th>Side · price</th><th>Filled</th><th>Edge · chance</th><th>Result</th></tr></thead><tbody></tbody></table>
@@ -82,7 +87,7 @@ a { color: var(--ink); }
 <section>
   <div class="notes">
     <p>The agent runs in the relay when enabled: from the start minute you set (default minute 5) to 15 seconds before each close, every 5 seconds, on Kalshi's own index and book. Its uncalibrated model considers a trade when a side clears 3¢ after fees at the bad end of the model's band and the call has held for two looks: one limit order at the ask, immediate-or-cancel, a quarter Kelly, capped per window. One trade a window, 12 a day, nothing after the daily loss stop, nothing while Kalshi has trading paused.</p>
-    <p><b>Paper</b> decides and scores without orders. <b>Demo</b> trades Kalshi's demo exchange (its own key pair on the relay). <b>Live</b> trades your account. Controls need the stream token; Live asks you to type LIVE.</p>
+    <p><b>Paper</b> queues a simulated IOC order, waits for the configured delay, then checks fresh depth at or below the original limit. It can fill partially or not at all. Default: 1 second minimum delay, 50% of displayed quantity, conservative whole-cent fees. Demo and live execution are deferred pending a separate integration and performance review. Controls require the stream token.</p>
   </div>
 </section>
 
@@ -110,6 +115,8 @@ async function refresh() {
     for (const [id, m] of [["bOff", "off"], ["bPaper", "paper"], ["bDemo", "demo"], ["bLive", "live"]]) $(id).classList.toggle("on", cfg.mode === m);
     $("line").textContent = (st.tokenSet ? "Controls unlocked." : "Controls locked: set FEED_TOKEN on the Worker (Settings → Runtime variables and secrets), then save the same token below.")
       + (cfg.mode === "demo" && !st.hasDemoKey ? " No demo key on the relay." : "");
+    const pr=st.paperReport;
+    $("paperReport").textContent=pr?`${pr.model} · ${pr.executionModel}\n${pr.attempts} attempts · ${pr.filled} filled · ${pr.noFill} no-fill · ${pr.settled} settled\nNet ${money(pr.pnlCents)} · fees $${(pr.feesCents/100).toFixed(2)} · maximum drawdown $${(pr.maxDrawdownCents/100).toFixed(2)}\nWin rate ${pr.winRate==null?"—":Math.round(pr.winRate*100)+"%"} · average simulated delay ${pr.meanLatencyMs==null?"—":(pr.meanLatencyMs/1000).toFixed(2)+"s"}\nSettings now: ${cfg.paperVenue} · ${(cfg.paperDelayMs/1000).toFixed(2)}s delay · ${Math.round(cfg.paperDepthFraction*100)}% of displayed depth\n${pr.reason}`+(pr.scenarios?.length?"\nScenarios (not pooled for validation):\n"+pr.scenarios.map(g=>`${g.settings.venue} · ${g.settings.delay}ms · ${g.settings.depth*100}% depth · ${g.settled} settled · ${money(g.pnlCents)}`).join("\n"):""):"No paper report available";
     const t = st.today;
     $("tToday").textContent = t ? money(t.pnlCents) : "–"; $("tToday").className = t ? (t.pnlCents > 0 ? "good" : t.pnlCents < 0 ? "bad" : "") : "";
     $("tTodayNote").textContent = t ? `${t.trades} trade${t.trades === 1 ? "" : "s"} on ${t.day}` : "no trades yet";
@@ -124,7 +131,7 @@ async function refresh() {
     const tb = $("trades").querySelector("tbody"); tb.innerHTML = "";
     for (const x of all.slice(-40).reverse()) {
       const tr = document.createElement("tr");
-      const res = x.pnlCents != null ? `<span class="${x.pnlCents > 0 ? "good" : x.pnlCents < 0 ? "bad" : "meh"}">${money(x.pnlCents)}</span>` : x.result ? x.result : (x.status || "open");
+      const res = x.pnlCents != null ? `<span class="${x.pnlCents > 0 ? "good" : x.pnlCents < 0 ? "bad" : "meh"}">${money(x.pnlCents)}</span>` : x.result ? x.result : (x.reason || x.status || "open");
       tr.innerHTML = `<td>${ET.format(new Date(x.at))}<br><span class="notes">${mmss(x.left)} left</span></td><td>${x.mode}</td><td>${x.side} ${x.price}¢<br><span class="notes">${x.offered} offered</span></td><td>${x.filled}/${x.n}${x.cost ? `<br><span class="notes">$${(x.cost / 100).toFixed(2)}</span>` : ""}</td><td>${cents(x.edge)}<br><span class="notes">${pct(x.p)}% (${pct(x.lo)}–${pct(x.hi)})${x.official ? " · official avg" : ""}</span></td><td>${res}</td>`;
       tb.appendChild(tr);
     }
@@ -149,8 +156,9 @@ async function set(body) {
 }
 $("bOff").addEventListener("click", () => set({mode: "off"}));
 $("bPaper").addEventListener("click", () => set({mode: "paper"}));
-$("bDemo").addEventListener("click", () => set({mode: "demo"}));
-$("bLive").addEventListener("click", () => { const c = prompt("Live sends real orders with real money, around the clock, within the limits shown. Type LIVE to confirm."); if (c === "LIVE") set({mode: "live", confirm: "LIVE"}); });
+
+
+$("bPaperSettings").addEventListener("click",()=>{const b={paperVenue:$("paperVenue").value};if($("delay").value)b.paperDelayMs=Number($("delay").value);if($("depthFraction").value)b.paperDepthFraction=Number($("depthFraction").value);set(b);});
 $("bSet").addEventListener("click", () => {
   const b = {};
   const cap = parseFloat($("cap").value), first = parseFloat($("first").value), bank = parseFloat($("bank").value);

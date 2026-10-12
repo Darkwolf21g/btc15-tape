@@ -18,7 +18,7 @@ const WS_UPSTREAM = "https://external-api-ws.kalshi.com/trade-api/ws/v2";   // h
 const ALLOWED = [/^\/markets\/KXBTC15M-[A-Z0-9-]+$/, /^\/live_data\/events\/KXBTC15M-[A-Z0-9]+$/, /^\/exchange\/status$/];
 const CORS = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Cache-Control": "no-store"};
 const WINDOW = 900;
-const MODEL_VERSION = "brti-driftless-v2";
+const MODEL_VERSION = "brti-driftless-v3";
 // Bound network waits so a slow upstream cannot strand the alarm chain.
 const timedFetch = (url, options = {}) => fetch(url, {...options, signal: AbortSignal.timeout(12000)});
 
@@ -142,9 +142,15 @@ async function signHandshake(pem, message) {
 
 // ---------------------------------------------------------------- the collector's model (the page's maths, on REST data)
 const SETTLE = 60, VOL_TAU = 180, CHECKS = [600, 300, 120, 60];
-const tailCdf = z => 0.5 + z * (z * z + 6) / (2 * Math.pow(z * z + 4, 1.5));
-function feeCents(p) { return 100 * (Math.min(0.01, 0.10 * p * (1 - p)) + 0.01); }
-// ticks: [[ms, value]] sorted; volatility from 5-s changes over the last 2 and 15 minutes
+// BEGIN SHARED BTC15 MODEL
+// Canonical model. scripts/sync-model.cjs embeds this exact source in Worker and page.
+// Frozen baseline: no fitted flow lean; all parameters recorded under VERSION.
+(() => {
+const VERSION = "brti-driftless-v3";
+const EXECUTION_VERSION = "paper-delayed-depth-v1";
+const SETTLE = 60, VOL_TAU = 180;
+const tailCdf = z => 0.5 + z * (z*z+6) / (2*Math.pow(z*z+4,1.5));
+const chance = (mean, sd, target) => tailCdf((mean - (target - .005)) / sd);
 function volsFrom(ticks, nowMs) {
   const perSec = new Map();
   for (const [ms, v] of ticks) perSec.set(Math.floor(ms / 1000), v);
@@ -172,8 +178,55 @@ function projectFrom(ticks, nowMs, closeS, x, vols, aggregate = null) {
   const m = ahead.length, vs = vols.s ** 2, vl = vols.l ** 2;
   let variance = 0, previous = 0;
   for (let j = 0; j < m; j++) { const u = ahead[j], c = m - j; variance += (vl * (u - previous) + (vs - vl) * VOL_TAU * (Math.exp(-previous / VOL_TAU) - Math.exp(-u / VOL_TAU))) * c * c; previous = u; }
-  return {mean: (known + m * x) / SETTLE, sd: Math.sqrt(variance / SETTLE ** 2 + 0.09), observed, missing: 0, m, official: observed > 0};
+  return {sum: known, reconstructed: 0, mean: (known + m * x) / SETTLE, sd: Math.sqrt(variance / SETTLE ** 2 + 0.09), observed, missing: 0, m, official: observed > 0};
 }
+
+function band(ticks, nowMs, close, x, vols, target, aggregate=null) {
+ let lo=1, hi=0; const adverse=vols.s*Math.sqrt(10);
+ for(const k of [.7,1,1.5]) for(const shift of [-adverse,0,adverse]) {
+  const pr=projectFrom(ticks,nowMs,close,x+shift,{s:vols.s*k,l:vols.l*k},aggregate);
+  if(pr.mean==null)return null;
+  const p=chance(pr.mean,pr.sd,target);lo=Math.min(lo,p);hi=Math.max(hi,p);
+ }
+ return {lo,hi};
+}
+// Conservative whole-cent rounding for simulation. Actual fees reconcile from fills later.
+// Robinhood exchange fee is an explicit assumption, not a fetched executable fee quote.
+function feesCents(priceCents,n=1,venue="kalshi",exchangeFeeCents=1) {
+ if(!(priceCents>0&&priceCents<100&&n>0))return 0;
+ const p=priceCents/100;
+ const commission=venue==="kalshi" ? .07*n*p*(1-p)*100 : Math.min(n,(venue==="robinhood-gold"?.05:.10)*n*p*(1-p)*100);
+ return Math.ceil(commission-1e-9)+(venue==="kalshi"?0:Math.ceil(n*exchangeFeeCents-1e-9));
+}
+function asks(book,side) {
+ const levels=side==="Up"?book?.no:book?.yes;
+ if(!levels)return [];
+ return [...levels].filter(([p,n])=>Number.isFinite(p)&&p>0&&p<1&&Number.isFinite(n)&&n>0)
+  .map(([p,n])=>({price:Math.round((1-p)*10000)/100,size:Math.floor(n)})).sort((a,b)=>a.price-b.price);
+}
+function paperFill(intent,book,nowMs,cfg) {
+ const empty=reason=>({filled:0,cost:0,feesCents:0,status:"paper-no-fill",reason,levels:[],filledAt:nowMs,latencyMs:nowMs-intent.at});
+ if(nowMs<intent.readyAt)return null;
+ if(nowMs>=intent.close*1000)return empty("contract closed before simulated arrival");
+ if(nowMs-intent.readyAt>10000)return empty("execution checkpoint missed");
+ if(!book||nowMs-book.at>cfg.paperBookMaxAgeMs||book.at>nowMs)return empty("no fresh depth at simulated arrival");
+ let remaining=intent.n, cost=0, fees=0;const levels=[];
+ for(const level of asks(book,intent.side)) {
+  if(level.price>intent.price+1e-8)break;
+  const n=Math.min(remaining,Math.floor(level.size*cfg.paperDepthFraction));
+  if(n<=0)continue;
+  levels.push({price:level.price,n});cost+=n*level.price;
+  fees+=feesCents(level.price,n,cfg.paperVenue,cfg.paperExchangeFeeCents);remaining-=n;if(!remaining)break;
+ }
+ const filled=intent.n-remaining;
+ if(!filled)return empty("no quantity at limit after depth haircut");
+ return {filled,cost:Math.round(cost*100)/100,feesCents:fees,levels,status:remaining?"paper-partial":"paper-filled",reason:remaining?"available depth below requested size":"filled at arrival book",filledAt:nowMs,latencyMs:nowMs-intent.at};
+}
+globalThis.BTC15Model=Object.freeze({VERSION,EXECUTION_VERSION,tailCdf,chance,volsFrom,projectFrom,band,feesCents,asks,paperFill});
+})();
+// END SHARED BTC15 MODEL
+const {tailCdf,volsFrom,projectFrom} = globalThis.BTC15Model;
+function feeCents(p) { return globalThis.BTC15Model.feesCents(p*100); }
 async function signedGet(env, apiPath, query) {
   const stamp = String(Date.now()), sig = await signHandshake(env.KALSHI_PRIVATE_KEY, stamp + "GET" + apiPath);
   const r = await timedFetch("https://external-api.kalshi.com" + apiPath + (query || ""), {headers: {"Accept": "application/json", "KALSHI-ACCESS-KEY": env.KALSHI_KEY_ID.trim(), "KALSHI-ACCESS-SIGNATURE": sig, "KALSHI-ACCESS-TIMESTAMP": stamp}});
@@ -199,7 +252,7 @@ async function notify(env, title, text) {           // a push to the ntfy app, i
   try { await timedFetch("https://ntfy.sh/" + encodeURIComponent(env.NTFY_TOPIC.trim()), {method: "POST", body: text, headers: {"Title": title, "Tags": "chart_with_upwards_trend"}}); } catch (e) {}
 }
 const etDay = ms => new Intl.DateTimeFormat("en-CA", {timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit"}).format(new Date(ms));
-const tailFromBand = (mean, sd, tgt) => tailCdf((mean - (tgt - 0.005)) / sd);
+const tailFromBand = globalThis.BTC15Model.chance;
 function parseTicks(d) {                        // the CF Benchmarks history payload, tolerant of its shape
   const pl = d && d.data ? d.data.payload : d && d.payload;
   const rows = Array.isArray(pl) ? pl : pl && (pl.values || pl.data || pl.items);
@@ -227,6 +280,17 @@ function calibrationReport(rows) {
     scores[c] = n ? {n, wider: wider / n, matched: matched / n, market: market / n} : null;
   }
   return {model: MODEL_VERSION, settledWindows: windows.length, holdoutWindows: holdout.length, split: "newest third by window; descriptive only", scores, autoPromotion: false};
+}
+
+function paperReport(windows) {
+ const trades=windows.flatMap(w=>(w.trades||[]).filter(t=>t.mode==="paper"&&t.model===MODEL_VERSION&&t.executionModel===globalThis.BTC15Model.EXECUTION_VERSION).map(t=>({...t,close:w.close,settled:!!w.settled}))).sort((a,b)=>a.close-b.close);
+ const filled=trades.filter(t=>t.filled>0), settled=filled.filter(t=>t.settled&&Number.isFinite(t.pnlCents));
+ let equity=0,peak=0,drawdown=0;
+ for(const t of settled){equity+=t.pnlCents;peak=Math.max(peak,equity);drawdown=Math.max(drawdown,peak-equity);}
+ const groups={};
+ for(const t of trades){const cfg=t.paperSettings||{};const key=JSON.stringify({venue:cfg.paperVenue,delay:cfg.paperDelayMs,depth:cfg.paperDepthFraction,edge:cfg.minEdge,cap:cfg.perWindowCents,bankroll:cfg.bankrollCents,first:cfg.firstSeconds,last:cfg.lastSeconds,bookAge:cfg.paperBookMaxAgeMs,exchangeFee:cfg.paperExchangeFeeCents});
+  const g=groups[key]||(groups[key]={settings:JSON.parse(key),attempts:0,settled:0,pnlCents:0});g.attempts++;if(t.settled&&t.filled>0&&Number.isFinite(t.pnlCents)){g.settled++;g.pnlCents+=t.pnlCents;}}
+ return {scenarios:Object.values(groups),model:MODEL_VERSION,executionModel:globalThis.BTC15Model.EXECUTION_VERSION,attempts:trades.length,filled:filled.length,noFill:trades.length-filled.length,settled:settled.length,winRate:settled.length?settled.filter(t=>t.pnlCents>0).length/settled.length:null,pnlCents:equity,feesCents:filled.reduce((a,t)=>a+(t.feesCents||0),0),maxDrawdownCents:drawdown,meanLatencyMs:trades.length?trades.reduce((a,t)=>a+(t.latencyMs||0),0)/trades.length:null,readyForLive:false,reason:"Research only: forward results must be reviewed; no automatic promotion"};
 }
 
 // ---------------------------------------------------------------- the Durable Object
@@ -262,7 +326,7 @@ export class KalshiFeed {
       const cfg = await this.tradeConfig(), log = await this.tradeLog(), day = (await this.state.storage.get("trade.day")) || null;
       const all = await this.state.storage.list({prefix: "t:"}), windows = [...all.values()].sort((a, b) => a.close - b.close).slice(-60);
       return new Response(JSON.stringify({config: cfg, today: day, hasDemoKey: !!(this.env.KALSHI_DEMO_KEY_ID && this.env.KALSHI_DEMO_PRIVATE_KEY), tokenSet: !!this.env.FEED_TOKEN,
-        stream: this.upState, ticks: this.ticks.length, windows, decisions: log.decisions.slice(-30), errors: log.errors.slice(-10)}), {headers: {...CORS, "Content-Type": "application/json"}});
+        stream: this.upState, ticks: this.ticks.length, windows, decisions: log.decisions.slice(-30), errors: log.errors.slice(-10), researchOnly:true, paperReport:paperReport([...all.values()])}), {headers: {...CORS, "Content-Type": "application/json"}});
     }
     if (url.pathname === "/trade/config") {
       if (request.method !== "POST") return new Response("POST", {status: 405, headers: CORS});
@@ -270,17 +334,18 @@ export class KalshiFeed {
       let body; try { body = await request.json(); } catch (e) { return new Response("json", {status: 400, headers: CORS}); }
       const cfg = await this.tradeConfig();
       if (body.mode != null) {
-        if (!["off", "paper", "demo", "live"].includes(body.mode)) return new Response("mode", {status: 400, headers: CORS});
-        if (body.mode === "live" && body.confirm !== "LIVE") return new Response("live needs confirm: LIVE", {status: 400, headers: CORS});
-        if (body.mode === "demo" && !(this.env.KALSHI_DEMO_KEY_ID && this.env.KALSHI_DEMO_PRIVATE_KEY)) return new Response("demo needs KALSHI_DEMO_KEY_ID and KALSHI_DEMO_PRIVATE_KEY", {status: 400, headers: CORS});
+        if (!["off", "paper"].includes(body.mode)) return new Response("This research release supports off and paper only; exchange execution is not enabled", {status: 400, headers: CORS});
         cfg.mode = body.mode;
       }
-      for (const k of ["perWindowCents", "dailyLossStopCents", "maxTradesPerDay", "minEdge", "bankrollCents", "firstSeconds", "lastSeconds"]) if (body[k] != null && Number.isFinite(+body[k])) cfg[k] = +body[k];
-      const ranges = {perWindowCents: [100, 5000], dailyLossStopCents: [100, 100000], maxTradesPerDay: [1, 96], minEdge: [3, 99], bankrollCents: [1000, 100000000], firstSeconds: [60, 840], lastSeconds: [15, 60]};
-      for (const [k, [lo, hi]] of Object.entries(ranges)) if (!Number.isFinite(cfg[k]) || cfg[k] < lo || cfg[k] > hi || (k !== "minEdge" && !Number.isInteger(cfg[k]))) return new Response("invalid " + k, {status: 400, headers: CORS});
+      for (const k of ["paperDelayMs", "paperBookMaxAgeMs", "paperDepthFraction", "paperExchangeFeeCents", "perWindowCents", "dailyLossStopCents", "maxTradesPerDay", "minEdge", "bankrollCents", "firstSeconds", "lastSeconds"]) if (body[k] != null) { if (typeof body[k] !== "number" || !Number.isFinite(body[k])) return new Response("invalid " + k, {status:400,headers:CORS}); cfg[k] = body[k]; }
+      if(body.paperVenue!=null) { if(!["kalshi","robinhood","robinhood-gold"].includes(body.paperVenue))return new Response("invalid paperVenue",{status:400,headers:CORS});cfg.paperVenue=body.paperVenue; }
+      const ranges = {paperDelayMs:[250,5000],paperBookMaxAgeMs:[250,3000],paperDepthFraction:[0.1,1],paperExchangeFeeCents:[0,5],perWindowCents: [100, 5000], dailyLossStopCents: [100, 100000], maxTradesPerDay: [1, 96], minEdge: [3, 99], bankrollCents: [1000, 100000000], firstSeconds: [60, 840], lastSeconds: [15, 60]};
+      for (const [k, [lo, hi]] of Object.entries(ranges)) if (!Number.isFinite(cfg[k]) || cfg[k] < lo || cfg[k] > hi || (!["minEdge","paperDepthFraction","paperExchangeFeeCents"].includes(k) && !Number.isInteger(cfg[k]))) return new Response("invalid " + k, {status: 400, headers: CORS});
       cfg.perWindowCents = Math.min(cfg.perWindowCents, 5000);                 // a hard ceiling of $50 a window, whatever is asked
       await this.state.storage.put("trade.cfg", cfg);
-      await this.state.storage.setAlarm(this.nextEvent(Date.now(), cfg.mode !== "off", cfg));
+      const pending=await this.state.storage.list({prefix:"t:"});
+        const due=[...pending.values()].filter(v=>v.pendingPaper).map(v=>Math.max(Date.now()+100,v.pendingPaper.readyAt));
+        await this.state.storage.setAlarm(Math.min(this.nextEvent(Date.now(), cfg.mode === "paper", cfg),...due));
       if (cfg.mode !== "off") this.ensureUpstream();
       return new Response(JSON.stringify(cfg), {headers: {...CORS, "Content-Type": "application/json"}});
     }
@@ -422,14 +487,16 @@ export class KalshiFeed {
       const pending = [...rows.values()].filter(w => w.close < now - 60 && w.src !== "kalshi").slice(-4);
       for (const w of pending) await this.settle(w.mk, w.close);
       const prevClose = close - WINDOW;
-      if (now - prevClose > 60) await this.settleTrades(marketTicker(prevClose), prevClose);
+      const trades=await this.state.storage.list({prefix:"t:"});
+      for(const tradeWindow of [...trades.values()].filter(v=>v.close<now-60&&!v.settled&&v.trades?.length).slice(-8)) await this.settleTrades(tradeWindow.mk,tradeWindow.close);
       log.lastOk = nowMs;
       log.indexAgeMs = this.ticks.length ? nowMs - this.ticks[this.ticks.length - 1][0] : null;
       const cfg = await this.tradeConfig();
-      if (cfg.mode !== "off") await this.agentTick(Date.now());
+      await this.processPaper(Date.now(),cfg);
+      if (cfg.mode === "paper") await this.agentTick(Date.now());
       // Persist bounded read-only history so a cold object can warm up without a phone.
 
-      if (rows.size > 500) for (const [key] of [...rows].slice(0, rows.size - 500)) await this.state.storage.delete(key);
+      if (rows.size > 5000) for (const [key] of [...rows].slice(0, rows.size - 5000)) await this.state.storage.delete(key);
     } catch (e) {
       log.errors = (log.errors || []).concat([{at: Date.now(), error: String(e.message || e).slice(0, 200)}]).slice(-10);
     } finally {
@@ -437,7 +504,9 @@ export class KalshiFeed {
         await this.state.storage.put("collector", log);
       } finally {
         const cfg = await this.tradeConfig().catch(() => ({mode: "off"}));
-        await this.state.storage.setAlarm(this.nextEvent(Date.now(), cfg.mode !== "off", cfg));
+        const pending=await this.state.storage.list({prefix:"t:"});
+        const due=[...pending.values()].filter(v=>v.pendingPaper).map(v=>Math.max(Date.now()+100,v.pendingPaper.readyAt));
+        await this.state.storage.setAlarm(Math.min(this.nextEvent(Date.now(), cfg.mode === "paper", cfg),...due));
         this.alarmBusy = false;
       }
     }
@@ -449,23 +518,17 @@ export class KalshiFeed {
     // not leak into a forecast recorded for an earlier time.
     const liveTicks = this.ticks.filter(t => t[0] <= nowMs), seconds = [...this.indexSeconds].filter(t => t[0] <= nowMs);
     const aggregate = this.settleAvg && {...this.settleAvg};
+    const book=this.books[mk],tick=this.lastTicker[mk];
+    const offers=book&&nowMs-book.at<1500?{ask:globalThis.BTC15Model.asks(book,"Up")[0]?.price/100,bid:1-globalThis.BTC15Model.asks(book,"Down")[0]?.price/100,at:book.at}:tick&&nowMs-tick.at<5000?{...tick}:null;
     let ticks = liveTicks;
-    if (!volsFrom(ticks, nowMs)) {
-      const hour = Math.floor(nowMs / 3600000) * 3600000;
-      try {
-        const hist = await signedGet(this.env, "/trade-api/v2/cfbenchmarks/history/values", "?id=BRTI&timespan=HOUR&timestamp=" + new Date(hour).toISOString());
-        const merged = new Map(parseTicks(hist));
-        for (const [ms, v] of liveTicks) merged.set(ms, v);
-        ticks = [...merged].filter(t => t[0] <= nowMs).sort((a, b) => a[0] - b[0]);
-      } catch (e) { /* Record a missing forecast below instead of losing the checkpoint. */ }
-    }
+    ticks = seconds; // Immutable one-Hz input snapshot; no retrospective forecast reconstruction.
     const mkt = await signedGet(this.env, "/trade-api/v2/markets/" + mk);
     const m = mkt && mkt.market;
     if (m && +m.floor_strike > 0) w.tgt = +m.floor_strike;
-    const ask = m && +m.yes_ask_dollars > 0 ? +m.yes_ask_dollars : null, bid = m && +m.yes_bid_dollars > 0 ? +m.yes_bid_dollars : null;
-    const vols = volsFrom(ticks, nowMs), x = ticks.length ? ticks[ticks.length - 1][1] : null;
-    const ageMs = ticks.length ? nowMs - ticks[ticks.length - 1][0] : null;
-    const entry = {ask, bid, x, at: nowMs, ticks: ticks.length, ageMs, model: MODEL_VERSION};
+    const ask=offers&&Number.isFinite(offers.ask)?offers.ask:null,bid=offers&&Number.isFinite(offers.bid)?offers.bid:null;
+    const vols = volsFrom(ticks, nowMs), x = liveTicks.length ? liveTicks[liveTicks.length - 1][1] : null;
+    const ageMs = liveTicks.length ? nowMs - liveTicks[liveTicks.length - 1][0] : null;
+    const entry = {ask, bid, marketAt:offers?.at??null, x, at: nowMs, ticks: ticks.length, ageMs, model: MODEL_VERSION};
     const pr = vols && x != null ? projectFrom(seconds, nowMs, close, x, vols, aggregate) : null;
     if (vols && x != null && w.tgt != null && ageMs >= 0 && ageMs < 3000 && pr.mean != null) {
       entry.p = +tailCdf((pr.mean - (w.tgt - 0.005)) / pr.sd).toFixed(3);
@@ -499,26 +562,29 @@ export class KalshiFeed {
 
   // ---- the execution agent
   // Runs from 10 minutes before each close to 15 seconds before it, every 5 seconds, on the stream.
-  // Modes: off (default), paper (decides, logs, scores; no orders), demo (Kalshi's demo exchange,
-  // its own key pair), live. Every order is a limit at the ask, immediate-or-cancel, so nothing rests.
+  // Research release: off or paper. No exchange order submission path is enabled.
   async tradeConfig() {
     const c = (await this.state.storage.get("trade.cfg")) || {};
-    return Object.assign({mode: "off", perWindowCents: 1000, dailyLossStopCents: 3000, maxTradesPerDay: 12, minEdge: 3, bankrollCents: 50000, firstSeconds: 300, lastSeconds: 15}, c);
+    const cfg=Object.assign({paperDelayMs:1000,paperBookMaxAgeMs:1500,paperDepthFraction:0.5,paperVenue:"kalshi",paperExchangeFeeCents:1,mode: "off", perWindowCents: 1000, dailyLossStopCents: 3000, maxTradesPerDay: 12, minEdge: 3, bankrollCents: 50000, firstSeconds: 300, lastSeconds: 15}, c);
+    if(!["off","paper"].includes(cfg.mode))cfg.mode="off";
+    return cfg;
   }
   async tradeLog() { return (await this.state.storage.get("trade.log")) || {decisions: [], errors: []}; }
   async agentTick(nowMs) {
     const cfg = await this.tradeConfig();
-    if (cfg.mode === "off" || this.agentBusy) return;
+    if (cfg.mode !== "paper" || this.agentBusy) return; // Exchange execution is deferred until a separately reviewed release.
     this.agentBusy = true;
-    const log = await this.tradeLog();
+    let log={decisions:[],errors:[]};
     try {
+      log = await this.tradeLog();
+      if(await this.processPaper(nowMs,cfg))return;
       const now = nowMs / 1000, close = (Math.floor(now / WINDOW) + 1) * WINDOW, left = close - now, mk = marketTicker(close);
       if (left > WINDOW - cfg.firstSeconds || left < cfg.lastSeconds) return;
       if (!this.up) { await this.ensureUpstream(); return; }                    // the stream feeds the model; try again next tick
       const key = "t:" + mk, w = (await this.state.storage.get(key)) || {mk, close, trades: [], decided: 0};
-      if (w.trades.length || w.pendingOrder) return;                                              // one trade per window
+      if (w.trades.length || w.pendingOrder || w.pendingPaper) return;                                              // one trade per window
       const attempts = await this.state.storage.list({prefix: "t:"});
-      if ([...attempts.values()].some(v => v.pendingOrder)) return; // unresolved execution pauses all further orders
+      if ([...attempts.values()].some(v => v.pendingOrder || v.pendingPaper)) return; // unresolved execution pauses all further orders
       const day = etDay(nowMs), today = (await this.state.storage.get("trade.day")) || {day, trades: 0, pnlCents: 0};
       if (today.day !== day) { today.day = day; today.trades = 0; today.pnlCents = 0; }
       if (today.trades >= cfg.maxTradesPerDay || today.pnlCents <= -cfg.dailyLossStopCents) return;
@@ -526,22 +592,19 @@ export class KalshiFeed {
       if (!last || nowMs - last[0] > 3000 || this.ticks.length < 200) return;
       let tgt = w.tgt;
       if (!tgt) { const d = await signedGet(this.env, "/trade-api/v2/markets/" + mk); tgt = d && d.market && +d.market.floor_strike > 0 ? +d.market.floor_strike : null; if (!tgt) return; w.tgt = tgt; }
-      const vols = volsFrom(this.ticks, nowMs); if (!vols) return;
+      const vols = volsFrom([...this.indexSeconds], nowMs); if (!vols) return;
       const x = last[1];
       const projectWith = (xx, vv) => projectFrom([...this.indexSeconds], nowMs, close, xx, vv, this.settleAvg);
       const base = projectWith(x, vols);
       if (base.mean == null) return;
       const p = tailFromBand(base.mean, base.sd, tgt);
-      let lo = 1, hi = 0; const adverse = vols.s * Math.sqrt(10);
-      for (const k of [0.7, 1, 1.5]) for (const shift of [-adverse, 0, adverse]) { const pr = projectWith(x + shift, {s: vols.s * k, l: vols.l * k}); const q = tailFromBand(pr.mean, pr.sd, tgt); if (q < lo) lo = q; if (q > hi) hi = q; }
-      const b0 = this.books[mk], b = b0 && nowMs - b0.at < 15000 ? b0 : null, best = m => { let pp = null, q = 0; for (const [px, qty] of m) if (pp == null || px > pp) { pp = px; q = qty; } return pp == null ? null : {price: Math.round((1 - pp) * 100), size: Math.floor(q)}; };
-      const offer = {Up: b ? best(b.no) : null, Down: b ? best(b.yes) : null};
-      const tk0 = this.lastTicker[mk], tk = tk0 && nowMs - tk0.at < 5000 ? tk0 : null;
-      if (!offer.Up && tk && tk.ask) offer.Up = {price: Math.round(tk.ask * 100), size: 1};
-      if (!offer.Down && tk && tk.bid) offer.Down = {price: Math.round((1 - tk.bid) * 100), size: 1};
+      const {lo,hi}=globalThis.BTC15Model.band([...this.indexSeconds],nowMs,close,x,vols,tgt,this.settleAvg);
+      const b0=this.books[mk], b=b0 && nowMs-b0.at < cfg.paperBookMaxAgeMs ? b0:null;
+      const first=side=>globalThis.BTC15Model.asks(b,side)[0]||null;
+      const offer={Up:first("Up"),Down:first("Down")}; // Real depth required; ticker size is not liquidity.
       const decide = (side, worst, off) => {
         if (!off || !(off.price > 0 && off.price < 100)) return null;
-        const fee = feeCents(off.price / 100), edge = worst * 100 - off.price - fee;
+        const fee = globalThis.BTC15Model.feesCents(off.price,1,cfg.paperVenue,cfg.paperExchangeFeeCents), edge = worst * 100 - off.price - fee;
         if (edge < cfg.minEdge) return {side, price: off.price, edge: +edge.toFixed(1), call: edge <= 0 ? "no" : "thin"};
         const c = (off.price + fee) / 100, f = (worst - c) / (1 - c), stake = Math.min(cfg.perWindowCents / 100, 0.02 * cfg.bankrollCents / 100, 0.25 * f * cfg.bankrollCents / 100);
         const n = Math.min(Math.floor(stake / c), off.size);
@@ -562,30 +625,44 @@ export class KalshiFeed {
       const market = await signedGet(this.env, "/trade-api/v2/markets/" + mk);
       if (exchange.trading_active !== true || exchange.exchange_active !== true || market.market?.status !== "active" || Date.now() - nowMs > 3000) return;
       const trade = {at: nowMs, mk, left: Math.round(left), side: pick.side, price: pick.price, n: pick.n, offered: pick.offered, edge: pick.edge, p: +p.toFixed(3), lo: +lo.toFixed(3), hi: +hi.toFixed(3), x: +x.toFixed(2), sd: +base.sd.toFixed(2), official: !!base.official, mode: cfg.mode, filled: 0, cost: 0};
-      if (cfg.mode === "paper") { trade.filled = pick.n; trade.cost = pick.n * pick.price; trade.status = "paper"; }
-      else {
-        const body = {ticker: mk, action: "buy", side: pick.side === "Up" ? "yes" : "no", count: pick.n, type: "limit", time_in_force: "immediate_or_cancel",
-                      client_order_id: crypto.randomUUID(), cancel_order_on_pause: true};
-        if (pick.side === "Up") body.yes_price = pick.price; else body.no_price = pick.price;
-        // A network timeout can hide an accepted order. Persist intent before sending;
-        // never retry this window automatically until the order is reconciled.
-        w.pendingOrder = {clientOrderId: body.client_order_id, at: Date.now(), mode: cfg.mode};
-        await this.state.storage.put(key, w);
-        const r = await signedCall(this.env, cfg.mode, "POST", "/trade-api/v2/portfolio/orders", body);
-        const o = (r && r.order) || {};
-        trade.orderId = o.order_id || null; trade.status = o.status || "sent"; trade.filled = +o.fill_count || 0; trade.cost = +o.taker_fill_cost || 0;
-        trade.feesCents = Math.round((+o.taker_fees || 0) + (+o.maker_fees || 0));
-      }
-      w.pendingOrder = null; w.trades.push(trade); today.trades++;
-      await this.state.storage.put(key, w); await this.state.storage.put("trade.day", today);
-      await notify(this.env, `BTC 15 ${cfg.mode}: ${trade.side} ${trade.filled}/${trade.n} at ${trade.price}¢`,
-        `${mk} with ${Math.floor(trade.left / 60)}:${String(trade.left % 60).padStart(2, "0")} left · edge ${trade.edge}¢ · chance ${Math.round(trade.p * 100)}% (${Math.round(trade.lo * 100)}–${Math.round(trade.hi * 100)}) · cost $${(trade.cost / 100).toFixed(2)}${trade.status ? " · " + trade.status : ""}`);
-      log.decisions = log.decisions.concat([Object.assign({note: "TRADE"}, trade)]).slice(-200);
-      await this.state.storage.put("trade.log", log);
+      trade.model=MODEL_VERSION;trade.executionModel=globalThis.BTC15Model.EXECUTION_VERSION;
+      trade.feeVenue=cfg.paperVenue;trade.feeAssumption=cfg.paperVenue==="kalshi"?"general taker, whole-cent conservative rounding":"Robinhood cost scenario on Kalshi depth";
+      w.pendingPaper={...trade,close,readyAt:nowMs+cfg.paperDelayMs,bookAt:b.at,cfg:{...cfg}};
+      await this.state.storage.put(key,w);
+      await this.state.storage.setAlarm(Math.min(w.pendingPaper.readyAt,Date.now()+1000));
+      return;
     } catch (e) {
       log.errors = (log.errors || []).concat([{at: nowMs, error: String(e.message || e).slice(0, 200)}]).slice(-20);
       await this.state.storage.put("trade.log", log);
     } finally { this.agentBusy = false; }
+  }
+  async processPaper(nowMs,cfg) {
+    const rows=await this.state.storage.list({prefix:"t:"});let processed=false;
+    for(const [key,w] of rows) {
+      const intent=w.pendingPaper;if(!intent)continue;
+      let fill;
+      if(cfg.mode!=="paper") fill={filled:0,cost:0,feesCents:0,status:"paper-canceled",reason:"paper mode stopped",filledAt:nowMs,latencyMs:nowMs-intent.at,levels:[]};
+      else {
+        if(nowMs<intent.readyAt)continue;
+        let active=false;
+        try { const exchange=await signedGet(this.env,"/trade-api/v2/exchange/status");const market=await signedGet(this.env,"/trade-api/v2/markets/"+w.mk);active=exchange.exchange_active===true&&exchange.trading_active===true&&market.market?.status==="active"; }catch(e){}
+        nowMs=Date.now();
+        fill=globalThis.BTC15Model.paperFill(intent,active&&this.up?this.books[w.mk]:null,nowMs,intent.cfg);
+        if(fill&&!active)fill.reason="exchange or market not confirmed active at simulated arrival";
+      }
+      if(!fill)continue;
+      const {cfg:settings,readyAt,...trade}=intent;
+      Object.assign(trade,fill,{paperSettings:settings,fillIndex:this.ticks.length&&nowMs-this.ticks.at(-1)[0]<3000?this.ticks.at(-1)[1]:null});
+      w.pendingPaper=null;w.trades.push(trade);
+      // Paper never calls the portfolio API. Every attempt has a durable audit record.
+      await this.state.storage.put(key,w);
+      const day=etDay(nowMs);let today=await this.state.storage.get("trade.day");
+      if(!today||today.day!==day)today={day,trades:0,pnlCents:0};
+      today.trades++;await this.state.storage.put("trade.day",today);
+      const log=await this.tradeLog();log.decisions=log.decisions.concat([{...trade,note:"TRADE"}]).slice(-200);await this.state.storage.put("trade.log",log);
+      processed=true;
+    }
+    return processed;
   }
   async settleTrades(mk, close) {               // after the close: score the window's trade against the official result
     const key = "t:" + mk, w = await this.state.storage.get(key);
@@ -597,7 +674,7 @@ export class KalshiFeed {
     for (const t of w.trades) {
       if (!t.filled) { t.pnlCents = 0; continue; }
       const won = t.side === "Up" ? yes : !yes, fee = t.feesCents != null ? t.feesCents : Math.round(t.filled * feeCents(t.price / 100));
-      t.pnlCents = Math.round(t.filled * (won ? 100 : 0) - (Number.isFinite(t.cost) ? t.cost : t.filled * t.price)) - fee; pnl += t.pnlCents;
+      t.pnlCents = Math.round((t.filled * (won ? 100 : 0) - (Number.isFinite(t.cost) ? t.cost : t.filled * t.price) - fee)*100)/100; pnl += t.pnlCents;
     }
     w.result = m.result; w.settled = true;
     const today = (await this.state.storage.get("trade.day")) || {day: etDay(Date.now()), trades: 0, pnlCents: 0};
