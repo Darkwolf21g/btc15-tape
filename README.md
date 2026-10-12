@@ -109,7 +109,7 @@ The exchange message formats were taken from each exchange's documentation and t
 The tape shows Kalshi Open, Paused, or Status Unknown with the last successful
 check's age. Failed checks and checks older than 90 seconds block trade signals;
 model probabilities remain descriptive. The public relay coalesces concurrent
-polls, briefly caches successful responses, and honors `Retry-After` without
+polls through the authenticated collector when configured, briefly caches successful responses, and honors `Retry-After` without
 retrying 429s through another hostname. Authenticated reads learn the account's
 read/write token budgets from `/account/limits`; these are conservative local
 budgets, not a replacement for Kalshi's account-wide limiter. Other clients using
