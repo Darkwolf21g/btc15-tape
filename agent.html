@@ -34,6 +34,15 @@ button.danger { border-color: var(--down); color: var(--down); }
 .notes { color: var(--dim); font-size: 12px; }
 pre { white-space: pre-wrap; font: 12px/1.45 var(--mono); color: var(--dim); margin: 6px 0 0; }
 a { color: var(--ink); }
+.research-cards {display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin:12px 0;}
+.research-card {min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;}
+.research-card h3 {margin:0 0 8px;font-size:15px;}
+.research-card strong {display:block;margin:8px 0;font-size:20px;}
+.research-card p {margin:6px 0;}
+.table-scroll {overflow-x:auto;max-width:100%;}
+#biasChart {width:100%;height:auto;display:block;max-width:620px;}
+pre,.notes {overflow-wrap:anywhere;}
+
 </style>
 </head>
 <body>
@@ -66,7 +75,19 @@ a { color: var(--ink); }
 <div class="row"><button id="researchRefresh" type="button">Refresh research</button><button id="researchExport" type="button">Download research data</button></div>
 <pre id="researchStatus" aria-live="polite">Loading research status…</pre>
 <pre id="researchScores"></pre>
-<p class="notes">Each checkpoint is a separate one-contract experiment. Fees, a one-second minimum delay and 50% of displayed depth are simulated. At least 60 earlier eligible windows per checkpoint are needed before later windows are scored. No proven edge yet.</p>
+<div id="biasPanel">
+<h2 style="margin-top:20px">Pricing bias lab · forward tests</h2>
+<p id="biasStatus" class="notes" aria-live="polite">Waiting for the research report…</p>
+<div class="row"><label for="biasCheckpoint">Time before close</label><select id="biasCheckpoint"><option value="600">10 minutes</option><option value="300">5 minutes</option><option value="120">2 minutes</option><option value="60">60 seconds</option><option value="30" selected>30 seconds</option><option value="15">15 seconds</option><option value="5">5 seconds</option></select>
+<label for="biasSide">Side</label><select id="biasSide"><option value="Up">YES / Up</option><option value="Down">NO / Down</option></select></div>
+<div class="research-cards" id="biasCards"></div>
+<p class="notes">Price-band comparison: orange is average ask plus estimated fee; green is observed win rate. A gap is descriptive, not proof of profit. Net results below include delayed simulated fills.</p>
+<svg id="biasChart" viewBox="0 0 620 250" role="img" aria-label="Price-band win rate and cost comparison"></svg>
+<div class="table-scroll"><table><caption class="notes">Independent price-band experiments · never add these returns together</caption><thead><tr><th>Ask band</th><th>Windows</th><th>Win rate</th><th>All-in cost</th><th>Fills</th><th>Net / fill</th></tr></thead><tbody id="biasRows"></tbody></table></div>
+<p id="biasCoverage" class="notes"></p>
+<p class="notes">New captures only. Each side and checkpoint is separate; rows can overlap. No automatic model changes. Fees use the general Kalshi multiplier of 1; actual account fees may differ. Depth does not guarantee fills. Export daily: summaries last 10 days and raw inputs 24 hours.</p>
+</div>
+<p class="notes">The model-comparison scores above need at least 60 earlier eligible windows per checkpoint. The fixed bias tests start with new captures and remain descriptive. All fills, fees and delays are simulated. No proven edge yet.</p>
 </section>
 <section id="demoPanel"><h2>Kalshi demo · mock funds only</h2>
 <p class="notes">Separate from the paper model. Test one contract at a time against demo markets. Maximum 10 test orders per day. Reconcile each order before another submission.</p>
@@ -215,7 +236,35 @@ for(const [id,path] of [["demoReconcile","reconcile"],["demoCancel","cancel"]])$
   if(!demoLast||demoSending)return;demoSending=true;
   try{demoShow((await demoAction(path,{clientId:demoLast.clientId})).order);}catch(e){$("demoResult").textContent=e.message;}finally{demoSending=false;}
 };
-let researchBusy=false;
+let researchBusy=false,biasData=null;
+const biasPct=v=>Number.isFinite(v)?(100*v).toFixed(1)+'%':'—';
+const biasCents=v=>Number.isFinite(v)?(v>0?'+':'')+v.toFixed(2)+'¢':'—';
+function renderBias(){
+ const data=biasData,c=Number($('biasCheckpoint').value),side=$('biasSide').value;
+ $('biasCards').replaceChildren();$('biasRows').replaceChildren();$('biasChart').replaceChildren();
+ if(!data){$('biasStatus').textContent='Bias report unavailable · refresh after the collector update.';$('biasCoverage').textContent='';return;}
+ $('biasStatus').textContent=`${data.status} · ${data.captured} captures · ${data.eligibleSettledCheckpoints} eligible settled checkpoints`;
+ const rows=data.rows.filter(r=>r.checkpoint===c&&r.side===side);
+ for(const [id,title] of [['settlement-disagreement','Settlement vs spot'],['index-follow-through','After a sharp index move']]){
+  const r=rows.find(r=>r.hypothesis===id),card=document.createElement('article');card.className='research-card';
+  const h=document.createElement('h3');h.textContent=title;card.append(h);
+  const value=document.createElement('strong');value.textContent=r?.filled?biasCents(r.meanNetCents)+' / simulated fill':'Collecting evidence';card.append(value);
+  const p=document.createElement('p');p.className='notes';p.textContent=r?`${r.n} windows across ${r.days} UTC days · ${r.filled}/${r.attempts} fills · ${biasPct(r.winRate)} quote win rate`:'No eligible settled observations for this side and checkpoint yet.';card.append(p);
+  const detail=document.createElement('p');detail.className='notes';detail.textContent=r?`Net ${money(r.pnlCents)} · worst drawdown $${(r.maxDrawdownCents/100).toFixed(2)} · midpoint move ${biasCents(r.meanMarkoutCents)} over ${r.meanDelayMs==null?'—':(r.meanDelayMs/1000).toFixed(2)+'s'} (not profit)`:(id==='settlement-disagreement'?'Only applies during the final minute when spot and projected settlement disagree.':'Requires a five-second move of at least one measured volatility scale.');card.append(detail);
+  $('biasCards').append(card);
+ }
+ const bands=rows.filter(r=>r.hypothesis==='price-bands').sort((a,b)=>parseFloat(a.band)-parseFloat(b.band));
+ for(const r of bands){const tr=document.createElement('tr');for(const value of [r.band,r.n,biasPct(r.winRate),r.meanAllInCents.toFixed(2)+'¢',`${r.filled}/${r.attempts}`,biasCents(r.meanNetCents)]){const td=document.createElement('td');td.textContent=value;tr.append(td);}$('biasRows').append(tr);}
+ if(!bands.length){const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=6;td.textContent='Waiting for settled price-band observations.';tr.append(td);$('biasRows').append(tr);}
+ const svg=$('biasChart'),NS='http://www.w3.org/2000/svg';
+ const el=(name,attrs,text)=>{const e=document.createElementNS(NS,name);for(const [k,v]of Object.entries(attrs))e.setAttribute(k,v);if(text!=null)e.textContent=text;svg.append(e);return e;};
+ const height=Math.max(110,40+bands.length*34);svg.setAttribute('viewBox',`0 0 620 ${height}`);
+ for(const n of [0,25,50,75,100]){const x=105+n*4.65;el('line',{x1:x,x2:x,y1:26,y2:height-8,stroke:'#22304d'});el('text',{x,y:17,fill:'#8592ad','font-size':12,'text-anchor':'middle'},n+'%');}
+ bands.forEach((r,i)=>{const y=40+i*34;el('text',{x:0,y:y+10,fill:'#e6ebf5','font-size':13},r.band);el('rect',{x:105,y,width:Math.min(100,r.meanAllInCents)*4.65,height:7,fill:'#ffb020'});el('rect',{x:105,y:y+10,width:r.winRate*465,height:7,fill:'#2fd17c'});});
+ if(!bands.length)el('text',{x:105,y:65,fill:'#8592ad','font-size':13},'No settled observations yet');
+ const v=data.coverage;$('biasCoverage').textContent=`Coverage: ${v.pending} pending · ${v.invalid} excluded · ${v.legacy} untagged checkpoints excluded · ${v.missingArrival} missing arrival snapshots. Captures are not independent windows. Last capture: ${data.lastAt?new Date(data.lastAt).toLocaleString():'waiting'}.`;
+}
+$('biasCheckpoint').onchange=renderBias;$('biasSide').onchange=renderBias;
 async function researchGet(path,params={}){
  const u=new URL('./research/'+path,location.href);if(token)u.searchParams.set('token',token);
  for(const [k,v] of Object.entries(params))u.searchParams.set(k,String(v));
@@ -228,10 +277,10 @@ async function refreshResearch(){
  try{
   const st=await researchGet('status');
   $('researchStatus').textContent=`${st.recordedWindows} windows recorded · ${st.settledWindows} settled\n${st.forecasts} forecasts · ${st.usableDepth} with fresh depth · ${st.arrivals} arrival snapshots\n${st.missed} missing or unusable forecasts\nLast capture: ${st.lastCaptureAt?ET.format(new Date(st.lastCaptureAt)):'waiting for first checkpoint'}\nRetention: 10 days summaries / 24 hours raw inputs`;
-  const r=await researchGet('report');
+  const r=await researchGet('report');biasData=r.bias||null;renderBias();
   const lines=Object.entries(r.scores).filter(([,s])=>s.n).sort((a,b)=>Number(b[0])-Number(a[0])).map(([c,s])=>`${c}s · ${s.n} forecasts · Brier ${s.brier.toFixed(4)} / market ${s.marketBrier.toFixed(4)}\n  ${s.filled}/${s.attempts} simulated fills · net ${money(s.pnlCents)} · drawdown $${(s.maxDrawdownCents/100).toFixed(2)}`);
   $('researchScores').textContent=r.status+(lines.length?'\n\n'+lines.join('\n'):'');
- }catch(e){$('researchStatus').textContent=e.message;$('researchScores').textContent='';}
+ }catch(e){$('researchStatus').textContent=e.message;$('researchScores').textContent='';biasData=null;renderBias();}
  finally{researchBusy=false;}
 }
 $('researchRefresh').onclick=refreshResearch;
@@ -246,7 +295,7 @@ $('researchExport').onclick=async()=>{
 };
 refreshResearch(); setInterval(refreshResearch, 60000);
 refresh(); setInterval(refresh, 10000);
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(); });
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") {refresh();refreshResearch();} });
 </script>
 </body>
 </html>

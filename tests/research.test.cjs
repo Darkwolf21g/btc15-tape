@@ -109,3 +109,55 @@ test('research warms depth briefly with no browser and schedules exact capture t
  assert.ok(messages.some(m=>m.params.channels?.includes('orderbook_delta')));assert.equal(h.obj.nextEvent(h.now(),false,{}),(close-60)*1000);
  h.setTime((close-45)*1000);h.obj.subscribeTickers();assert.equal(h.obj.depthSubscribed,false);
 });
+
+function tagged(h,count=4){
+ const rows=windows(h,count);
+ for(const w of rows){const k=w.checks[60];k.bias={version:h.r.BIAS_VERSION,move5Z:1.5,spotAbove:false,projectedAbove:true};k.projection={observed:1,m:59,missing:0};}
+ return rows;
+}
+test('bias capture preserves rounding-aware required mean and excludes later receipts from movement',()=>{
+ const h=harness(),close=1800000900,at=(close-12)*1000+20,input=ticks(close-1000,close-12);
+ const args={at,close,target:100,targetAt:at,ticks:input,book:book(at),marketStatus:'active',exchange:{exchange_active:true,trading_active:true}};
+ const k=h.r.snapshot(args);assert.equal(k.bias.version,h.r.BIAS_VERSION);
+ assert.ok(Math.abs(k.bias.requiredRemainingMean-(60*99.995-k.projection.sum)/12)<1e-9);
+ const last=input.at(-1),previous=input.find(t=>t[0]===last[0]-5000);
+ assert.equal(k.bias.move5Usd,last[1]-previous[1]);
+ previous[2]=at+1000;assert.equal(h.r.snapshot(args).bias.move5Z,null);
+});
+test('bias experiments exclude old observations, unofficial labels, duplicates, future results and late checkpoints',()=>{
+ const h=harness();assert.equal(h.r.biasReport(windows(h)).captured,0);
+ const rows=tagged(h);let r=h.r.biasReport([...rows,...rows]);assert.equal(r.captured,4);assert.equal(r.rows.find(r=>r.hypothesis==='price-bands'&&r.side==='Up').n,4);
+ rows[0].src='page';rows[1].resultObservedAt=rows[1].close*1000-1;rows[2].checks[60].at+=6000;
+ r=h.r.biasReport(rows);assert.equal(r.eligibleSettledCheckpoints,1);assert.equal(r.coverage.pending,2);assert.equal(r.coverage.invalid,1);
+ assert.equal(r.readyForLive,false);
+});
+test('price bands compare both sides independently and keep quote win rate separate from fill return',()=>{
+ const h=harness(),rows=tagged(h,2);rows[1].checks[60].arrival=null;
+ const r=h.r.biasReport(rows),up=r.rows.find(g=>g.hypothesis==='price-bands'&&g.side==='Up'),down=r.rows.find(g=>g.hypothesis==='price-bands'&&g.side==='Down');
+ assert.equal(up.band,'50–70¢');assert.equal(up.n,2);assert.equal(up.winRate,1);assert.equal(up.filled,1);assert.equal(up.meanNetCents,48);assert.equal(up.meanAllInCents,52);
+ assert.equal(down.winRate,0);assert.equal(down.meanNetCents,-62);assert.equal(down.maxDrawdownCents,62);
+ assert.equal(up.skips['arrival not recorded'],1);assert.equal(r.coverage.missingArrival,1);
+});
+test('fixed hypothesis selection is independent of future outcome and forecast probability edge',()=>{
+ const h=harness(),rows=tagged(h,2);for(const w of rows)w.checks[60].p=.01;
+ const first=h.r.biasReport(rows);for(const w of rows)w.result='no';const second=h.r.biasReport(rows);
+ assert.deepEqual(first.rows.map(g=>[g.hypothesis,g.checkpoint,g.side,g.band,g.n,g.attempts,g.filled]),second.rows.map(g=>[g.hypothesis,g.checkpoint,g.side,g.band,g.n,g.attempts,g.filled]));
+ assert.equal(first.rows.find(g=>g.hypothesis==='settlement-disagreement').filled,2);
+});
+test('settlement disagreements and follow-through use frozen conditions, not a missing value or a tiny move',()=>{
+ const h=harness(),rows=tagged(h,4);
+ rows[0].checks[60].bias.spotAbove=null;rows[1].checks[60].bias.projectedAbove=false;rows[2].checks[60].projection.m=0;
+ for(const [i,w]of rows.entries())w.checks[60].bias.move5Z=[null,.99,-1,1][i];
+ const r=h.r.biasReport(rows);assert.equal(r.rows.find(g=>g.hypothesis==='settlement-disagreement').n,1);
+ assert.equal(r.rows.find(g=>g.hypothesis==='index-follow-through'&&g.side==='Down').n,1);assert.equal(r.rows.find(g=>g.hypothesis==='index-follow-through'&&g.side==='Up').n,1);
+});
+test('follow-through midpoint diagnostics sign NO correctly and never count stale arrivals as profit',()=>{
+ const h=harness(),rows=tagged(h,1),k=rows[0].checks[60];k.bias.move5Z=-2;
+ k.arrival.depth.bidCents-=4;k.arrival.depth.askCents-=4;
+ let g=h.r.biasReport(rows).rows.find(g=>g.hypothesis==='index-follow-through');assert.equal(g.meanMarkoutCents,4);assert.equal(g.meanDelayMs,1000);assert.equal(g.meanNetCents,-62);
+ k.arrival.depth.valid=false;g=h.r.biasReport(rows).rows.find(g=>g.hypothesis==='index-follow-through');assert.equal(g.markoutN,0);assert.equal(g.meanMarkoutCents,null);assert.equal(g.filled,0);
+});
+test('bias drawdown is chronological even when export rows arrive out of order',()=>{
+ const h=harness(),rows=tagged(h,3);rows[0].result='no';rows[1].result='no';
+ const a=h.r.biasReport(rows).rows,b=h.r.biasReport([...rows].reverse()).rows;assert.deepEqual(a,b);
+});

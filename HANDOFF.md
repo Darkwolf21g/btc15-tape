@@ -1,5 +1,15 @@
 # BTC 15 Tape — handoff
 
+## Pricing bias addition — October 12, 2026
+
+`shared-research.js` tags new snapshots with `btc15-bias-v1` and reports three
+fixed prospective hypotheses. The version tag prevents retrospective inclusion.
+No additional upstream requests or stored tick streams are introduced. Existing
+arrival snapshots and official outcomes drive independent one-contract scenarios.
+The agent page contains side/checkpoint filters, coverage, a price-band graph and
+net-per-fill results. No forecast/model promotion or execution-mode change.
+See the final section of RESEARCH.md before changing thresholds or interpretation.
+
 ## Settlement research addition — October 12, 2026
 
 `shared-research.js` is embedded in the Worker by `scripts/sync-model.cjs` and
