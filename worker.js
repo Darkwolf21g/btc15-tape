@@ -79,7 +79,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url), path = url.pathname.replace(/\/+$/, "");
     if (request.method === "OPTIONS") return new Response(null, {headers: {...CORS, "Access-Control-Allow-Headers": "Content-Type"}});
-    if (path === "/feed" || path === "/feed/status" || path === "/record" || path === "/record.csv" || path === "/collector/status" || path === "/trade/status" || path === "/trade/config" || path.startsWith("/demo/")) {
+    if (path === "/feed" || path === "/feed/status" || path === "/record" || path === "/record.csv" || path === "/collector/status" || path === "/trade/status" || path === "/trade/config" || path.startsWith("/demo/") || path.startsWith("/research/")) {
       if (env.FEED_TOKEN && url.searchParams.get("token") !== env.FEED_TOKEN) return new Response("token", {status: 403, headers: CORS});
       if (!env.FEED) return new Response("feed not configured", {status: 503, headers: CORS});
       try { return await env.FEED.get(env.FEED.idFromName("brti")).fetch(request); }
@@ -270,6 +270,139 @@ function paperFill(intent,book,nowMs,cfg) {
 globalThis.BTC15Model=Object.freeze({VERSION,EXECUTION_VERSION,tailCdf,chance,volsFrom,projectFrom,band,feesCents,asks,paperFill});
 })();
 // END SHARED BTC15 MODEL
+// BEGIN SHARED BTC15 RESEARCH
+// Canonical research calculations; embedded in worker.js and imported by the offline evaluator.
+(() => {
+const VERSION = 'settlement-research-v1';
+const CHECKS = [600, 300, 120, 60, 30, 15, 5];
+const SETTINGS = Object.freeze({delayMs:1000, maxArrivalLateMs:3000, bookMaxAgeMs:1500,
+  indexMaxAgeMs:3000, depthFraction:0.5, quantity:1, minEdgeCents:3,
+  feeVenue:'kalshi', feeAssumption:'general taker multiplier 1; whole-cent rounding per fill level',
+  checkpointToleranceMs:5000, minTrainWindows:60, testWindows:20});
+const finite = v => typeof v === 'number' && Number.isFinite(v);
+const depthWanted = now => {
+  const left = (Math.floor(now / 900000) + 1) * 900 - now / 1000;
+  return CHECKS.some(c => left <= c + 5 && left > c - 10);
+};
+function depthSnapshot(book, at) {
+  if (!book) return null;
+  const sourceAt = finite(book.sourceAt) ? book.sourceAt : null;
+  const age = at - book.at, sourceAge = sourceAt == null ? null : at - sourceAt;
+  const yes = globalThis.BTC15Model.asks(book,'Up').slice(0,10);
+  const no = globalThis.BTC15Model.asks(book,'Down').slice(0,10);
+  const bid = no.length ? 100-no[0].price : null, ask = yes[0]?.price ?? null;
+  const fresh = age >= 0 && age <= SETTINGS.bookMaxAgeMs && sourceAge != null &&
+    sourceAge >= 0 && sourceAge <= SETTINGS.bookMaxAgeMs;
+  const valid = fresh && finite(bid) && finite(ask) && bid <= ask;
+  return {receivedAt:book.at, sourceAt, sourceKind:book.sourceKind || null,
+    ageMs:age, sourceAgeMs:sourceAge, valid, bidCents:bid, askCents:ask, yes, no,
+    reason:!fresh?'missing, stale or future depth timestamp':!valid?'empty or crossed book':null};
+}
+function snapshot({at, close, target, targetAt, ticks, book, exchange, marketStatus}) {
+  // ticks are [source milliseconds, value, first received milliseconds]. No historical reconstruction.
+  const input=ticks.filter(([ms,v,received])=>finite(ms)&&finite(v)&&v>0&&finite(received)&&ms<=at&&received<=at&&ms>=at-1200000).sort((a,b)=>a[0]-b[0]);
+  const last=input.at(-1), ageMs=last ? at-last[0] : null;
+  const vols=globalThis.BTC15Model.volsFrom(input,at);
+  const projection=last&&vols ? globalThis.BTC15Model.projectFrom(input,at,close,last[1],vols) : null;
+  const reason=!(finite(target)&&target>0&&finite(targetAt)&&targetAt<=at)?'missing target known at capture':
+    !last||ageMs>SETTINGS.indexMaxAgeMs?'stale official index':!vols?'warming up volatility':
+    projection?.mean==null?'missing settlement readings':at>=close*1000?'market closed':null;
+  const p=reason?null:globalThis.BTC15Model.chance(projection.mean,projection.sd,target);
+  const p2=reason?null:globalThis.BTC15Model.chance(projection.mean,projection.sd/Math.SQRT2,target);
+  return {at, leftSeconds:close-at/1000, target, targetAt, marketStatus, exchange,
+    index:{source:'cfbenchmarks_value',sourceAt:last?.[0]??null,receivedAt:last?.[2]??null,value:last?.[1]??null,ageMs,samples:input.length},
+    vols, projection, p, p2, status:reason||'forecast', depth:depthSnapshot(book,at)};
+}
+function simulate(check, variant, close) {
+  const p=check[variant], book=check.depth, arrival=check.arrival;
+  const no=reason=>({attempted:false,filled:0,pnlCents:null,reason});
+  if(!finite(p)||p<0||p>1||!book?.valid||check.marketStatus!=='active'||
+    check.exchange?.exchange_active!==true||check.exchange?.trading_active!==true)return no('decision data unavailable');
+  const candidates=[['Up',p,book.yes[0]],['Down',1-p,book.no[0]]].filter(x=>x[2]).map(([side,prob,level])=>({side,price:level.price,
+    edge:100*prob-level.price-globalThis.BTC15Model.feesCents(level.price,SETTINGS.quantity,SETTINGS.feeVenue)})).sort((a,b)=>b.edge-a.edge);
+  const c=candidates[0]; if(!c||c.edge<SETTINGS.minEdgeCents)return no('below frozen net-edge threshold');
+  const empty=reason=>({...c,attempted:true,filled:0,costCents:0,feesCents:0,reason});
+  if(!arrival)return empty('arrival not recorded');
+  const ready=check.at+SETTINGS.delayMs;
+  if(arrival.at<ready||arrival.at-ready>SETTINGS.maxArrivalLateMs||arrival.at>=close*1000)return empty('arrival outside allowed time');
+  if(!arrival.depth?.valid||arrival.exchange?.exchange_active!==true||arrival.exchange?.trading_active!==true)return empty('arrival depth or exchange unavailable');
+  const levels=c.side==='Up'?arrival.depth.yes:arrival.depth.no;
+  let remaining=SETTINGS.quantity,cost=0,fees=0;
+  for(const level of levels){
+    if(level.price>c.price+1e-8)break;
+    const n=Math.min(remaining,Math.floor(level.size*SETTINGS.depthFraction));
+    if(n<=0)continue;
+    cost+=n*level.price; fees+=globalThis.BTC15Model.feesCents(level.price,n,SETTINGS.feeVenue);remaining-=n;
+    if(!remaining)break;
+  }
+  return {...c,attempted:true,filled:SETTINGS.quantity-remaining,costCents:cost,feesCents:fees,
+    delayMs:arrival.at-check.at,reason:remaining?'insufficient depth at original limit':'simulated fill'};
+}
+function report(all) {
+  // Each chronological fold chooses ONLY the probability variant on earlier, already resolved windows.
+  // Checkpoints are separate experiments. Never sum them as one strategy or pick their winner here.
+  const valid=all.filter(w=>w.schema===VERSION&&w.model===globalThis.BTC15Model.VERSION);
+  const recorded=[...new Map(valid.map(w=>[w.mk,w])).values()].sort((a,b)=>a.close-b.close);
+  const resolved=w=>w.src==='kalshi'&&['yes','no'].includes(w.result)&&finite(w.resultObservedAt)&&w.resultObservedAt>=w.close*1000;
+  const windows=recorded.filter(resolved);
+  const scores={},folds=[];
+  for(const c of CHECKS)scores[c]={n:0,brier:0,marketBrier:0,logLoss:0,attempts:0,filled:0,wins:0,pnlCents:0,feesCents:0,maxDrawdownCents:0,
+    bins:Array.from({length:10},(_,i)=>({from:i/10,to:(i+1)/10,n:0,p:0,y:0})),skips:{},equity:0,peak:0};
+  const eligible=(w,c)=>{const k=w.checks?.[c];return k&&k.status==='forecast'&&k.at<w.close*1000&&k.at>=(w.close-Number(c))*1000&&
+    k.at-(w.close-Number(c))*1000<=SETTINGS.checkpointToleranceMs&&k.depth?.valid&&[k.p,k.p2].every(v=>finite(v)&&v>=0&&v<=1)?k:null;};
+  const evaluated=new Set();
+  // UTC time blocks keep fold membership fixed when a late result arrives or a window is missing.
+  const blockSeconds=900*SETTINGS.testWindows;
+  const blockIds=[...new Set(recorded.map(w=>Math.floor((w.close-900)/blockSeconds)))];
+  for(const block of blockIds){
+    const cutoff=block*blockSeconds*1000;
+    const test=recorded.filter(w=>Math.floor((w.close-900)/blockSeconds)===block&&resolved(w));
+    const train=windows.filter(w=>w.close*1000<=cutoff&&w.resultObservedAt<cutoff);
+    if(train.length<SETTINGS.minTrainWindows||!test.length)continue;
+    const choices={};
+    for(const c of CHECKS){
+      const pairs=train.map(w=>({w,k:eligible(w,c)})).filter(x=>x.k);
+      if(pairs.length<SETTINGS.minTrainWindows){choices[c]={variant:null,trainN:pairs.length};continue;}
+      const loss=variant=>pairs.reduce((s,{w,k})=>s+(k[variant]-(w.result==='yes'?1:0))**2,0)/pairs.length;
+      const wide=loss('p'),matched=loss('p2'),variant=matched<wide?'p2':'p';
+      choices[c]={variant,trainN:pairs.length,wideBrier:wide,matchedBrier:matched};
+      const s=scores[c];
+      for(const w of test){
+        const k=eligible(w,c);if(!k){s.skips['invalid forecast or book']=(s.skips['invalid forecast or book']||0)+1;continue;}
+        const p=k[variant],y=w.result==='yes'?1:0,mid=(k.depth.bidCents+k.depth.askCents)/200;
+        evaluated.add(w.mk);s.n++;s.brier+=(p-y)**2;s.marketBrier+=(mid-y)**2;
+        const bounded=Math.min(1-1e-12,Math.max(1e-12,p));s.logLoss-=y*Math.log(bounded)+(1-y)*Math.log(1-bounded);
+        const bin=s.bins[Math.min(9,Math.floor(p*10))];bin.n++;bin.p+=p;bin.y+=y;
+        const fill=simulate(k,variant,w.close);
+        if(fill.attempted)s.attempts++;
+        if(fill.filled){const won=(fill.side==='Up')===(y===1),pnl=fill.filled*(won?100:0)-fill.costCents-fill.feesCents;
+          s.filled++;if(won)s.wins++;s.pnlCents+=pnl;s.feesCents+=fill.feesCents;s.equity+=pnl;s.peak=Math.max(s.peak,s.equity);s.maxDrawdownCents=Math.max(s.maxDrawdownCents,s.peak-s.equity);
+        }else{s.skips[fill.reason]=(s.skips[fill.reason]||0)+1;}
+      }
+    }
+    folds.push({trainWindows:train.length,trainResultsBefore:cutoff,testFirstClose:test[0].close,testLastClose:test.at(-1).close,testWindows:test.length,choices});
+  }
+  for(const s of Object.values(scores)){
+    for(const name of ['brier','marketBrier','logLoss'])s[name]=s.n?s[name]/s.n:null;
+    s.brierImprovement=s.n?s.marketBrier-s.brier:null;s.winRate=s.filled?s.wins/s.filled:null;
+    s.bins=s.bins.map(b=>({from:b.from,to:b.to,n:b.n,meanProbability:b.n?b.p/b.n:null,observedRate:b.n?b.y/b.n:null}));
+    delete s.equity;delete s.peak;
+  }
+  return {schema:VERSION,model:globalThis.BTC15Model.VERSION,settings:SETTINGS,recordedWindows:recorded.length,settledWindows:windows.length,
+    evaluatedWindows:evaluated.size,folds,scores,readyForLive:false,
+    expectedWindows:recorded.length?Math.round((recorded.at(-1).close-recorded[0].close)/900)+1:0,
+    unrecordedWindows:recorded.length?Math.max(0,Math.round((recorded.at(-1).close-recorded[0].close)/900)+1-recorded.length):0,
+    status:evaluated.size?'chronological research results; fills are simulated':'collecting; insufficient prior resolved windows',
+    limitations:['Each checkpoint is a separate one-contract experiment; do not add their P&L.',
+      'Variant selection uses earlier resolved windows only; no live model changes.',
+      'Displayed depth does not guarantee an executable fill; latency and fees are fixed scenarios.',
+      'Arrival simulation reuses checkpoint exchange status for at most four seconds; intervening halts are unknown.',
+      'Missing/stale data is excluded and reported; coverage can bias results. No statistical significance claim.']};
+}
+globalThis.BTC15Research=Object.freeze({VERSION,CHECKS,SETTINGS,depthWanted,depthSnapshot,snapshot,simulate,report});
+})();
+// END SHARED BTC15 RESEARCH
+const research = globalThis.BTC15Research;
 const {tailCdf,volsFrom,projectFrom} = globalThis.BTC15Model;
 function feeCents(p) { return globalThis.BTC15Model.feesCents(p*100); }
 async function signedGet(env, apiPath, query) { return signedCall(env,"live","GET",apiPath+(query||"")); }
@@ -364,6 +497,7 @@ export class KalshiFeed {
     this.lastTicker = {};                         // ticker -> {bid, ask, at}
     this.agentBusy = false;
     this.indexSeconds = new Map(); // Only the 1 Hz BRTI channel can supply settlement readings.
+    this.researchTicks = new Map(); // First-observed source/value/receipt triples; never backfilled.
     this.alarmBusy = false;
     this.agentActive = false; this.depthSubscribed = null;
   }
@@ -376,6 +510,7 @@ export class KalshiFeed {
   }
   async fetch(request) {
     const url = new URL(request.url);
+    if(url.pathname.startsWith('/research/'))return this.researchRequest(request,url);
     if(url.pathname==="/market-data")return this.marketData(url.searchParams.get("path")||"");
     if(url.pathname.startsWith("/demo/"))return this.demoRequest(request,url);
     if (url.pathname === "/watchdog") { await this.ensureAlarm(); return new Response("ok"); }
@@ -445,6 +580,102 @@ export class KalshiFeed {
     } catch (e) {}
     this.ensureUpstream();
     return new Response(null, {status: 101, webSocket: client});
+  }
+  async researchRequest(request,url) {
+    const reply=(d,status=200)=>new Response(JSON.stringify(d),{status,headers:{...CORS,'Content-Type':'application/json'}});
+    if(request.method!=='GET')return reply({error:'read only'},405);
+    if(this.env.FEED_TOKEN&&url.searchParams.get('token')!==this.env.FEED_TOKEN)return reply({error:'token'},403);
+    if(!['/research/status','/research/report','/research/export','/research/inputs'].includes(url.pathname))return reply({error:'not found'},404);
+    if(url.pathname==='/research/inputs'){
+      const close=Number(url.searchParams.get('close')),check=Number(url.searchParams.get('check'));
+      if(!Number.isInteger(close)||close<=0||![0,...research.CHECKS].includes(check))return reply({error:'invalid close/check'},400);
+      const input=await this.state.storage.get(`ri:${close}:${check}`);
+      return input?reply(input):reply({error:'inputs unavailable or expired (24h retention)'},404);
+    }
+    const rows=[...(await this.state.storage.list({prefix:'r:'})).values()].sort((a,b)=>a.close-b.close);
+    if(url.pathname==='/research/report')return reply(research.report(rows));
+    if(url.pathname==='/research/export'){
+      const after=Number(url.searchParams.get('after')||0),through=Number(url.searchParams.get('through')||Math.floor(Date.now()/1000)),limit=Number(url.searchParams.get('limit')||25);
+      if(![after,through,limit].every(Number.isInteger)||after<0||through<after||limit<1||limit>100)return reply({error:'invalid pagination'},400);
+      const filtered=rows.filter(w=>w.close>after&&w.close<=through),page=filtered.slice(0,limit);
+      return reply({schema:research.VERSION,model:MODEL_VERSION,settings:research.SETTINGS,through,rows:page,nextAfter:filtered.length>limit?page.at(-1).close:null});
+    }
+    const checks=rows.flatMap(w=>Object.values(w.checks||{})),last=rows.at(-1);
+    return reply({schema:research.VERSION,model:MODEL_VERSION,recordedWindows:rows.length,settledWindows:rows.filter(w=>w.src==='kalshi').length,
+      forecasts:checks.filter(c=>c.status==='forecast').length,arrivals:checks.filter(c=>c.arrival).length,
+      usableDepth:checks.filter(c=>c.depth?.valid).length,missed:checks.filter(c=>c.status!=='forecast').length,
+      lastCaptureAt:Math.max(0,...checks.map(c=>c.at||0))||null,lastClose:last?.close??null,
+      retention:{summaryDays:10,rawInputHours:24},settings:research.SETTINGS,tradingChanged:false});
+  }
+  async researchCapture() {
+    if(!this.env.KALSHI_KEY_ID||!this.env.KALSHI_PRIVATE_KEY)return;
+    const started=Date.now(),close=(Math.floor(started/900000)+1)*900,mk=marketTicker(close),key='r:'+close;
+    const row=(await this.state.storage.get(key))||{schema:research.VERSION,model:MODEL_VERSION,mk,close,settings:research.SETTINGS,checks:{},src:null,result:null};
+    let changed=false;
+    for(const c of research.CHECKS)if(!row.checks[c]&&started-(close-c)*1000>research.SETTINGS.checkpointToleranceMs){
+      row.checks[c]={at:started,status:'checkpoint missed',p:null,p2:null};changed=true;
+    }
+    const c=research.CHECKS.find(c=>!row.checks[c]&&started>=(close-c)*1000);
+    if(c!=null){
+      let market=null,exchange=null,error=null;
+      try{
+        market=(await signedGet(this.env,'/trade-api/v2/markets/'+mk))?.market;
+        exchange=await signedGet(this.env,'/trade-api/v2/exchange/status');
+      }catch(e){error='market or exchange read unavailable';}
+      // Receipt precedes capture. Never label data fetched later with an earlier decision time.
+      const at=Date.now(),target=market?.floor_strike!=null?Number(market.floor_strike):null;
+      const input=[...this.researchTicks.values()].filter(t=>t[0]<=at&&t[2]<=at&&t[0]>=at-1200000).sort((a,b)=>a[0]-b[0]);
+      const k=research.snapshot({at,close,target,targetAt:at,ticks:input,book:this.books[mk],exchange,marketStatus:market?.status??null});
+      if(error||at-(close-c)*1000>research.SETTINGS.checkpointToleranceMs){k.status=error||'checkpoint missed during market read';k.p=null;k.p2=null;}
+      row.checks[c]=k;row.target=target;row.rules={primary:market?.rules_primary??null,secondary:market?.rules_secondary??null,closeTime:market?.close_time??null};
+      await this.state.storage.put(`ri:${close}:${c}`,{schema:research.VERSION,model:MODEL_VERSION,mk,close,check:c,at,
+        columns:['source_ms','value_usd','first_received_ms'],source:'cfbenchmarks_value',ticks:input,target,targetAt:at});
+      const pending=(await this.state.storage.get('research.pending'))||[];
+      if(k.status==='forecast')pending.push({key,check:c,readyAt:at+research.SETTINGS.delayMs});
+      await this.state.storage.put('research.pending',pending);
+      changed=true;
+    }
+    if(changed)await this.state.storage.put(key,row);
+  }
+  async researchArrivals() {
+    const pending=(await this.state.storage.get('research.pending'))||[],keep=[];
+    for(const item of pending){
+      if(Date.now()<item.readyAt){keep.push(item);continue;}
+      const row=await this.state.storage.get(item.key),k=row?.checks?.[item.check];
+      if(!k||k.arrival)continue;
+      const at=Date.now(),depth=research.depthSnapshot(this.books[row.mk],at);
+      k.arrival={at,depth,exchange:k.exchange,exchangeObservedAt:k.at,exchangeAgeMs:at-k.at};
+      // Reuses checkpoint status only for this bounded 1–4s simulation. No exchange order.
+      await this.state.storage.put(item.key,row);
+    }
+    if(pending.length)await this.state.storage.put('research.pending',keep);
+  }
+  async researchSettle() {
+    const now=Date.now(),rows=[...(await this.state.storage.list({prefix:'r:'})).values()].sort((a,b)=>a.close-b.close);
+    for(const row of rows.filter(w=>w.close*1000<now-60000&&w.src!=='kalshi').slice(-4)){
+      if(!row.closingCapture){
+        const ticks=[...this.researchTicks.values()].filter(t=>Math.floor(t[0]/1000)>row.close-60&&Math.floor(t[0]/1000)<=row.close).sort((a,b)=>a[0]-b[0]);
+        const seconds=new Map(ticks.map(t=>[Math.floor(t[0]/1000),t[1]]));
+        row.closingCapture={at:now,samples:seconds.size,complete:seconds.size===60,localAverage:seconds.size===60?[...seconds.values()].reduce((a,b)=>a+b,0)/60:null};
+        await this.state.storage.put(`ri:${row.close}:0`,{schema:research.VERSION,mk:row.mk,close:row.close,check:0,at:now,source:'cfbenchmarks_value',columns:['source_ms','value_usd','first_received_ms'],ticks});
+        await this.state.storage.put('r:'+row.close,row);
+      }
+      let m;
+      const existing=await this.state.storage.get('w:'+row.mk);
+      if(existing?.src==='kalshi')m={result:existing.result,expiration_value:existing.officialCloseAvg};
+      else m=(await signedGet(this.env,'/trade-api/v2/markets/'+row.mk))?.market;
+      if(m&&['yes','no'].includes(m.result)){
+        row.result=m.result;row.src='kalshi';row.resultObservedAt=Date.now();
+        row.officialCloseAvg=m.expiration_value!=null&&Number.isFinite(Number(m.expiration_value))?Number(m.expiration_value):null;
+        await this.state.storage.put('r:'+row.close,row);
+      }
+    }
+    if(now-(this.researchPrunedAt||0)>3600000){
+      for(const row of rows)if(row.close*1000<now-10*86400000)await this.state.storage.delete('r:'+row.close);
+      const inputs=await this.state.storage.list({prefix:'ri:'});
+      for(const [key] of inputs)if(Number(key.split(':')[1])*1000<now-86400000)await this.state.storage.delete(key);
+      this.researchPrunedAt=now;
+    }
   }
   async marketData(path) {
     const reply=(d)=>new Response(d.body,{status:d.status,headers:{...CORS,"Content-Type":"application/json",...(d.retry?{"Retry-After":String(d.retry)}:{})}});
@@ -606,7 +837,7 @@ export class KalshiFeed {
   }
   send(obj) { if (this.up) { obj.id = this.subId++; try { this.up.send(JSON.stringify(obj)); } catch (e) {} } }
   subscribeTickers() {                           // this window's market and the next; renewed at each boundary
-    const tk = currentTickers().slice(0,1), set = tk.join(","), wantDepth = this.clients.size > 0 || this.agentActive;
+    const tk = currentTickers().slice(0,1), set = tk.join(","), wantDepth = this.clients.size > 0 || this.agentActive || research.depthWanted(Date.now());
     if (set !== this.tickerSet || wantDepth !== this.depthSubscribed) {
       const old = [this.tickerSid, this.bookSid].filter(x => x != null);
       if (old.length) this.send({cmd: "unsubscribe", params: {sids: old}});
@@ -634,6 +865,7 @@ export class KalshiFeed {
   nextEvent(nowMs, agentOn, cfg) {             // the next checkpoint, settlement or agent moment after now, in ms
     const now = nowMs / 1000, close = (Math.floor(now / WINDOW) + 1) * WINDOW, times = [];
     for (const c of [close - WINDOW, close, close + WINDOW]) { for (const k of CHECKS) times.push(c - k); times.push(c + 90, c + 400); }
+    for (const c of [close,close+WINDOW]) for(const k of research.CHECKS)times.push(c-k-5,c-k,c-k+10);
     if (agentOn) {
       const first = cfg ? cfg.firstSeconds : 300, lastS = cfg ? cfg.lastSeconds : 15;
       const zoneStart = close - WINDOW + first, zoneEnd = close - lastS;
@@ -652,13 +884,16 @@ export class KalshiFeed {
     try {
       await this.state.storage.put("index.seconds", [...this.indexSeconds].slice(-1200));
       await this.ensureAlarm();
+      await this.researchArrivals();
       const close = (Math.floor(now / WINDOW) + 1) * WINDOW, left = close - now;
       const check = CHECKS.find(k => left <= k && k - left < 20);
       if (check) await this.checkpoint(marketTicker(close), close, check, nowMs);
+      await this.researchCapture();
       // Retry old unresolved windows as well as the most recent close.
       const rows = await this.state.storage.list({prefix: "w:"});
       const pending = [...rows.values()].filter(w => w.close < now - 60 && w.src !== "kalshi").slice(-4);
       for (const w of pending) await this.settle(w.mk, w.close);
+      await this.researchSettle();
       const prevClose = close - WINDOW;
       const trades=await this.state.storage.list({prefix:"t:"});
       for(const tradeWindow of [...trades.values()].filter(v=>v.close<now-60&&!v.settled&&v.trades?.length).slice(-8)) await this.settleTrades(tradeWindow.mk,tradeWindow.close);
@@ -679,7 +914,8 @@ export class KalshiFeed {
         const cfg = await this.tradeConfig().catch(() => ({mode: "off"}));
         const pending=await this.state.storage.list({prefix:"t:"});
         const due=[...pending.values()].filter(v=>v.pendingPaper).map(v=>Math.max(Date.now()+100,v.pendingPaper.readyAt));
-        await this.state.storage.setAlarm(Math.min(this.nextEvent(Date.now(), cfg.mode === "paper", cfg),...due));
+        const researchDue=((await this.state.storage.get('research.pending'))||[]).map(p=>Math.max(Date.now()+100,p.readyAt));
+        await this.state.storage.setAlarm(Math.min(this.nextEvent(Date.now(), cfg.mode === "paper", cfg),...due,...researchDue));
         this.alarmBusy = false;
       }
     }
@@ -874,7 +1110,7 @@ export class KalshiFeed {
       if (Number.isFinite(d.seq)){this.bookSequences.set(sid,d.seq);this.bookSequence=d.seq;}
     }
     if (d.type === "orderbook_snapshot" && d.msg && d.msg.market_ticker) {
-      const b = {yes: new Map(), no: new Map(), at: Date.now()};
+      const b = {yes: new Map(), no: new Map(), at: Date.now(), sourceAt:Number(d.sending_ts_ms)||null, sourceKind:'sending_ts_ms'};
       for (const [px, q] of d.msg.yes_dollars_fp || []) if (+q > 0) b.yes.set(+px, +q);
       for (const [px, q] of d.msg.no_dollars_fp || []) if (+q > 0) b.no.set(+px, +q);
       this.books[d.msg.market_ticker] = b;
@@ -883,6 +1119,8 @@ export class KalshiFeed {
       const m = this.books[d.msg.market_ticker][d.msg.side === "no" ? "no" : "yes"], px = +d.msg.price_dollars, q = (m.get(px) || 0) + +d.msg.delta_fp;
       if (q > 0) m.set(px, q); else m.delete(px);
       this.books[d.msg.market_ticker].at = Date.now();
+      this.books[d.msg.market_ticker].sourceAt = Number(d.msg.ts_ms??d.sending_ts_ms)||null;
+      this.books[d.msg.market_ticker].sourceKind = d.msg.ts_ms!=null?'ts_ms':'sending_ts_ms';
     }
     if (d.type === "cfbenchmarks_value_5hz" && d.msg && d.msg.index_id === "BRTI" && +d.msg.value_usd > 0) this.pushTick(+d.msg.source_ts_ms, +d.msg.value_usd);
     if (d.type === "cfbenchmarks_value" && d.msg) {
@@ -890,6 +1128,8 @@ export class KalshiFeed {
         const raw = JSON.parse(d.msg.data), v = +raw.value, ms = typeof raw.time === "number" || /^\d{13}$/.test(raw.time) ? +raw.time : Date.parse(raw.time);
         if (d.msg.index_id === "BRTI" && v > 0 && Number.isFinite(v) && ms > 0 && Date.now() - ms < 1200000 && ms <= Date.now() + 1000) {
           this.pushTick(ms, v); this.indexSeconds.set(ms, v);
+          if(!this.researchTicks.has(ms))this.researchTicks.set(ms,[ms,v,Date.now()]);
+          for(const t of this.researchTicks.keys())if(t<Date.now()-1200000)this.researchTicks.delete(t);
           for (const t of this.indexSeconds.keys()) if (t < Date.now() - 1200000) this.indexSeconds.delete(t);
         }
       } catch (e) {}

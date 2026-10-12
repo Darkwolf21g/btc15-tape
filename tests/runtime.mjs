@@ -12,5 +12,11 @@ try {
  const st=await (await mf.dispatchFetch('https://test/trade/status?token=local-test-token')).json(); assert.equal(st.config.mode,'off');
  const bad=await mf.dispatchFetch('https://test/trade/config?token=local-test-token',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({minEdge:-10})}); assert.equal(bad.status,400);
  const rec=await (await mf.dispatchFetch('https://test/record?token=local-test-token')).json(); assert.deepEqual(rec,[]);
- console.log('Worker runtime: auth gate, SQLite health, default OFF, config validation, record PASS');
+ assert.equal((await mf.dispatchFetch('https://test/research/export')).status,403);
+ const research=await (await mf.dispatchFetch('https://test/research/status?token=local-test-token')).json();assert.equal(research.recordedWindows,0);
+ const report=await (await mf.dispatchFetch('https://test/research/report?token=local-test-token')).json();assert.equal(report.evaluatedWindows,0);assert.equal(report.readyForLive,false);
+ const exported=await (await mf.dispatchFetch('https://test/research/export?token=local-test-token')).json();assert.deepEqual(exported.rows,[]);assert.equal(exported.nextAfter,null);
+ assert.equal((await mf.dispatchFetch('https://test/research/export?token=local-test-token',{method:'POST'})).status,405);
+ assert.equal((await mf.dispatchFetch('https://test/research/inputs?token=local-test-token&close=1&check=60')).status,404);
+ console.log('Worker runtime: auth, SQLite, default OFF, controls, research report/export/retention PASS');
 } finally { await mf.dispose(); }

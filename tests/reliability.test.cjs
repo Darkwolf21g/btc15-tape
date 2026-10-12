@@ -155,8 +155,8 @@ test('collector exceptions become redacted diagnostic 503 responses',async()=>{
  assert.equal(response.status,503);assert.equal(body.error,'platform_limit');assert.ok(body.trace);assert.ok(!JSON.stringify(body).includes('SECRET'));assert.equal(response.headers.get('Retry-After'),'30');
 });
 
-test('background collection skips contract depth and only subscribes current market',()=>{
- const h=worker(),messages=[];h.obj.up={send:raw=>messages.push(JSON.parse(raw))};h.obj.subscribeTickers();
+test('background collection skips depth outside research bursts and only subscribes current market',()=>{
+ const h=worker(),messages=[];h.setTime(Math.floor(h.now/900000)*900000+100000);h.obj.up={send:raw=>messages.push(JSON.parse(raw))};h.obj.subscribeTickers();
  assert.equal(messages.filter(m=>m.params.channels?.includes('orderbook_delta')).length,0);
  assert.equal(messages.find(m=>m.params.channels?.includes('ticker')).params.market_tickers.length,1);
  h.obj.clients.add({});h.obj.subscribeTickers();assert.equal(messages.filter(m=>m.params.channels?.includes('orderbook_delta')).length,1);

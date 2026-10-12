@@ -3,3 +3,6 @@ node_modules/
 __pycache__/
 
 node_modules
+
+research-data*.json
+research-report*.json
