@@ -9,6 +9,12 @@
   "assets": { "directory": "./public", "binding": "ASSETS" },
   "durable_objects": { "bindings": [{ "name": "FEED", "class_name": "KalshiFeed" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["KalshiFeed"] }],
+  // Preview namespaces are isolated automatically; never set script_name to production here.
+  // Assets and migrations stay top-level. Production secrets and cron are not inherited.
+  "previews": {
+    "durable_objects": { "bindings": [{ "name": "FEED", "class_name": "KalshiFeed" }] },
+    "observability": { "enabled": true }
+  },
   "triggers": { "crons": ["* * * * *"] },
   "observability": { "enabled": true }
 }

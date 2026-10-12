@@ -153,8 +153,8 @@ test('closing-tick capture waits for onSecond and never assigns a proxy as the o
 });
 
 test('legacy proxy outcomes are retained as diagnostics and excluded from Brier and P&L', () => {
-  const checks = {300: {p: 0.9, p2: 0.8, bid: 0.4, ask: 0.6}};
-  const buys = [{side: 'Up', price: 50}];
+  const checks = {300: {model:"brti-driftless-v3",p: 0.9, p2: 0.8, bid: 0.4, ask: 0.6}};
+  const buys = [{model:'brti-driftless-v3',side: 'Up', price: 50}];
   const {api} = page([
     {mk: 'proxy', close: 120, src: 'page', result: 'yes', checks, buys},
     {mk: 'official', close: 120, src: 'kalshi', result: 'no', checks, buys},
@@ -209,8 +209,7 @@ function readyPage(missing = false) {
 
 test('render shows WAIT and clears probability and buy indicators after an elapsed gap', () => {
   const {api, node} = readyPage();
-  api.acceptIndex(100,3560000);
-  for(let t=3380;t<=3560;t++) api.officialSeconds.set(t,100+Math.sin(t));
+  api.acceptIndex(100,3560000); for(let t=3380;t<=3560;t++) api.officialSeconds.set(t,100+Math.sin(t));
   api.render();
   assert.match(node('pBig').textContent, /%$/);
   api.samples.delete(3550); api.officialSeconds.delete(3550);
