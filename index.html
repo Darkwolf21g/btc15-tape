@@ -45,7 +45,7 @@ header { display: flex; align-items: flex-end; justify-content: space-between; g
 .clock.settling { color: var(--target); }
 
 .hero { display: grid; grid-template-columns: auto 1fr; gap: 6px 18px; align-items: center; margin-block: 14px 10px; }
-.p { font: 700 84px/0.85 var(--display); }
+.p { font: 700 84px/0.85 var(--display); min-width: 3ch; font-variant-numeric: tabular-nums; }
 .p.up { color: var(--up); } .p.down { color: var(--down); } .p.none { color: var(--dim); }
 .split { display: grid; gap: 6px; min-width: 0; }
 .bar { height: 10px; border-radius: 5px; background: var(--down); overflow: hidden; }
@@ -56,6 +56,8 @@ header { display: flex; align-items: flex-end; justify-content: space-between; g
 .fair .u { color: var(--up); } .fair .d { color: var(--down); }
 .why { grid-column: 1 / -1; color: var(--ink); font-size: 12px; display: grid; gap: 2px; }
 .why .sub { color: var(--dim); }
+#decision { min-height: 5.6em; }
+#healthMode { min-height: 2.8em; }
 /* the settlement minute, in one strip: what is in, what is needed, where spot is */
 .settle { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; background: var(--panel); border: 1px solid var(--target); border-radius: 8px; padding: 8px 10px; }
 .settle div { display: grid; gap: 3px; min-width: 0; }
@@ -1780,7 +1782,23 @@ $("snd").addEventListener("click", () => {
   $("snd").classList.toggle("on", snd.on);
   if (snd.on) beep([[660, 70], [880, 110]]);
 });
-let lastP = null, lastMk = null, lastNeed = null;
+let lastP = null, lastMk = null, lastNeed = null, lastForecastView = null;
+// Presentation only: bridge a short publication delay for the newest second.
+// Never pass a held estimate into signals, recorded forecasts or paper trading.
+function forecastView(mk, tgt, nowMs, live, proj, p, band, status, close) {
+  if (proj && p != null && band) {
+    lastForecastView = {mk,tgt,at:nowMs,proj,p,band};
+    return {...lastForecastView,pending:false};
+  }
+  const sec = Math.floor(nowMs/1000), previous = lastForecastView;
+  const pending = live && status && status.missing === 1 && !officialSeconds.has(sec)
+    && sec > close-60 && sec < close && nowMs-sec*1000 < 750
+    && previous && previous.mk === mk && previous.tgt === tgt
+    && nowMs-previous.at >= 0 && nowMs-previous.at < 1500;
+  if (pending) return {...previous,pending:true};
+  lastForecastView = null;
+  return {proj:null,p:null,band:null,pending:false};
+}
 function render() {
   const nowMs = Date.now(), now = nowMs / 1000, [open, close] = bounds(now), [, mk] = tickers(close);
   spot = consensus();
@@ -1842,17 +1860,20 @@ function render() {
     } else pHist.delete(Math.floor(now));
     // Record only forecasts actually observed; never paint newer knowledge into the past.
   }
+  const currentP = p, currentProj = proj, currentBand = band;
+  const view = forecastView(mk,tgt,nowMs,live,proj,p,band,projectionStatus,close);
+  ({p,proj,band} = view);
   // In the final minute: the average the remaining seconds must reach for Up to win.
   const need = proj && tgt != null && proj.observed && proj.m > 0 ? Math.ceil((((tgt - 0.005) * 60 - (proj.sum + (proj.official ? 0 : proj.observed * basis))) / proj.m) * 100 - 1e-7) / 100 : null;
   $("lvProj").textContent = proj ? money(proj.mean) : "–";
   $("lvProjNote").textContent = proj ? (proj.observed ? (proj.official ? `${proj.observed}/60 s in Kalshi's own average` : `${proj.observed}/60 proxy samples, ${proj.reconstructed} reconstructed`) + (need != null ? ` · Up needs ≥ ${money(need)} over the last ${proj.m} s` : "") : (live ? "official index; forecast until the final minute" : "exchange-proxy forecast until the final minute")) + ` · ±${proj.sd.toFixed(0)} model scale · vol $${vols.s.toFixed(1)} now, $${vols.l.toFixed(1)}/√s over 15 min` + (lean ? ` · experimental lean ${signed(lean)} (not applied)` : "")
-    : projectionStatus && projectionStatus.missing ? `INCOMPLETE: ${projectionStatus.missing} elapsed proxy samples missing` : vols == null ? "measuring volatility…" : "needs the target";
+    : projectionStatus && projectionStatus.missing ? `INCOMPLETE: ${projectionStatus.missing} elapsed BRTI readings missing` : vols == null ? "measuring volatility…" : "needs the target";
   lastNeed = need;
   lastInputs = proj ? {x: +x.toFixed(2), src: live ? "stream" : "exchanges", sd: +proj.sd.toFixed(1), lean: +lean.toFixed(1), known: proj.official ? "official" : proj.observed + "/60", tgt, vol: +vols.s.toFixed(2)} : null;
   // the settlement minute, in one strip
-  const inFinal = left <= SETTLE && left > 0 && proj && proj.observed;
+  const inFinal = left <= SETTLE && left > 0;
   $("settle").hidden = !inFinal;
-  if (inFinal) {
+  if (inFinal && proj && proj.observed) {
     const soFar = (proj.sum + (proj.official ? 0 : proj.observed * basis)) / proj.observed;
     $("stIn").textContent = `${proj.observed} / 60`;
     $("stInNote").textContent = proj.official ? "Kalshi's own count" : proj.reconstructed ? `${proj.reconstructed} rebuilt` : "page's own";
@@ -1860,6 +1881,11 @@ function render() {
     $("stAvgNote").textContent = tgt != null ? `${signed(soFar - tgt)} vs target` : "";
     $("stNeed").textContent = need != null ? money(need) : "–"; $("stNeed").className = need != null && x != null ? (x >= need ? "up" : "down") : "";
     $("stNeedNote").textContent = need != null && x != null ? `over the last ${proj.m} s · spot ${signed(x - need)}` : "";
+  }
+  if (inFinal && !(proj && proj.observed)) {
+    $("stIn").textContent = "– / 60"; $("stInNote").textContent = "Awaiting BRTI";
+    $("stAvg").textContent = "–"; $("stAvg").className = ""; $("stAvgNote").textContent = "Incomplete readings";
+    $("stNeed").textContent = "–"; $("stNeed").className = ""; $("stNeedNote").textContent = "Signals paused";
   }
   $("avgLegend").textContent = "60-s BRTI average · gaps stay empty";
   // the slim bar, once the hero has scrolled away
@@ -1875,7 +1901,7 @@ function render() {
   $("probBar").classList.toggle("waiting", p == null);
   $("healthFeed").textContent = live ? `BRTI live · ${Math.max(0, (nowMs - feed.brti.t) / 1000).toFixed(1)}s old` : feed.brti ? "BRTI stale · signals paused" : "Exchange estimate · BRTI connecting";
   $("healthFeed").className = live ? "good" : "meh";
-  $("healthMode").textContent = p == null ? "Model: waiting for complete data" : globalThis.BTC15Model.VERSION + " · uncalibrated";
+  $("healthMode").textContent = p == null ? "Model: waiting for complete data" : view.pending ? `Awaiting next BRTI · estimate ${(Math.max(0,nowMs-view.at)/1000).toFixed(1)}s old` : globalThis.BTC15Model.VERSION + " · uncalibrated";
   if (p == null) {
     big.textContent = "WAIT"; big.className = "p none";
     $("pBar").style.width = "0%";
@@ -1902,9 +1928,11 @@ function render() {
       + (basisSrc === "raw" ? " Enter the exact Robinhood target to set the level." : "")
       + (!exactTarget ? " Target estimated: buy calls wait until it is confirmed or entered." : "");
     const whyHtml = `<span>${line1}</span>` + (line2.trim() ? `<span class="sub">${line2.trim()}</span>` : "");
-    if ($("why").innerHTML !== whyHtml) $("why").innerHTML = whyHtml;
+    if (!view.pending && $("why").innerHTML !== whyHtml) $("why").innerHTML = whyHtml;
     $("why").style.color = sharp ? (move10 > 0 ? css("--up") : css("--down")) : "";
   }
+  p = currentP; proj = currentProj; band = currentBand;
+  if (view.pending) lastInputs = null;
   lastP = p;
   $("ask").hidden = tgt != null && !askOpen;
   const km = kalshi.market && kalshi.market.ticker === mk && nowMs - kalshi.market.at < 5000 && kalshi.market.bid && kalshi.market.ask ? kalshi.market : null;
@@ -1916,12 +1944,13 @@ function render() {
     : "Type what Robinhood's buttons say to see your edge";
   const typedUp = $("rhUp").value ? parseFloat($("rhUp").value) : null, typedDown = $("rhDown").value ? parseFloat($("rhDown").value) : null;
   const paused = tradingPaused();
-  const waitReason = paused ? "WAIT: Kalshi has trading paused" + (exch.resume ? " (until about " + ET_CLOCK.format(new Date(exch.resume)) + ")" : "") : !exactTarget ? "WAIT: enter or retrieve the exact target" : "WAIT: incomplete data or model unavailable";
+  const waitReason = view.pending ? "WAIT: next BRTI reading pending" : paused ? "WAIT: Kalshi has trading paused" + (exch.resume ? " (until about " + ET_CLOCK.format(new Date(exch.resume)) + ")" : "") : !exactTarget ? "WAIT: enter or retrieve the exact target" : "WAIT: incomplete data or model unavailable";
   const signalP = exactTarget && !paused && live ? p : null;
   const dep = depth(mk);
   const vUp = verdict($("vUp"), typedUp!=null&&nowMs-manualQuoteAt.Up>15000?null:signalP, band && band.lo, typedUp != null ? typedUp : upC, signalP!=null&&typedUp!=null&&nowMs-manualQuoteAt.Up>15000?"WAIT: refresh the entered quote (older than 15s)":waitReason, dep && dep.up);
   const vDown = verdict($("vDown"), typedDown!=null&&nowMs-manualQuoteAt.Down>15000?null:signalP == null ? null : 1 - signalP, band && 1 - band.hi, typedDown != null ? typedDown : downC, signalP!=null&&typedDown!=null&&nowMs-manualQuoteAt.Down>15000?"WAIT: refresh the entered quote (older than 15s)":waitReason, dep && dep.down);
   decisionLine(signalP, band, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, left);
+  if (view.pending) $("decision").textContent = "Waiting for the next BRTI reading. Last estimate shown; trade signals paused.";
   keepRecord(mk, close, left, tgt, p, proj && tgt != null ? chanceMatched(proj.mean, proj.sd, tgt) : null, km, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, typedUp != null || typedDown != null);
 
   // sounds: a sharp move as it starts, a buy call on Kalshi's own prices once it has held for a few
@@ -1948,7 +1977,7 @@ function render() {
     const rl = recordLine(); if (rl !== $("recLine").textContent) $("recLine").textContent = rl;
     if ($("recordBox").open) { const rt = recordText(); if (rt !== $("recOut").textContent) $("recOut").textContent = rt; }
   }
-  if (nowMs - chartsAt >= 200) { chartsAt = nowMs; drawMain(open, close, now, tgt, proj); drawFlow(open, close, now); drawProb(open, close, now); }
+  if (nowMs - chartsAt >= 200) { chartsAt = nowMs; drawMain(open, close, now, tgt, view.proj); drawFlow(open, close, now); drawProb(open, close, now); }
   if ($("diag").open && Math.floor(now) !== diagAt) { diagAt = Math.floor(now); $("diagOut").textContent = diagnostics(now, open); }
 }
 let wasSharp = false, edgeSince = 0, edgeGoneAt = 0, edgeArmed = true, lastLeft = Infinity;
