@@ -129,7 +129,14 @@ export default {
       return new Response("not found", {status: 404, headers: CORS});
     }
     if(env.FEED&&env.KALSHI_KEY_ID&&env.KALSHI_PRIVATE_KEY){
-      try{return await env.FEED.get(env.FEED.idFromName("brti")).fetch(new Request("https://internal/market-data?path="+encodeURIComponent(path)));}
+      try{
+        const r=await env.FEED.get(env.FEED.idFromName("brti")).fetch(new Request("https://internal/market-data?path="+encodeURIComponent(path)));
+        if(r.status!==426)return r;
+        // During rollout, the singleton can briefly run code from before this route existed.
+        // Keep the same authenticated read; never fall back on rate limits or arbitrary errors.
+        const d=await signedGet(env,"/trade-api/v2"+path);
+        return new Response(JSON.stringify(d),{headers:{...CORS,"Content-Type":"application/json"}});
+      }
       catch{return new Response(JSON.stringify({error:"collector_unavailable"}),{status:503,headers:{...CORS,"Content-Type":"application/json","Retry-After":"30"}});}
     }
     const result = await publicKalshi(path);
