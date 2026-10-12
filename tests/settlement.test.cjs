@@ -23,7 +23,7 @@ function page(savedRecord = []) {
     return nodes.get(id);
   };
   const context = vm.createContext({
-    Date: Clock, console, Intl, URL, setInterval() {}, clearTimeout() {},
+    Date: Clock, console, Intl, URL, getComputedStyle() { return {getPropertyValue() { return "#888"; }}; }, setInterval() {}, clearTimeout() {},
     setTimeout(fn, ms) { timers.push({fn, ms}); return timers.length; },
     window: {addEventListener() {}}, navigator: {},
     document: {getElementById: node, addEventListener() {}},
@@ -37,7 +37,7 @@ function page(savedRecord = []) {
     globalThis.api = {
       avgAt, project, windowSamples, captureProxyClose, settleWindow, settleOfficial,
       scoreRecord, recordLine, recordText, verdict, render, target, tickers, record,
-      samples, backfill, venue, kalshi, pHist, feed, feedLive, officialSeconds, officialSettle, officialTrailing, acceptIndex, indexVols, decisionLine,
+      samples, backfill, venue, kalshi, pHist, feed, feedLive, officialSeconds, officialSettle, officialTrailing, trailingAverageStatus, acceptIndex, indexVols, decisionLine,
       setBasisValue(v, sd = 0.5) { basis = v; basisSrc = 'kalshi'; basisSd = sd; },
       setMarketResponse(market) { kalshiGet = async () => ({market}); },
       seedVol() { volN = 60; for (const row of vol) { row[0] = 4; row[1] = 1; } },
@@ -276,3 +276,33 @@ test('trailing BRTI average requires sixty readings and excludes current source 
 });
 
 test('exchange-only data cannot display probability or issue trade signals',()=>{const {api,node}=readyPage();api.render();assert.equal(node('pBig').textContent,'WAIT');assert.match(node('why').textContent,/official BRTI is unavailable/);assert.match(node('vUp').textContent,/WAIT/);assert.equal(api.pHist.size,0);});
+
+
+test('BRTI average tile reports missing readings and never substitutes a complete exchange window', () => {
+  const {api,node}=readyPage();
+  fill(api, 3500, 3559, 999);
+  api.acceptIndex(100,3560000);
+  for(let s=3500;s<=3560;s++) api.officialSeconds.set(s,100);
+  api.officialSeconds.delete(3530);
+  api.render();
+  assert.equal(node('lvAvg').textContent,'–');
+  assert.match(node('lvAvgNote').textContent,/59\/60 readings/);
+  assert.doesNotMatch(node('lvAvgNote').textContent,/proxy samples|Exchange proxy/);
+});
+test('BRTI trailing average stays anchored to its latest one-second tick while faster spot advances', () => {
+  const {api,node,setTime}=readyPage();setTime(3561200);
+  api.acceptIndex(1000,3561200);
+  for(let s=3500;s<=3560;s++) api.officialSeconds.set(s,s===3560?999:100);
+  const a=api.trailingAverageStatus();assert.equal(a.v,100);assert.equal(a.n,60);
+  api.render();assert.equal(node('lvAvg').textContent,'$100.00');
+  assert.match(node('lvAvgNote').textContent,/trailing, not final settlement/);
+  setTime(3564000);assert.equal(api.trailingAverageStatus().v,null);
+});
+test('only a fresh complete BRTI aggregate can supply an average before local history warms', () => {
+  const {api}=page();
+  api.feed.avg60={v:101,n:60,end:3560000,at:3560000};
+  assert.equal(api.trailingAverageStatus().v,101);
+  api.feed.avg60.n=59;assert.equal(api.trailingAverageStatus().v,null);
+  api.feed.avg60.n=60;api.feed.avg60.at=3550000;assert.equal(api.trailingAverageStatus().v,null);
+  api.feed.avg60.at=3565000;api.feed.avg60.end=3565000;assert.equal(api.trailingAverageStatus().v,null);
+});
