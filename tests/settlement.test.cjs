@@ -326,3 +326,36 @@ test('relay snapshots hydrate the real one-Hz buffer without creating fresh spot
   api.acceptOfficialMessage({index_id:'ETHUSD_RTI',data:JSON.stringify({time:now,value:200})});
   assert.equal(api.officialSeconds.get(now/1000),100);
 });
+
+test('brief newest-second publication delay keeps the display stable but disables signals and records', () => {
+  const {api,node,setTime}=readyPage();
+  api.acceptIndex(100,3560000); for(let t=3380;t<=3560;t++)api.officialSeconds.set(t,100+Math.sin(t));
+  setTime(3560900);api.render();
+  const prior=node('pBig').textContent, count=node('stIn').textContent;
+  setTime(3561100);api.acceptIndex(100,3561100);api.render();
+  assert.equal(node('pBig').textContent,prior);
+  assert.equal(node('stIn').textContent,count);assert.equal(node('settle').hidden,false);
+  assert.match(node('healthMode').textContent,/Awaiting next BRTI/);
+  assert.match(node('vUp').textContent,/WAIT/);assert.match(node('vDown').textContent,/WAIT/);
+  assert.match(node('decision').textContent,/trade signals paused/);
+  assert.equal(api.pHist.has(3561),false);
+  api.officialSeconds.set(3561,100);api.render();
+  assert.doesNotMatch(node('healthMode').textContent,/Awaiting/);assert.equal(api.pHist.has(3561),true);
+});
+test('publication grace expires and does not hide real data gaps', () => {
+  const {api,node,setTime}=readyPage();
+  api.acceptIndex(100,3560000);for(let t=3380;t<=3560;t++)api.officialSeconds.set(t,100+Math.sin(t));
+  setTime(3560900);api.render();setTime(3561100);api.render();
+  assert.match(node('pBig').textContent,/%$/);
+  setTime(3561800);api.render();assert.equal(node('pBig').textContent,'WAIT');
+  assert.equal(node('settle').hidden,false);assert.equal(node('stAvg').textContent,'–');
+  assert.match(node('lvProjNote').textContent,/BRTI readings/);
+});
+test('a held estimate cannot survive a change of target or contract window', () => {
+  const {api,node,setTime}=readyPage();
+  api.acceptIndex(100,3560000);for(let t=3380;t<=3560;t++)api.officialSeconds.set(t,100+Math.sin(t));
+  setTime(3560900);api.render();setTime(3561100);
+  api.setTarget(api.tickers(3600)[1],101);api.render();assert.equal(node('pBig').textContent,'WAIT');
+  setTime(3600100);api.render();assert.equal(node('pBig').textContent,'WAIT');
+  assert.equal(node('settle').hidden,true);
+});
