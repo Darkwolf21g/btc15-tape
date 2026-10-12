@@ -192,7 +192,7 @@ const SETTLE = 60, VOL_TAU = 180, CHECKS = [600, 300, 120, 60];
 // Frozen baseline: no fitted flow lean; all parameters recorded under VERSION.
 (() => {
 const VERSION = "brti-driftless-v3";
-const EXECUTION_VERSION = "paper-delayed-depth-v1";
+const EXECUTION_VERSION = "paper-delayed-depth-v2";
 const SETTLE = 60, VOL_TAU = 180;
 const tailCdf = z => 0.5 + z * (z*z+6) / (2*Math.pow(z*z+4,1.5));
 const chance = (mean, sd, target) => tailCdf((mean - (target - .005)) / sd);
@@ -247,7 +247,7 @@ function asks(book,side) {
  const levels=side==="Up"?book?.no:book?.yes;
  if(!levels)return [];
  return [...levels].filter(([p,n])=>Number.isFinite(p)&&p>0&&p<1&&Number.isFinite(n)&&n>0)
-  .map(([p,n])=>({price:Math.round((1-p)*10000)/100,size:Math.floor(n)})).sort((a,b)=>a.price-b.price);
+  .map(([p,n])=>({price:Math.round((1-p)*10000)/100,size:Math.round(n*100)/100})).filter(level=>level.size>0).sort((a,b)=>a.price-b.price);
 }
 function paperFill(intent,book,nowMs,cfg) {
  const empty=reason=>({filled:0,cost:0,feesCents:0,status:"paper-no-fill",reason,levels:[],filledAt:nowMs,latencyMs:nowMs-intent.at});
@@ -274,11 +274,11 @@ globalThis.BTC15Model=Object.freeze({VERSION,EXECUTION_VERSION,tailCdf,chance,vo
 // Canonical research calculations; embedded in worker.js and imported by the offline evaluator.
 (() => {
 const VERSION = 'settlement-research-v1';
-const BIAS_VERSION = 'btc15-bias-v1';
+const BIAS_VERSION = 'btc15-bias-v2';
 const PRICE_BANDS = [0,10,30,50,70,90,100];
 const CHECKS = [600, 300, 120, 60, 30, 15, 5];
 const SETTINGS = Object.freeze({delayMs:1000, maxArrivalLateMs:3000, bookMaxAgeMs:1500,
-  indexMaxAgeMs:3000, depthFraction:0.5, quantity:1, minEdgeCents:3,
+  indexMaxAgeMs:3000, sourceClockSkewMs:250, depthFraction:0.5, quantity:1, minEdgeCents:3,
   feeVenue:'kalshi', feeAssumption:'general taker multiplier 1; whole-cent rounding per fill level',
   checkpointToleranceMs:5000, minTrainWindows:60, testWindows:20});
 const finite = v => typeof v === 'number' && Number.isFinite(v);
@@ -294,10 +294,10 @@ function depthSnapshot(book, at) {
   const no = globalThis.BTC15Model.asks(book,'Down').slice(0,10);
   const bid = no.length ? 100-no[0].price : null, ask = yes[0]?.price ?? null;
   const fresh = age >= 0 && age <= SETTINGS.bookMaxAgeMs && sourceAge != null &&
-    sourceAge >= 0 && sourceAge <= SETTINGS.bookMaxAgeMs;
+    sourceAge >= -SETTINGS.sourceClockSkewMs && sourceAge <= SETTINGS.bookMaxAgeMs;
   const valid = fresh && finite(bid) && finite(ask) && bid <= ask;
   return {receivedAt:book.at, sourceAt, sourceKind:book.sourceKind || null,
-    ageMs:age, sourceAgeMs:sourceAge, valid, bidCents:bid, askCents:ask, yes, no,
+    ageMs:age, sourceAgeMs:sourceAge, clockAheadMs:sourceAge==null?null:Math.max(0,-sourceAge), valid, bidCents:bid, askCents:ask, yes, no,
     reason:!fresh?'missing, stale or future depth timestamp':!valid?'empty or crossed book':null};
 }
 function snapshot({at, close, target, targetAt, ticks, book, exchange, marketStatus}) {
@@ -1200,7 +1200,7 @@ export class KalshiFeed {
       this.books[d.msg.market_ticker] = b;
     }
     if (d.type === "orderbook_delta" && d.msg && d.msg.market_ticker && this.books[d.msg.market_ticker]) {
-      const m = this.books[d.msg.market_ticker][d.msg.side === "no" ? "no" : "yes"], px = +d.msg.price_dollars, q = (m.get(px) || 0) + +d.msg.delta_fp;
+      const m = this.books[d.msg.market_ticker][d.msg.side === "no" ? "no" : "yes"], px = +d.msg.price_dollars, q = (Math.round((m.get(px) || 0)*100) + Math.round(Number(d.msg.delta_fp)*100))/100;
       if (q > 0) m.set(px, q); else m.delete(px);
       this.books[d.msg.market_ticker].at = Date.now();
       this.books[d.msg.market_ticker].sourceAt = Number(d.msg.ts_ms??d.sending_ts_ms)||null;

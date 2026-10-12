@@ -2,7 +2,7 @@
 // Frozen baseline: no fitted flow lean; all parameters recorded under VERSION.
 (() => {
 const VERSION = "brti-driftless-v3";
-const EXECUTION_VERSION = "paper-delayed-depth-v1";
+const EXECUTION_VERSION = "paper-delayed-depth-v2";
 const SETTLE = 60, VOL_TAU = 180;
 const tailCdf = z => 0.5 + z * (z*z+6) / (2*Math.pow(z*z+4,1.5));
 const chance = (mean, sd, target) => tailCdf((mean - (target - .005)) / sd);
@@ -57,7 +57,7 @@ function asks(book,side) {
  const levels=side==="Up"?book?.no:book?.yes;
  if(!levels)return [];
  return [...levels].filter(([p,n])=>Number.isFinite(p)&&p>0&&p<1&&Number.isFinite(n)&&n>0)
-  .map(([p,n])=>({price:Math.round((1-p)*10000)/100,size:Math.floor(n)})).sort((a,b)=>a.price-b.price);
+  .map(([p,n])=>({price:Math.round((1-p)*10000)/100,size:Math.round(n*100)/100})).filter(level=>level.size>0).sort((a,b)=>a.price-b.price);
 }
 function paperFill(intent,book,nowMs,cfg) {
  const empty=reason=>({filled:0,cost:0,feesCents:0,status:"paper-no-fill",reason,levels:[],filledAt:nowMs,latencyMs:nowMs-intent.at});

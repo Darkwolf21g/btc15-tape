@@ -2,7 +2,7 @@
 
 ## Pricing bias addition — October 12, 2026
 
-`shared-research.js` tags new snapshots with `btc15-bias-v1` and reports three
+`shared-research.js` tags new snapshots with `btc15-bias-v2` and reports three
 fixed prospective hypotheses. The version tag prevents retrospective inclusion.
 No additional upstream requests or stored tick streams are introduced. Existing
 arrival snapshots and official outcomes drive independent one-contract scenarios.
