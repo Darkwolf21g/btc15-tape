@@ -147,7 +147,7 @@ summary { display: list-item; padding-block: 10px; }
   <div class="clock" id="clock" aria-live="off">–:––</div>
 </header>
 
-<div class="health" aria-label="Data health"><span id="healthFeed">Index: connecting</span><span id="healthCollector">Collector: checking</span><span id="healthMode">Model: warming up</span></div>
+<div class="health" aria-label="Data health"><span id="healthFeed">Index: connecting</span><span id="healthCollector">Collector: checking</span><span id="healthExchange">Kalshi: checking status</span><span id="healthMode">Model: warming up</span></div>
 <p class="model-note">Up / YES: final-minute BRTI average ≥ target. Down / NO: below target. Probabilities are model estimates, not validated win rates.</p>
 <section class="hero" aria-label="Chance of Up">
   <div class="p none" id="pBig">–</div>
@@ -908,6 +908,7 @@ const kalshi = {ok: null, base: null, via: null, market: null, feed: new Map(), 
 // When this page is served by its own Cloudflare Worker, that Worker is the relay: same address, no setup.
 const SAME_SITE = location.protocol === "https:" && !/github\.io$/.test(location.hostname) ? location.origin : null;
 async function kalshiGet(path) {
+  if(Date.now()<(kalshi.retryAt||0))return null;
   // Your own relay if you set one, else the site itself, else Kalshi directly (browsers are normally
   // refused), else a public relay. A slower route that happened to answer first is not kept for good:
   // the preferred one is tried again every half minute.
@@ -934,6 +935,7 @@ async function kalshiGet(path) {
         }
       }
       kalshi.lastErr = {at: Date.now(), via, status: r.status, text: (await r.text().catch(() => "")).slice(0, 120)};
+      if(r.status===429){const raw=r.headers.get("Retry-After"),seconds=Number(raw),delay=raw&&Number.isFinite(seconds)?seconds*1000:raw&&Number.isFinite(Date.parse(raw))?Date.parse(raw)-Date.now():30000;kalshi.retryAt=Date.now()+Math.max(1000,delay);kalshi.fails++;return null;}
     } catch (e) { kalshi.lastErr = {at: Date.now(), via, status: 0, text: String(e.message || e).slice(0, 120)}; }
   }
   kalshi.fails++;
@@ -941,14 +943,19 @@ async function kalshiGet(path) {
   return null;
 }
 // Whether Kalshi is open for trading at all: paused or in maintenance, a buy call is worthless.
-const exch = {at: 0, trading: null, active: null, resume: null, checked: 0};
+const exch = {at: 0, trading: null, active: null, resume: null, checked: 0, failed: false};
 async function pollExchange() {
   if (Date.now() - exch.checked < 30000) return;
   exch.checked = Date.now();
   const d = await kalshiGet("/exchange/status");
-  if (d && typeof d.trading_active === "boolean") { exch.trading = d.trading_active; exch.active = d.exchange_active !== false; exch.resume = d.exchange_estimated_resume_time || null; exch.at = Date.now(); }
+  if (d && typeof d.trading_active === "boolean" && typeof d.exchange_active === "boolean") { exch.trading=d.trading_active;exch.active=d.exchange_active;exch.resume=d.exchange_estimated_resume_time||null;exch.at=Date.now();exch.failed=false; }
+  else exch.failed=true;
 }
-const tradingPaused = () => exch.at && Date.now() - exch.at < 120000 && (exch.trading === false || exch.active === false);
+function exchangeHealth(now=Date.now()) {
+  if(!exch.at||exch.failed||now-exch.at>=90000)return "unknown";
+  return exch.active===true&&exch.trading===true?"open":"paused";
+}
+const tradingPaused = () => exchangeHealth() === "paused";
 async function pollKalshi() {
   pollExchange();
   const now = Date.now() / 1000, [, close] = bounds(now), [ev, mk] = tickers(close);
@@ -1901,6 +1908,9 @@ function render() {
   $("probBar").classList.toggle("waiting", p == null);
   $("healthFeed").textContent = live ? `BRTI live · ${Math.max(0, (nowMs - feed.brti.t) / 1000).toFixed(1)}s old` : feed.brti ? "BRTI stale · signals paused" : "Exchange estimate · BRTI connecting";
   $("healthFeed").className = live ? "good" : "meh";
+  const eh=exchangeHealth(nowMs),eage=exch.at?Math.max(0,Math.round((nowMs-exch.at)/1000)):null;
+  $("healthExchange").textContent=`Kalshi ${eh==="open"?"open":eh==="paused"?"paused":"status unknown"} · ${eage==null?"no successful check":`last checked ${eage}s ago`}`+(Date.now()<(kalshi.retryAt||0)?" · rate limited":"");
+  $("healthExchange").className=eh==="open"?"good":eh==="paused"?"bad":"meh";
   $("healthMode").textContent = p == null ? "Model: waiting for complete data" : view.pending ? `Awaiting next BRTI · estimate ${(Math.max(0,nowMs-view.at)/1000).toFixed(1)}s old` : globalThis.BTC15Model.VERSION + " · uncalibrated";
   if (p == null) {
     big.textContent = "WAIT"; big.className = "p none";
@@ -1943,13 +1953,14 @@ function render() {
   $("edgeHead").textContent = km ? `Kalshi now: Up ${upC}¢${dp && dp.up ? " ×" + dp.up.size : ""} · Down ${downC}¢${dp && dp.down ? " ×" + dp.down.size : ""}, ${((nowMs - km.at) / 1000).toFixed(0)} s old · type over them if Robinhood shows something else`
     : "Type what Robinhood's buttons say to see your edge";
   const typedUp = $("rhUp").value ? parseFloat($("rhUp").value) : null, typedDown = $("rhDown").value ? parseFloat($("rhDown").value) : null;
-  const paused = tradingPaused();
-  const waitReason = view.pending ? "WAIT: next BRTI reading pending" : paused ? "WAIT: Kalshi has trading paused" + (exch.resume ? " (until about " + ET_CLOCK.format(new Date(exch.resume)) + ")" : "") : !exactTarget ? "WAIT: enter or retrieve the exact target" : "WAIT: incomplete data or model unavailable";
-  const signalP = exactTarget && !paused && live ? p : null;
+  const exchangeState=exchangeHealth(nowMs), paused=exchangeState==="paused";
+  const waitReason = view.pending ? "WAIT: next BRTI reading pending" : paused ? "WAIT: Kalshi has trading paused" + (exch.resume ? " (until about " + ET_CLOCK.format(new Date(exch.resume)) + ")" : "") : !exactTarget ? "WAIT: enter or retrieve the exact target" : exchangeState==="unknown" ? "WAIT: Kalshi exchange status unknown" : "WAIT: incomplete data or model unavailable";
+  const signalP = exactTarget && exchangeState==="open" && live ? p : null;
   const dep = depth(mk);
   const vUp = verdict($("vUp"), typedUp!=null&&nowMs-manualQuoteAt.Up>15000?null:signalP, band && band.lo, typedUp != null ? typedUp : upC, signalP!=null&&typedUp!=null&&nowMs-manualQuoteAt.Up>15000?"WAIT: refresh the entered quote (older than 15s)":waitReason, dep && dep.up);
   const vDown = verdict($("vDown"), typedDown!=null&&nowMs-manualQuoteAt.Down>15000?null:signalP == null ? null : 1 - signalP, band && 1 - band.hi, typedDown != null ? typedDown : downC, signalP!=null&&typedDown!=null&&nowMs-manualQuoteAt.Down>15000?"WAIT: refresh the entered quote (older than 15s)":waitReason, dep && dep.down);
   decisionLine(signalP, band, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, left);
+  if(exchangeState!=="open")$("decision").textContent=waitReason;
   if (view.pending) $("decision").textContent = "Waiting for the next BRTI reading. Last estimate shown; trade signals paused.";
   keepRecord(mk, close, left, tgt, p, proj && tgt != null ? chanceMatched(proj.mean, proj.sd, tgt) : null, km, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, typedUp != null || typedDown != null);
 
@@ -2056,7 +2067,7 @@ function renderChips(nowMs, mk) {
   const q = kalshi.market && kalshi.market.ticker === mk && kalshi.market.bid ? kalshi.market : null;
   const qtxt = q ? `Kalshi book ${((nowMs - q.at) / 1000).toFixed(1)} s (${kalshi.pushAt && nowMs - kalshi.pushAt < 15000 ? "pushed" : "polled"})` : "";
   const html = group("Price · trades", price.join("")) + group("Liquidations", liq.join(""))
-    + group("Market", (exch.at ? chip(tradingPaused() ? "off" : "ok", tradingPaused() ? (exch.active === false ? "Kalshi in maintenance" : "Kalshi trading paused") : "Kalshi trading open") : "") + (fcls !== "" || feedUrl() ? chip(fcls, ftxt) : "") + (qtxt ? chip(nowMs - q.at < 5000 ? "ok" : "slow", qtxt) : "") + chip(kcls, ktxt + kerr));
+    + group("Market", chip(exchangeHealth()==="open"?"ok":"off",exchangeHealth()==="unknown"?"Kalshi status unknown":tradingPaused()?"Kalshi trading paused":"Kalshi trading open") + (fcls !== "" || feedUrl() ? chip(fcls, ftxt) : "") + (qtxt ? chip(nowMs - q.at < 5000 ? "ok" : "slow", qtxt) : "") + chip(kcls, ktxt + kerr));
   if (html !== lastChips) { lastChips = html; $("sources").innerHTML = html; }
   const nPrice = Object.entries(VENUES).filter(([k, v]) => !v.lead && !v.liq && venue[k] && isLive(venue[k], nowMs)).length;
   const nLiq = Object.entries(VENUES).filter(([k, v]) => v.liq && venue[k] && venue[k].ws && venue[k].ws.readyState === 1 && (v.quiet || nowMs - venue[k].at < ALIVE_MS * 1.5)).length;

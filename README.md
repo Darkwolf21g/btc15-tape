@@ -103,3 +103,54 @@ Tests run the actual page script with network calls and browser side effects stu
 ## If a feed shows nothing
 
 The exchange message formats were taken from each exchange's documentation and the open-source AGGR project, not tried against every venue live. If a chip says "no trades" or a liquidation venue never counts anything while connected, open Diagnostics: it prints the last message that venue sent, which is enough to fix the parser.
+
+### Exchange health, rate limits, and isolated demo tests (2026-10-12)
+
+The tape shows Kalshi Open, Paused, or Status Unknown with the last successful
+check's age. Failed checks and checks older than 90 seconds block trade signals;
+model probabilities remain descriptive. The public relay coalesces concurrent
+polls, briefly caches successful responses, and honors `Retry-After` without
+retrying 429s through another hostname. Authenticated reads learn the account's
+read/write token budgets from `/account/limits`; these are conservative local
+budgets, not a replacement for Kalshi's account-wide limiter. Other clients using
+the same account can still cause 429s. Collector diagnostics include limits and
+the last successful limits check.
+
+WebSocket terminal channel errors 10/25 restart the connection and subscriptions;
+command throttling (27) backs off at least 30 seconds. Stale subscription frames
+are ignored; depth sequence gaps invalidate the book and request a fresh stream.
+Cloudflare's WebSocket runtime handles protocol ping/pong. REST reconciliation
+remains authoritative for demo execution; private fill/order streams are not
+relayed to the public tape.
+
+The **Demo test panel** on `/agent.html` is separate from the paper agent and
+production market data. Setup in Cloudflare Worker runtime secrets:
+
+- `FEED_TOKEN`: required for every demo endpoint (also protected inside the DO).
+- `KALSHI_DEMO_KEY_ID` and `KALSHI_DEMO_PRIVATE_KEY`: separate demo API credentials.
+  Never reuse production credentials or put private keys in the page or repository.
+
+Open the agent page, save the stream token, and choose **Load demo markets**.
+Choose an available demo BTC15 contract and a YES/NO limit, then submit one demo
+contract. No open BTC15 markets means the test is unavailable, not permission to
+substitute a production contract. Limits are one contract per order and ten order
+attempts per ET day. This is a manual integration test, not autonomous demo trading.
+
+V2 execution uses `POST /portfolio/events/orders`: YES buys map to `bid` at the
+YES limit; NO buys map to `ask` at `1 - NO limit`, using exact four-decimal dollar
+strings. Orders are IOC with cancel-on-pause. The durable `demo.ledger` is separate
+from paper records, and intent is persisted before submission. A network timeout
+leaves an unknown outcome: reload demo status and reconcile; never blindly submit
+a replacement. The same client ID cannot submit a second order. New attempts
+are blocked until the previous order is terminal and its fills reconcile.
+Reconcile loads orders, paginated fills, and positions from the demo host. Positions
+are displayed as account context, not assumed to equal this test order's fills.
+An order not found after an uncertain submission remains blocked for investigation.
+A cancellation is not considered final until reconciliation.
+
+No production write request is permitted by the API client. The paper agent still
+accepts only OFF/PAPER. Demo performance does not establish a live trading edge.
+
+Contracts reviewed: https://docs.kalshi.com/openapi.yaml (3.34.0),
+https://docs.kalshi.com/asyncapi.yaml (2.0.0), and
+https://docs.kalshi.com/getting_started/demo_env.

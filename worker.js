@@ -30,6 +30,46 @@ async function upgradeFetch(url, options = {}) {
   finally { clearTimeout(timer); }
 }
 
+// Short shared caches collapse concurrent page polls. Never retry 429 through another hostname.
+let publicPauseUntil=0;
+const publicCache=new Map(), publicPending=new Map();
+function retryDelay(value, now=Date.now()) {
+  const n=Number(value);
+  return Math.max(1000, value && Number.isFinite(n) ? n*1000 : value && Number.isFinite(Date.parse(value)) ? Date.parse(value)-now : 30000);
+}
+async function publicKalshi(path) {
+  const now=Date.now(), cached=publicCache.get(path);
+  if(cached && cached.until>now)return cached.result;
+  if(now<publicPauseUntil)return {status:429,body:JSON.stringify({error:"rate_limited",retry_at:publicPauseUntil}),retry:Math.ceil((publicPauseUntil-now)/1000)};
+  if(publicPending.has(path))return publicPending.get(path);
+  const job=(async()=>{
+    try {
+      const up=await timedFetch(UPSTREAMS[0]+path,{headers:{Accept:"application/json"}});
+      const result={status:up.status,body:await up.text()};
+      if(up.status===429){const delay=retryDelay(up.headers.get("Retry-After"));publicPauseUntil=Date.now()+delay;result.retry=Math.ceil(delay/1000);}
+      if(up.ok){for(const [key,v] of publicCache)if(v.until<=Date.now())publicCache.delete(key);publicCache.set(path,{until:Date.now()+(path==="/exchange/status"?10000:2000),result});}
+      return result;
+    }catch{return {status:502,body:JSON.stringify({error:"upstream_unreachable"})};}
+    finally{publicPending.delete(path);}
+  })();
+  publicPending.set(path,job);return job;
+}
+const apiBudgets=new WeakMap();
+function apiBudget(env, mode) {
+  let modes=apiBudgets.get(env);if(!modes){modes={};apiBudgets.set(env,modes);}
+  return modes[mode]||(modes[mode]={pauseUntil:0,limits:null,limitsAt:0,buckets:{}});
+}
+function debitBudget(state, method, path) {
+  if(Date.now()<state.pauseUntil)throw Error("Kalshi rate limited; retry after "+Math.ceil((state.pauseUntil-Date.now())/1000)+"s");
+  const kind=method==="GET"?"read":"write", limit=state.limits?.[kind];
+  if(!limit || !(limit.refill_rate>0) || !(limit.bucket_capacity>0))return;
+  const cost=path.includes("/cfbenchmarks/")?50:10, now=Date.now();
+  const b=state.buckets[kind]||(state.buckets[kind]={tokens:limit.bucket_capacity,at:now});
+  b.tokens=Math.min(limit.bucket_capacity,b.tokens+(now-b.at)*limit.refill_rate/1000);b.at=now;
+  if(b.tokens<cost)throw Error("Local API budget exhausted; retry later");
+  b.tokens-=cost;
+}
+
 export default {
   async scheduled(event, env, ctx) {
     if (env.FEED && env.KALSHI_KEY_ID && env.KALSHI_PRIVATE_KEY) {
@@ -39,7 +79,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url), path = url.pathname.replace(/\/+$/, "");
     if (request.method === "OPTIONS") return new Response(null, {headers: {...CORS, "Access-Control-Allow-Headers": "Content-Type"}});
-    if (path === "/feed" || path === "/feed/status" || path === "/record" || path === "/record.csv" || path === "/collector/status" || path === "/trade/status" || path === "/trade/config") {
+    if (path === "/feed" || path === "/feed/status" || path === "/record" || path === "/record.csv" || path === "/collector/status" || path === "/trade/status" || path === "/trade/config" || path.startsWith("/demo/")) {
       if (env.FEED_TOKEN && url.searchParams.get("token") !== env.FEED_TOKEN) return new Response("token", {status: 403, headers: CORS});
       if (!env.FEED) return new Response("feed not configured", {status: 503, headers: CORS});
       try { return await env.FEED.get(env.FEED.idFromName("brti")).fetch(request); }
@@ -79,38 +119,17 @@ export default {
       if (!env.KALSHI_KEY_ID || !env.KALSHI_PRIVATE_KEY) return new Response("no key", {status: 503, headers: CORS});
       const ts = url.searchParams.get("timestamp"), span = url.searchParams.get("timespan") || "HOUR";
       if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(ts || "") || !/^(HOUR|DAY|MINUTE)$/.test(span)) return new Response("bad timestamp", {status: 400, headers: CORS});
-      const apiPath = "/trade-api/v2/cfbenchmarks/history/values", stamp = String(Date.now());
       try {
-        const sig = await signHandshake(env.KALSHI_PRIVATE_KEY, stamp + "GET" + apiPath);
-        const up = await timedFetch("https://external-api.kalshi.com" + apiPath + "?id=BRTI&timespan=" + span + "&timestamp=" + encodeURIComponent(ts),
-                               {headers: {"Accept": "application/json", "KALSHI-ACCESS-KEY": env.KALSHI_KEY_ID.trim(), "KALSHI-ACCESS-SIGNATURE": sig, "KALSHI-ACCESS-TIMESTAMP": stamp},
-                                cf: {cacheTtl: 0, cacheEverything: false}});
-        const body = await up.text();
-        return new Response(body, {status: up.status, headers: {...CORS, "Content-Type": "application/json"}});
-      } catch (e) { return new Response("upstream unreachable: " + e.message, {status: 502, headers: CORS}); }
+        const d=await signedGet(env,"/trade-api/v2/cfbenchmarks/history/values","?id=BRTI&timespan="+span+"&timestamp="+encodeURIComponent(ts));
+        return new Response(JSON.stringify(d),{headers:{...CORS,"Content-Type":"application/json"}});
+      }catch(e){return new Response(JSON.stringify({error:e.message}),{status:e.status===429?429:502,headers:{...CORS,"Content-Type":"application/json","Retry-After":"30"}});}
     }
     if (request.method !== "GET" || !ALLOWED.some(re => re.test(path))) {
       if (env && env.ASSETS) return env.ASSETS.fetch(request);     // the page and its files
       return new Response("not found", {status: 404, headers: CORS});
     }
-    let last = null;
-    for (const base of UPSTREAMS) {
-      for (let attempt = 0; attempt < 2; attempt++) {           // one quick retry per upstream
-        try {
-          const up = await timedFetch(base + path, {headers: {"Accept": "application/json",
-                                                         "User-Agent": "Mozilla/5.0 (compatible; btc15-tape relay)"},
-                                               cf: {cacheTtl: 0, cacheEverything: false}});
-          const body = await up.text();
-          if (up.ok) return new Response(body, {status: 200, headers: {...CORS, "Content-Type": "application/json"}});
-          last = new Response(body.slice(0, 300), {status: up.status, headers: {...CORS, "X-Upstream": base}});
-          if (up.status !== 429 && up.status < 500) break;        // a firm answer; do not hammer
-        } catch (e) {
-          last = new Response("upstream unreachable: " + e.message, {status: 502, headers: {...CORS, "X-Upstream": base}});
-        }
-        await new Promise(r => setTimeout(r, 400));
-      }
-    }
-    return last;
+    const result = await publicKalshi(path);
+    return new Response(result.body, {status:result.status, headers:{...CORS,"Content-Type":"application/json",...(result.retry?{"Retry-After":String(result.retry)}:{})}});
   },
 };
 
@@ -242,26 +261,35 @@ globalThis.BTC15Model=Object.freeze({VERSION,EXECUTION_VERSION,tailCdf,chance,vo
 // END SHARED BTC15 MODEL
 const {tailCdf,volsFrom,projectFrom} = globalThis.BTC15Model;
 function feeCents(p) { return globalThis.BTC15Model.feesCents(p*100); }
-async function signedGet(env, apiPath, query) {
-  const stamp = String(Date.now()), sig = await signHandshake(env.KALSHI_PRIVATE_KEY, stamp + "GET" + apiPath);
-  const r = await timedFetch("https://external-api.kalshi.com" + apiPath + (query || ""), {headers: {"Accept": "application/json", "KALSHI-ACCESS-KEY": env.KALSHI_KEY_ID.trim(), "KALSHI-ACCESS-SIGNATURE": sig, "KALSHI-ACCESS-TIMESTAMP": stamp}});
-  if (!r.ok) throw new Error(apiPath + " " + r.status + " " + (await r.text()).slice(0, 100));
-  return r.json();
-}
-const HOSTS = {live: "https://external-api.kalshi.com", demo: "https://demo-api.kalshi.co"};
+async function signedGet(env, apiPath, query) { return signedCall(env,"live","GET",apiPath+(query||"")); }
+const HOSTS = {live:"https://external-api.kalshi.com",demo:"https://external-api.demo.kalshi.co"};
 function keysFor(env, mode) {
-  return mode === "demo" ? {id: env.KALSHI_DEMO_KEY_ID, pem: env.KALSHI_DEMO_PRIVATE_KEY} : {id: env.KALSHI_KEY_ID, pem: env.KALSHI_PRIVATE_KEY};
+  if(!["live","demo"].includes(mode))throw Error("Unknown API environment");
+  return mode === "demo" ? {id:env.KALSHI_DEMO_KEY_ID,pem:env.KALSHI_DEMO_PRIVATE_KEY} : {id:env.KALSHI_KEY_ID,pem:env.KALSHI_PRIVATE_KEY};
 }
 async function signedCall(env, mode, method, apiPath, body) {
-  const k = keysFor(env, mode);
-  if (!k.id || !k.pem) throw new Error("no " + mode + " key");
-  const stamp = String(Date.now()), sig = await signHandshake(k.pem, stamp + method + apiPath);
-  const r = await timedFetch(HOSTS[mode === "demo" ? "demo" : "live"] + apiPath, {method, body: body ? JSON.stringify(body) : undefined,
-    headers: {"Accept": "application/json", "Content-Type": "application/json", "KALSHI-ACCESS-KEY": k.id.trim(), "KALSHI-ACCESS-SIGNATURE": sig, "KALSHI-ACCESS-TIMESTAMP": stamp}});
-  const text = await r.text();
-  if (!r.ok) throw new Error(method + " " + apiPath + " " + r.status + " " + text.slice(0, 160));
-  return text ? JSON.parse(text) : {};
+  // Production credentials are read-only in this application, regardless of caller.
+  if(mode!=="demo" && method!=="GET")throw Error("Production execution disabled");
+  if(!/^\/trade-api\/v2\//.test(apiPath)||apiPath.includes("..")||apiPath.includes("#"))throw Error("Invalid API path");
+  const k=keysFor(env,mode);if(!k.id||!k.pem)throw Error("no "+mode+" key");
+  const budget=apiBudget(env,mode);let sig;const stamp=String(Date.now());
+  try{debitBudget(budget,method,apiPath);sig=await signHandshake(k.pem,stamp+method+apiPath.split("?")[0]);}
+  catch(e){e.notSubmitted=true;throw e;}
+  const r=await timedFetch(HOSTS[mode]+apiPath,{method,body:body?JSON.stringify(body):undefined,
+    headers:{Accept:"application/json","Content-Type":"application/json","KALSHI-ACCESS-KEY":k.id.trim(),"KALSHI-ACCESS-SIGNATURE":sig,"KALSHI-ACCESS-TIMESTAMP":stamp}});
+  if(r.status===429)budget.pauseUntil=Date.now()+retryDelay(r.headers.get("Retry-After"));
+  const text=await r.text();
+  if(!r.ok){const e=Error(method+" "+apiPath.split("?")[0]+" HTTP "+r.status);e.status=r.status;throw e;}
+  const d=text?JSON.parse(text):{};
+  if(apiPath==="/trade-api/v2/account/limits"){budget.limits={usage_tier:d.usage_tier,read:d.read,write:d.write};budget.limitsAt=Date.now();budget.buckets={};}
+  return d;
 }
+async function accountLimits(env,mode="live") {
+  const b=apiBudget(env,mode);
+  if(Date.now()-(b.checkedAt||0)>300000){b.checkedAt=Date.now();try{await signedCall(env,mode,"GET","/trade-api/v2/account/limits");b.error=null;}catch(e){b.error=e.message;}}
+  return {limits:b.limits,at:b.limitsAt,error:b.error||null,retryAt:b.pauseUntil};
+}
+
 async function notify(env, title, text) {           // a push to the ntfy app, if NTFY_TOPIC is set
   if (!env.NTFY_TOPIC) return;
   try { await timedFetch("https://ntfy.sh/" + encodeURIComponent(env.NTFY_TOPIC.trim()), {method: "POST", body: text, headers: {"Title": title, "Tags": "chart_with_upwards_trend"}}); } catch (e) {}
@@ -313,6 +341,7 @@ export class KalshiFeed {
   constructor(state, env) {
     this.state = state; this.env = env;
     this.clients = new Set();
+    this.bookSequences=new Map(); this.demoBusy=false;
     this.up = null; this.upState = "off"; this.upSince = 0; this.upMsgAt = 0; this.lastErr = null; this.backoff = 2000;
     this.last = {};                               // last frame of each type, replayed to a phone that just connected
     this.tickerSid = null; this.bookSid = null; this.tickerSet = ""; this.subId = 1;
@@ -336,6 +365,7 @@ export class KalshiFeed {
   }
   async fetch(request) {
     const url = new URL(request.url);
+    if(url.pathname.startsWith("/demo/"))return this.demoRequest(request,url);
     if (url.pathname === "/watchdog") { await this.ensureAlarm(); return new Response("ok"); }
     if (url.pathname === "/feed/status") { await this.ensureAlarm(); return new Response(JSON.stringify(this.status().msg), {headers: {...CORS, "Content-Type": "application/json"}}); }
     if (url.pathname === "/trade/status") {
@@ -372,6 +402,7 @@ export class KalshiFeed {
       c.forecasts = rows.reduce((n, w) => n + Object.values(w.checks || {}).filter(k => k.model === MODEL_VERSION && Number.isFinite(k.p)).length, 0);
       c.settledWindows = rows.filter(w => w.src === "kalshi").length;
       c.calibration = calibrationReport(rows);
+      c.api=await accountLimits(this.env);
       return new Response(JSON.stringify(c), {headers: {...CORS, "Content-Type": "application/json"}}); }
     if (url.pathname === "/record" || url.pathname === "/record.csv") {
       await this.ensureAlarm();
@@ -403,6 +434,93 @@ export class KalshiFeed {
     this.ensureUpstream();
     return new Response(null, {status: 101, webSocket: client});
   }
+  // Demo is an isolated execution test, never driven by production prices or the model.
+  async demoRequest(request,url) {
+    const reply=(d,status=200)=>new Response(JSON.stringify(d),{status,headers:{...CORS,"Content-Type":"application/json"}});
+    if(!this.env.FEED_TOKEN)return reply({error:"Set FEED_TOKEN before using demo controls"},403);
+    if(url.searchParams.get("token")!==this.env.FEED_TOKEN)return reply({error:"token required"},403);
+    if(!this.env.KALSHI_DEMO_KEY_ID||!this.env.KALSHI_DEMO_PRIVATE_KEY)return reply({error:"Demo credentials not configured",configured:false},409);
+    if(this.demoBusy)return reply({error:"Demo operation in progress; retry later"},409);
+    const allowed={"/demo/status":"GET","/demo/order":"POST","/demo/reconcile":"POST","/demo/cancel":"POST"};
+    if(!allowed[url.pathname])return reply({error:"not found"},404);
+    if(request.method!==allowed[url.pathname])return reply({error:"method not allowed"},405);
+    this.demoBusy=true;
+    const call=(method,path,body)=>signedCall(this.env,"demo",method,"/trade-api/v2"+path,body);
+    try {
+      const ledger=(await this.state.storage.get("demo.ledger"))||[];
+      if(url.pathname==="/demo/status"){
+        const api=await accountLimits(this.env,"demo");
+        if(!this.demoOverview || Date.now()-this.demoOverview.at>30000){
+          const exchange=await call("GET","/exchange/status");
+          const markets=await call("GET","/markets?series_ticker=KXBTC15M&status=open&limit=20");
+          this.demoOverview={at:Date.now(),exchange,markets:(markets.markets||[]).map(m=>({ticker:m.ticker,status:m.status,close_time:m.close_time,yes_ask:m.yes_ask_dollars,no_ask:m.no_ask_dollars}))};
+        }
+        return reply({configured:true,environment:"demo",...this.demoOverview,api,ledger,limits:{contractsPerOrder:1,ordersPerDay:10},automaticTrading:false});
+      }
+      let body;try{body=await request.json();}catch{return reply({error:"Invalid JSON"},400);}
+      if(url.pathname==="/demo/order"){
+        if(!/^btc15-demo-[a-f0-9-]{36}$/.test(body.clientId||""))return reply({error:"Invalid client order ID"},400);
+        const previous=ledger.find(x=>x.clientId===body.clientId);
+        if(previous)return reply({order:previous,reused:true});
+        if(ledger.some(x=>!x.reconciled))return reply({error:"Reconcile the previous demo order before submitting another"},409);
+        const price=Number(body.priceCents);
+        if(!/^KXBTC15M-[A-Z0-9-]+$/.test(body.ticker||"")||!["yes","no"].includes(body.side)||!Number.isFinite(price)||price<1||price>99||Math.abs(price*100-Math.round(price*100))>1e-7)
+          return reply({error:"Choose a demo BTC15 market, YES/NO, and a limit from 1 to 99 cents (up to two decimals)"},400);
+        if(ledger.filter(x=>etDay(x.at)===etDay(Date.now())).length>=10)return reply({error:"Demo daily limit: 10 test orders"},409);
+        const exchange=await call("GET","/exchange/status");
+        const market=(await call("GET","/markets/"+body.ticker)).market;
+        if(exchange.exchange_active!==true||exchange.trading_active!==true||market?.status!=="active"||!(Date.parse(market.close_time)>Date.now()+15000))return reply({error:"Demo market is paused, unavailable, or closing"},409);
+        const yesUnits=body.side==="yes"?Math.round(price*100):10000-Math.round(price*100);
+        const payload={ticker:body.ticker,client_order_id:body.clientId,side:body.side==="yes"?"bid":"ask",count:"1.00",price:(yesUnits/10000).toFixed(4),time_in_force:"immediate_or_cancel",self_trade_prevention_type:"taker_at_cross",cancel_order_on_pause:true};
+        const entry={clientId:body.clientId,ticker:body.ticker,side:body.side,priceCents:price,at:Date.now(),environment:"demo",request:payload,state:"submitting",reconciled:false};
+        ledger.push(entry);await this.state.storage.put("demo.ledger",ledger);
+        try{const result=await call("POST","/portfolio/events/orders",payload);entry.orderId=result.order_id;entry.placement=result;entry.state=result.order_id?"accepted":"unknown";}
+        catch(e){const rejected=e.notSubmitted||[400,401,403,404,422,429].includes(e.status);entry.state=rejected?"rejected":"unknown";entry.reconciled=!!rejected;entry.error=e.message;}
+        // An uncertain response is never blindly retried. Reconcile by client ID first.
+        await this.state.storage.put("demo.ledger",ledger);
+        return reply({order:entry});
+      }
+      const entry=ledger.find(x=>x.clientId===body.clientId);
+      if(!entry)return reply({error:"Unknown demo order"},404);
+      if(url.pathname==="/demo/cancel"){
+        if(!entry.orderId)return reply({error:"Reconcile to locate the exchange order first"},409);
+        try{entry.cancellation=await call("DELETE","/portfolio/events/orders/"+encodeURIComponent(entry.orderId));entry.reconciled=false;entry.state="cancel requested";}
+        catch(e){entry.error=e.message;entry.reconciled=false;entry.state="cancel unknown";}
+      }else{
+        let order;
+        if(entry.orderId)order=(await call("GET","/portfolio/orders/"+encodeURIComponent(entry.orderId))).order;
+        else{
+          let cursor="";
+          for(let page=0;page<5;page++){
+            const d=await call("GET","/portfolio/orders?ticker="+encodeURIComponent(entry.ticker)+"&limit=100"+(cursor?"&cursor="+encodeURIComponent(cursor):""));
+            order=(d.orders||[]).find(o=>o.client_order_id===entry.clientId);cursor=d.cursor;
+            if(order||!cursor)break;
+          }
+        }
+        if(!order){entry.state="unknown";entry.error="No matching exchange order found; submission remains blocked";entry.reconciled=false;}
+        else{
+          if(order.client_order_id!==entry.clientId||order.ticker!==entry.ticker)throw Error("Demo reconciliation identity mismatch");
+          entry.orderId=order.order_id;
+          const fills=[];let cursor="",complete=false;
+          for(let page=0;page<5;page++){
+            const d=await call("GET","/portfolio/fills?order_id="+encodeURIComponent(entry.orderId)+"&limit=100"+(cursor?"&cursor="+encodeURIComponent(cursor):""));
+            fills.push(...(d.fills||[]));cursor=d.cursor;if(!cursor){complete=true;break;}
+          }
+          const unique=[...new Map(fills.map(f=>[f.fill_id||f.trade_id,f])).values()];
+          const valid=unique.every(f=>(f.fill_id||f.trade_id)&&f.order_id===entry.orderId&&f.ticker===entry.ticker&&Number.isFinite(Number(f.count_fp??f.count)));
+          const quantity=unique.reduce((n,f)=>n+Number(f.count_fp??f.count),0), expected=Number(order.fill_count_fp??order.fill_count);
+          const positions=await call("GET","/portfolio/positions?ticker="+encodeURIComponent(entry.ticker)+"&limit=100");
+          entry.order=order;entry.fills=unique;entry.positions=positions.market_positions||[];entry.checkedAt=Date.now();
+          entry.reconciled=complete&&valid&&Number.isFinite(expected)&&Math.abs(quantity-expected)<1e-8&&["executed","canceled"].includes(order.status)&&!positions.cursor;
+          entry.state=entry.reconciled?"reconciled":"pending reconciliation";
+          entry.error=entry.reconciled?null:"Order is open, fills differ, or reconciliation is incomplete";
+        }
+      }
+      await this.state.storage.put("demo.ledger",ledger);
+      return reply({order:entry});
+    }catch(e){return reply({error:e.message,environment:"demo"},502);}
+    finally{this.demoBusy=false;}
+  }
   indexSnapshot(limit = 1200) {
     const now = Date.now();
     const ticks = [...this.indexSeconds].filter(([ms,v]) => Number.isFinite(ms) && ms > 0 && ms >= now-1200000 && ms <= now+1000 && Number.isFinite(v) && v > 0)
@@ -418,11 +536,11 @@ export class KalshiFeed {
   }
   closeUpstream(why) {
     if (this.windowTimer) { clearTimeout(this.windowTimer); this.windowTimer = null; }
-    const ws = this.up; this.up = null; this.upState = "off"; this.tickerSid = null; this.bookSid = null; this.tickerSet = ""; this.books = {}; this.lastTicker = {}; this.last = {}; this.settleAvg = null;
+    const ws = this.up; this.up = null; this.upState = "off"; this.tickerSid = null; this.bookSid = null; this.tickerSet = ""; this.books = {}; this.bookSequences.clear(); this.bookSequence=null; this.lastTicker = {}; this.last = {}; this.settleAvg = null;
     if (ws) { try { ws.close(1000, why); } catch (e) {} }
   }
   async ensureUpstream() {
-    if (this.up || this.upState === "connecting") return;
+    if (this.up || this.upState === "connecting" || this.retryTimer) return;
     if (!this.env.KALSHI_KEY_ID || !this.env.KALSHI_PRIVATE_KEY) { this.upState = "no key"; this.broadcast(JSON.stringify(this.status())); return; }
     if (!this.indexSeconds.size) {
       const saved = (await this.state.storage.get("index.seconds")) || [];
@@ -438,7 +556,7 @@ export class KalshiFeed {
       const ws = resp.webSocket;
       if (!ws) throw new Error("Kalshi refused the handshake: " + resp.status + " " + (await resp.text().catch(() => "")).slice(0, 120));
       ws.accept();
-      this.tickerSet = ""; this.tickerSid = null; this.bookSid = null; this.books = {}; this.lastTicker = {}; this.last = {}; this.bookSequence = null;
+      this.tickerSet = ""; this.tickerSid = null; this.bookSid = null; this.books = {}; this.lastTicker = {}; this.last = {}; this.bookSequence = null; this.bookSequences.clear();
       this.up = ws; this.upState = "open"; this.upSince = Date.now(); this.lastErr = null; this.backoff = 2000; this.counts = {};
       ws.addEventListener("message", ev => { if (this.up === ws) this.onUpstream(ev.data); });
       ws.addEventListener("close", ev => { if (this.up === ws) { this.closeUpstream("disconnected"); this.lastErr = "closed " + ev.code + " " + (ev.reason || ""); this.retry(); } });
@@ -465,7 +583,7 @@ export class KalshiFeed {
       const old = [this.tickerSid, this.bookSid].filter(x => x != null);
       if (old.length) this.send({cmd: "unsubscribe", params: {sids: old}});
       this.tickerSid = null; this.bookSid = null; this.tickerSet = set;
-      this.depthSubscribed = wantDepth; this.bookSequence = null; this.books = {};
+      this.depthSubscribed = wantDepth; this.bookSequence = null; this.bookSequences.clear(); this.books = {};
       for (const t of Object.keys(this.books)) if (!tk.includes(t)) delete this.books[t];
       this.send({cmd: "subscribe", params: {channels: ["ticker"], market_tickers: tk, send_initial_snapshot: true}});
       if(wantDepth) this.send({cmd: "subscribe", params: {channels: ["orderbook_delta"], market_tickers: tk}});
@@ -720,10 +838,12 @@ export class KalshiFeed {
     this.counts[d.type] = (this.counts[d.type] || 0) + 1;
     if (d.type === "subscribed" && d.msg) { if (d.msg.channel === "ticker") this.tickerSid = d.msg.sid; if (d.msg.channel === "orderbook_delta") this.bookSid = d.msg.sid; }
     if (d.type === "orderbook_snapshot" || d.type === "orderbook_delta") {
-      if (d.type === "orderbook_delta" && Number.isFinite(d.seq) && this.bookSequence != null && d.seq !== this.bookSequence + 1) {
+      if(d.sid!=null && this.bookSid!=null && d.sid!==this.bookSid)return;
+      const sid=d.sid??"legacy", previous=this.bookSequences.get(sid)??(d.sid==null?this.bookSequence:null);
+      if (d.type === "orderbook_delta" && Number.isFinite(d.seq) && previous != null && d.seq !== previous + 1) {
         this.closeUpstream("order book sequence gap"); this.retry(); return;
       }
-      if (Number.isFinite(d.seq)) this.bookSequence = d.seq;
+      if (Number.isFinite(d.seq)){this.bookSequences.set(sid,d.seq);this.bookSequence=d.seq;}
     }
     if (d.type === "orderbook_snapshot" && d.msg && d.msg.market_ticker) {
       const b = {yes: new Map(), no: new Map(), at: Date.now()};
@@ -749,6 +869,11 @@ export class KalshiFeed {
       this.settleAvg = f && +f.value > 0 ? {v: +f.value, n: +f.window_size, end: +f.window_end_ts_exclusive, at: Date.now()} : null;
     }
     if (d.type === "ticker" && d.msg && d.msg.market_ticker) this.lastTicker[d.msg.market_ticker] = {bid: +d.msg.yes_bid_dollars || null, ask: +d.msg.yes_ask_dollars || null, at: Date.now()};
+    if (d.type === "error" && [10,25,27].includes(Number(d.msg?.code))) {
+      this.lastErr="Kalshi subscription error "+d.msg.code;
+      if(Number(d.msg.code)===27)this.backoff=Math.max(this.backoff,30000);
+      this.closeUpstream(this.lastErr);this.retry();this.broadcast(JSON.stringify(this.status()));return;
+    }
     if (d.type === "error") { this.lastErr = "kalshi error " + JSON.stringify(d.msg).slice(0, 150); this.broadcast(JSON.stringify(this.status())); return; }
     if (d.type === "cfbenchmarks_value" || d.type === "cfbenchmarks_value_5hz" || d.type === "ticker" || d.type === "orderbook_snapshot" || d.type === "orderbook_delta") {
       if (d.type.startsWith("orderbook")) { this.broadcast(data); return; }     // books are rebuilt for newcomers from this.books

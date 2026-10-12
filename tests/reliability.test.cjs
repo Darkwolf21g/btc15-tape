@@ -9,7 +9,7 @@ function worker() {
   class Clock extends Date { static now() { return now; } }
   const context = vm.createContext({Date: Clock, Intl, URL, Request, Response, AbortSignal, AbortController, console, setTimeout: () => 1, clearTimeout() {}, TextEncoder, crypto: require('node:crypto').webcrypto});
   const source = fs.readFileSync(path.join(root, 'worker.js'), 'utf8').replace('export default {', 'const entry = {').replace('export class KalshiFeed', 'class KalshiFeed');
-  vm.runInContext(source + '\nglobalThis.api = {upgradeFetch, KalshiFeed, projectFrom, volsFrom, parseTicks, calibrationReport, MODEL_VERSION, entry, paperReport, model:globalThis.BTC15Model};', context);
+  vm.runInContext(source + '\nglobalThis.api = {publicKalshi,retryDelay,signedCall,apiBudget,debitBudget,upgradeFetch, KalshiFeed, projectFrom, volsFrom, parseTicks, calibrationReport, MODEL_VERSION, entry, paperReport, model:globalThis.BTC15Model};', context);
   const data = new Map(); let alarm = null;
   const storage = {get: async k => data.get(k), put: async (k, v) => data.set(k, structuredClone(v)), getAlarm: async () => alarm, setAlarm: async v => { alarm = v; }, list: async ({prefix}) => new Map([...data].filter(([k]) => k.startsWith(prefix))), delete: async k => data.delete(k)};
   const obj = new context.api.KalshiFeed({storage}, {KALSHI_KEY_ID: 'test', KALSHI_PRIVATE_KEY: 'test'});
@@ -190,4 +190,81 @@ test('WebSocket upgrade cancels its deadline after handshake, unlike an HTTP bod
  h.context.fetch=(url,options)=>new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(Error('timeout'))));
  const pending=h.api.upgradeFetch('https://test'); for(const fn of timers.values())fn();
  await assert.rejects(pending,/timeout/); assert.equal(timers.size,0);
+});
+
+test('public relay honors Retry-After without alternate-host retries',async()=>{
+ const h=worker();let calls=0;h.context.fetch=async()=>{calls++;return new Response('{}',{status:429,headers:{'Retry-After':'45'}})};
+ assert.equal((await h.api.publicKalshi('/exchange/status')).status,429);
+ assert.equal((await h.api.publicKalshi('/markets/KXBTC15M-TEST')).retry,45);assert.equal(calls,1);
+ h.setTime(h.now+46000);await h.api.publicKalshi('/exchange/status');assert.equal(calls,2);
+});
+test('public relay collapses simultaneous requests and briefly caches success',async()=>{
+ const h=worker();let calls=0;h.context.fetch=async()=>{calls++;return new Response('{"exchange_active":true}')};
+ await Promise.all([h.api.publicKalshi('/exchange/status'),h.api.publicKalshi('/exchange/status')]);
+ await h.api.publicKalshi('/exchange/status');assert.equal(calls,1);
+});
+test('production mutation and unknown environments fail before signing',async()=>{
+ const h=worker();await assert.rejects(h.api.signedCall(h.obj.env,'live','POST','/trade-api/v2/portfolio/events/orders',{}),/Production execution disabled/);
+ await assert.rejects(h.api.signedCall(h.obj.env,'invalid','GET','/trade-api/v2/markets'),/Unknown API environment/);
+});
+test('demo uses only demo host and key, and signs path without query',async()=>{
+ const h=worker();Object.assign(h.obj.env,{KALSHI_DEMO_KEY_ID:'demo-id',KALSHI_DEMO_PRIVATE_KEY:'demo-pem'});
+ vm.runInContext('signHandshake=async(pem,msg)=>{globalThis.signed={pem,msg};return "signature"}',h.context);
+ let seen;h.context.fetch=async(url,opts)=>{seen={url,opts};return new Response('{}')};
+ await h.api.signedCall(h.obj.env,'demo','GET','/trade-api/v2/portfolio/orders?ticker=TEST');
+ assert.match(seen.url,/^https:\/\/external-api\.demo\.kalshi\.co\//);assert.equal(seen.opts.headers['KALSHI-ACCESS-KEY'],'demo-id');
+ assert.equal(h.context.signed.pem,'demo-pem');assert.ok(h.context.signed.msg.endsWith('GET/trade-api/v2/portfolio/orders'));
+});
+test('learned token bucket throttles locally and refills with time',()=>{
+ const h=worker(),s={pauseUntil:0,limits:{read:{refill_rate:10,bucket_capacity:10}},buckets:{}};
+ h.api.debitBudget(s,'GET','/trade-api/v2/markets');assert.throws(()=>h.api.debitBudget(s,'GET','/trade-api/v2/markets'),/budget exhausted/);
+ h.setTime(h.now+1000);assert.doesNotThrow(()=>h.api.debitBudget(s,'GET','/trade-api/v2/markets'));
+});
+test('terminal channel error clears books and schedules recovery',()=>{
+ for(const code of [10,25,27]){const h=worker();h.obj.books.TEST={};let retried=false;h.obj.retry=()=>retried=true;
+ h.obj.onUpstream(JSON.stringify({type:'error',msg:{code}}));assert.equal(retried,true);assert.equal(Object.keys(h.obj.books).length,0);
+ if(code===27)assert.ok(h.obj.backoff>=30000);}
+});
+test('late frames from retired book subscriptions cannot alter current depth',()=>{
+ const h=worker();h.obj.bookSid=2;h.obj.books.TEST={yes:new Map([[.5,2]]),no:new Map(),at:h.now};h.obj.bookSequences.set(2,100);
+ h.obj.onUpstream(JSON.stringify({type:'orderbook_delta',sid:1,seq:7,msg:{market_ticker:'TEST',side:'yes',price_dollars:'.5',delta_fp:'20'}}));
+ assert.equal(h.obj.books.TEST.yes.get(.5),2);
+ h.obj.onUpstream(JSON.stringify({type:'orderbook_delta',sid:2,seq:101,msg:{market_ticker:'TEST',side:'yes',price_dollars:'.5',delta_fp:'1'}}));assert.equal(h.obj.books.TEST.yes.get(.5),3);
+});
+function demoFixture(){
+ const h=worker();Object.assign(h.obj.env,{FEED_TOKEN:'test',KALSHI_DEMO_KEY_ID:'demo',KALSHI_DEMO_PRIVATE_KEY:'demo'});
+ h.context.demoCalls=[];h.context.demoResponse=undefined;
+ vm.runInContext(`signedCall=async(env,mode,method,path,body)=>{
+ demoCalls.push({mode,method,path,body});if(mode!=='demo')throw Error('Wrong environment');
+ if(path.endsWith('/exchange/status'))return {exchange_active:true,trading_active:true};
+ if(path.includes('/markets/'))return {market:{status:'active',close_time:new Date(Date.now()+600000).toISOString()}};
+ if(method==='POST'){if(demoResponse==='timeout')throw Error('network timeout');return {order_id:'demo-order',fill_count:'1.00',remaining_count:'0.00'};}
+ if(path.includes('/portfolio/orders/'))return {order:{order_id:'demo-order',client_order_id:'btc15-demo-11111111-1111-1111-1111-111111111111',ticker:'KXBTC15M-TEST',status:'executed',fill_count_fp:'1.00'}};
+ if(path.includes('/portfolio/fills?'))return {fills:demoResponse==='missing'?[]:[{fill_id:'f1',order_id:'demo-order',ticker:'KXBTC15M-TEST',count_fp:'1.00'}]};
+ if(path.includes('/portfolio/positions?'))return {market_positions:[{ticker:'KXBTC15M-TEST',position_fp:'-1.00'}]};
+ return {orders:[]};};`,h.context);
+ h.body={clientId:'btc15-demo-11111111-1111-1111-1111-111111111111',ticker:'KXBTC15M-TEST',side:'no',priceCents:24.3};
+ h.req=(path,body=h.body)=>h.obj.fetch(new Request('https://internal/demo/'+path+'?token=test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}));return h;
+}
+test('demo persists intent, converts NO limit to YES ask, and deduplicates retries',async()=>{
+ const h=demoFixture();const first=await (await h.req('order')).json();assert.equal(first.order.state,'accepted');
+ const call=h.context.demoCalls.find(x=>x.method==='POST');assert.equal(call.body.side,'ask');assert.equal(call.body.price,'0.7570');assert.equal(call.body.count,'1.00');
+ await h.req('order');assert.equal(h.context.demoCalls.filter(x=>x.method==='POST').length,1);assert.equal(h.data.get('demo.ledger').length,1);
+});
+test('unknown demo outcome survives restart and blocks another submission',async()=>{
+ const h=demoFixture();h.context.demoResponse='timeout';await h.req('order');assert.equal(h.data.get('demo.ledger')[0].state,'unknown');
+ h.obj=new h.api.KalshiFeed({storage:h.storage},h.obj.env);
+ const r=await h.req('order',{...h.body,clientId:'btc15-demo-22222222-2222-2222-2222-222222222222'});assert.equal(r.status,409);assert.equal(h.context.demoCalls.filter(x=>x.method==='POST').length,1);
+});
+test('demo reconciliation refuses missing fills and accepts a matching terminal order',async()=>{
+ const h=demoFixture();await h.req('order');h.context.demoResponse='missing';let r=await (await h.req('reconcile')).json();assert.equal(r.order.reconciled,false);
+ h.context.demoResponse=undefined;r=await (await h.req('reconcile')).json();assert.equal(r.order.reconciled,true);assert.equal(r.order.fills.length,1);
+});
+test('demo controls require the token even when called directly on the Durable Object',async()=>{
+ const h=demoFixture();const r=await h.obj.fetch(new Request('https://internal/demo/status'));assert.equal(r.status,403);assert.equal(h.context.demoCalls.length,0);
+});
+
+test('definitively rejected demo orders do not require nonexistent fills',async()=>{
+ const h=demoFixture();vm.runInContext('const originalDemoCall=signedCall;signedCall=async(...args)=>{if(args[2]==="POST"){const e=Error("bad price increment");e.status=400;throw e;}return originalDemoCall(...args);}',h.context);
+ const d=await (await h.req('order')).json();assert.equal(d.order.state,'rejected');assert.equal(d.order.reconciled,true);
 });
