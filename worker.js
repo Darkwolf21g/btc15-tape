@@ -21,6 +21,14 @@ const WINDOW = 900;
 const MODEL_VERSION = "brti-driftless-v3";
 // Bound network waits so a slow upstream cannot strand the alarm chain.
 const timedFetch = (url, options = {}) => fetch(url, {...options, signal: AbortSignal.timeout(12000)});
+// The timeout applies only to the HTTP upgrade. An AbortSignal.timeout left on
+// the upgraded response also aborts the long-lived WebSocket after 12 seconds.
+async function upgradeFetch(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
+  try { return await fetch(url, {...options, signal:controller.signal}); }
+  finally { clearTimeout(timer); }
+}
 
 export default {
   async scheduled(event, env, ctx) {
@@ -425,14 +433,14 @@ export class KalshiFeed {
     try {
       const ts = String(Date.now());
       const sig = await signHandshake(this.env.KALSHI_PRIVATE_KEY, ts + "GET" + "/trade-api/ws/v2");
-      const resp = await timedFetch(WS_UPSTREAM, {headers: {"Upgrade": "websocket", "KALSHI-ACCESS-KEY": this.env.KALSHI_KEY_ID.trim(),
+      const resp = await upgradeFetch(WS_UPSTREAM, {headers: {"Upgrade": "websocket", "KALSHI-ACCESS-KEY": this.env.KALSHI_KEY_ID.trim(),
                                                        "KALSHI-ACCESS-SIGNATURE": sig, "KALSHI-ACCESS-TIMESTAMP": ts}});
       const ws = resp.webSocket;
       if (!ws) throw new Error("Kalshi refused the handshake: " + resp.status + " " + (await resp.text().catch(() => "")).slice(0, 120));
       ws.accept();
       this.tickerSet = ""; this.tickerSid = null; this.bookSid = null; this.books = {}; this.lastTicker = {}; this.last = {}; this.bookSequence = null;
       this.up = ws; this.upState = "open"; this.upSince = Date.now(); this.lastErr = null; this.backoff = 2000; this.counts = {};
-      ws.addEventListener("message", ev => this.onUpstream(ev.data));
+      ws.addEventListener("message", ev => { if (this.up === ws) this.onUpstream(ev.data); });
       ws.addEventListener("close", ev => { if (this.up === ws) { this.closeUpstream("disconnected"); this.lastErr = "closed " + ev.code + " " + (ev.reason || ""); this.retry(); } });
       ws.addEventListener("error", () => { if (this.up === ws) { this.closeUpstream("socket error"); this.lastErr = "socket error"; this.retry(); } });
       this.send({cmd: "subscribe", params: {channels: ["cfbenchmarks_value"], index_ids: ["BRTI"]}});
