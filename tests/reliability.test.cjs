@@ -7,9 +7,9 @@ const root = path.join(__dirname, '..');
 function worker() {
   let now = 1791811200000;
   class Clock extends Date { static now() { return now; } }
-  const context = vm.createContext({Date: Clock, Intl, URL, Request, Response, AbortSignal, console, setTimeout: () => 1, clearTimeout() {}, TextEncoder, crypto: require('node:crypto').webcrypto});
+  const context = vm.createContext({Date: Clock, Intl, URL, Request, Response, AbortSignal, AbortController, console, setTimeout: () => 1, clearTimeout() {}, TextEncoder, crypto: require('node:crypto').webcrypto});
   const source = fs.readFileSync(path.join(root, 'worker.js'), 'utf8').replace('export default {', 'const entry = {').replace('export class KalshiFeed', 'class KalshiFeed');
-  vm.runInContext(source + '\nglobalThis.api = {KalshiFeed, projectFrom, volsFrom, parseTicks, calibrationReport, MODEL_VERSION, entry, paperReport, model:globalThis.BTC15Model};', context);
+  vm.runInContext(source + '\nglobalThis.api = {upgradeFetch, KalshiFeed, projectFrom, volsFrom, parseTicks, calibrationReport, MODEL_VERSION, entry, paperReport, model:globalThis.BTC15Model};', context);
   const data = new Map(); let alarm = null;
   const storage = {get: async k => data.get(k), put: async (k, v) => data.set(k, structuredClone(v)), getAlarm: async () => alarm, setAlarm: async v => { alarm = v; }, list: async ({prefix}) => new Map([...data].filter(([k]) => k.startsWith(prefix))), delete: async k => data.delete(k)};
   const obj = new context.api.KalshiFeed({storage}, {KALSHI_KEY_ID: 'test', KALSHI_PRIVATE_KEY: 'test'});
@@ -176,4 +176,18 @@ test('relay retains delayed official observations and snapshots never promote fa
   assert.equal(snapshot.msg.ticks[0][0],h.now-12000);
   for(const ms of [h.now-1300000,h.now+10000]) send('cfbenchmarks_value',{index_id:'BRTI',data:JSON.stringify({time:ms,value:'100'})});
   assert.equal(h.obj.indexSeconds.size,1);
+});
+
+test('WebSocket upgrade cancels its deadline after handshake, unlike an HTTP body timeout', async () => {
+ const h=worker(); const timers=new Map(); let id=0, signal;
+ h.context.setTimeout=(fn)=>{ timers.set(++id,fn); return id; };
+ h.context.clearTimeout=(id)=>timers.delete(id);
+ h.context.fetch=async (url,options)=>{signal=options.signal;return {webSocket:{}};};
+ const r=await h.api.upgradeFetch('https://test',{headers:{Upgrade:'websocket'}});
+ assert.ok(r.webSocket); assert.equal(timers.size,0); assert.equal(signal.aborted,false);
+ h.context.fetch=async ()=>{throw Error('handshake failed');};
+ await assert.rejects(h.api.upgradeFetch('https://test'),/handshake failed/); assert.equal(timers.size,0);
+ h.context.fetch=(url,options)=>new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(Error('timeout'))));
+ const pending=h.api.upgradeFetch('https://test'); for(const fn of timers.values())fn();
+ await assert.rejects(pending,/timeout/); assert.equal(timers.size,0);
 });
