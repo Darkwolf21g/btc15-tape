@@ -62,9 +62,9 @@ header { display: flex; align-items: flex-end; justify-content: space-between; g
 .settle b { font: 600 17px/1.1 var(--mono); overflow-wrap: anywhere; }
 .settle .up { color: var(--up); } .settle .down { color: var(--down); }
 /* a slim bar that follows the page once the hero has scrolled away */
-.bar2 { position: sticky; top: 0; z-index: 5; display: none; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center;
-        background: rgba(10,15,28,0.94); backdrop-filter: blur(6px); border-bottom: 1px solid var(--line); padding: 6px 0; margin-inline: -16px; padding-inline: 16px; }
-.bar2.on { display: grid; }
+.bar2 { position: fixed; top: env(safe-area-inset-top, 0px); left: 50%; transform: translateX(-50%); width: min(100%, 920px); box-sizing: border-box; z-index: 5; display: grid; visibility: hidden; pointer-events: none; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center;
+        background: rgba(10,15,28,0.94); backdrop-filter: blur(6px); border-bottom: 1px solid var(--line); padding: 6px 0; margin-inline: 0; padding-inline: 16px; }
+.bar2.on { visibility: visible; }
 .bar2 .c { font: 700 26px/1 var(--display); } .bar2 .c.settling { color: var(--target); }
 .bar2 .p2 { font: 700 26px/1 var(--display); text-align: right; }
 .bar2 .m { font-size: 12px; color: var(--dim); text-align: center; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
@@ -75,16 +75,16 @@ header { display: flex; align-items: flex-end; justify-content: space-between; g
 .edge label { display: grid; gap: 5px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
 .edge input { width: 100%; background: transparent; border: 0; color: var(--ink); font: 600 22px var(--mono); outline: none; }
 .edge input::placeholder { color: var(--ink); opacity: 1; }
-.edge .verdict { font-size: 12px; min-height: 1.4em; }
+.edge .verdict { font-size: 12px; min-height: 5.6em; line-height: 1.4; }
 .edge .recline { grid-column: 1 / -1; max-width: none; }
 .edge .label.head { text-transform: none; letter-spacing: 0; font: 12px/1.4 var(--mono); }
 .good { color: var(--up); } .bad { color: var(--down); } .meh { color: var(--dim); }
 
 .levels { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 @media (max-width: 560px) { .levels { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-.lv { border-top: 2px solid var(--line); padding-top: 6px; display: grid; gap: 4px; min-width: 0; }
+.lv { border-top: 2px solid var(--line); padding-top: 6px; display: grid; grid-template-rows: auto auto 1fr; align-content: start; gap: 4px; min-width: 0; }
 .lv b { font: 600 18px/1.1 var(--mono); overflow-wrap: anywhere; }
-.lv small { color: var(--dim); font-size: 11px; }
+.lv small { color: var(--dim); font-size: 11px; line-height: 1.4; min-height: 7em; }
 .lv.spot { border-color: var(--spot); } .lv.avg { border-color: var(--avg); }
 .lv.tgt { border-color: var(--target); cursor: pointer; } .lv.proj { border-color: var(--dim); }
 .lv.spot.thin b { color: var(--dim); }
@@ -1771,7 +1771,8 @@ function render() {
       + (fw && !sharp ? ` Flow 30 s: ${fw.text}${fw.side ? " " + signedUsd(fw.net) : ""}.` : "")
       + (basisSrc === "raw" ? " Enter the exact Robinhood target to set the level." : "")
       + (!exactTarget ? " Target estimated: buy calls wait until it is confirmed or entered." : "");
-    $("why").innerHTML = `<span>${line1}</span>` + (line2.trim() ? `<span class="sub">${line2.trim()}</span>` : "");
+    const whyHtml = `<span>${line1}</span>` + (line2.trim() ? `<span class="sub">${line2.trim()}</span>` : "");
+    if ($("why").innerHTML !== whyHtml) $("why").innerHTML = whyHtml;
     $("why").style.color = sharp ? (move10 > 0 ? css("--up") : css("--down")) : "";
   }
   lastP = p;
@@ -1996,7 +1997,7 @@ document.addEventListener("visibilitychange", () => {
   fetchBackfill(false, bounds(Date.now() / 1000)[0] - 60);
 });
 window.addEventListener("online", reconnectAll);
-if ("IntersectionObserver" in window) new IntersectionObserver(([e]) => $("bar2").classList.toggle("on", !e.isIntersecting), {threshold: 0}).observe(document.querySelector(".hero"));
+if ("IntersectionObserver" in window) new IntersectionObserver(([e]) => { const show = !e.isIntersecting && e.boundingClientRect.bottom <= 0; $("bar2").classList.toggle("on", show); $("bar2").setAttribute("aria-hidden", String(!show)); }, {threshold: 0}).observe(document.querySelector(".hero"));
 
 // ---------------------------------------------------------------- start
 for (const k of Object.keys(VENUES)) connect(k);
