@@ -1,5 +1,14 @@
 # BTC 15 Tape
 
+## Pricing bias lab
+
+The agent page now compares fixed forward experiments for price bands, settlement
+average versus spot, and contract-price follow-through after BRTI moves. Filter by
+side and checkpoint to see sample coverage, simulated fills and net results.
+Collection runs automatically with the existing collector, including while
+trading is off. Old observations are excluded from this new phase. See
+[RESEARCH.md](RESEARCH.md) for the frozen definitions and limitations.
+
 ## Settlement research
 
 The collector now records seven settlement-aware checkpoints, delayed depth

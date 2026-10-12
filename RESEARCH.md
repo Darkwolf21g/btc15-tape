@@ -106,3 +106,65 @@ References reviewed 2026-10-12:
 - https://docs.kalshi.com/websockets/orderbook-updates
 - https://docs.kalshi.com/websockets/market-ticker
 - https://kalshi.com/docs/kalshi-fee-schedule.pdf
+
+## Pricing bias phase — btc15-bias-v1
+
+This phase starts prospectively with checkpoints carrying `bias.version` equal to
+`btc15-bias-v1`. Older checkpoints remain in the settlement study but are excluded
+from the bias study. No historical signals are reconstructed. The live forecast,
+agent mode and order submission permissions do not change.
+
+The following definitions are frozen before outcomes arrive:
+
+1. **Price bands:** observe each side independently in ask-price intervals
+   `[0,10)`, `[10,30)`, `[30,50)`, `[50,70)`, `[70,90)`, `[90,100)` cents. A quote
+   is a one-contract hypothetical purchase, regardless of model edge.
+2. **Settlement disagreement:** only in the final minute with at least one
+   observed and one remaining settlement reading, when current official BRTI
+   and the model's projected settlement average lie on opposite sides of
+   `target - 0.005`. Test the side indicated by the projection. This is a fixed
+   hypothesis about spot anchoring, not evidence that traders make that error.
+3. **Index follow-through:** measure the BRTI change from its source second five
+   seconds earlier, divided by `short_vol * sqrt(5)`. Require absolute value at
+   least 1 and test the move's direction. Both readings must already have been
+   received. Missing earlier readings do not become a zero move. The existing
+   volatility estimate includes recent observations; this is not an independently
+   estimated statistical z-test.
+
+Each experiment uses the existing delayed one-contract simulation: original ask
+as limit, arrival 1–4 seconds later and strictly before close, valid fresh source
+and receipt timestamps, active exchange, 50% depth haircut, and conservative
+whole-cent general Kalshi taker fees. No resting-order or queue fills are inferred.
+The last market/exchange status is reused for the bounded delay, as in the initial
+research release; intervening status changes and competing orders are unknown.
+
+Only officially resolved, current-model windows with a timely valid forecast,
+active market/exchange and valid depth enter the results. Thus coverage is
+conditional on the collector and volatility model being ready. Counts for pending,
+invalid, legacy, missing-movement and missing-arrival observations remain separate.
+
+Results stay separate by **checkpoint, side, hypothesis and price band**. Each
+row contains at most one observation per market. Do not combine rows into a
+portfolio, add their sample counts, or optimize the thresholds on these results
+and call the resulting strategy independently tested. Repeated adjacent windows
+can still be dependent; this release makes no significance or confidence claim.
+
+The quote win rate and mean ask-plus-fee include every eligible quote. Net P&L,
+return on cost and drawdown use only delayed simulated fills. Fill selection can
+change the observed outcomes. Midpoint markout is signed in the selected direction
+and measured over the actual recorded delay; it is neither executable profit nor
+proof of a causal price-discovery lag. This snapshot design cannot measure
+subsecond lead/lag or prove which venue moved first.
+
+View **Pricing bias lab** under Settlement research on the agent page. Filters
+select one checkpoint and side. The graph compares observed win rate with average
+quoted all-in cost; the table reports fills and net per fill. The existing report
+and offline evaluator now include `bias` with definitions, coverage, results and
+limitations. Stored raw inputs include the information needed to reproduce the
+new snapshot fields, including the cent-rounding-aware required remaining mean.
+
+Before considering any trading change, archive a fixed dataset, specify the
+selection rule and a fresh future holdout period, test dependence-aware uncertainty
+and multiple comparisons, and stress fees, fill rates and latency. A positive
+cell in this descriptive report is a hypothesis for that next test, not approval
+for automated real-money trading.
