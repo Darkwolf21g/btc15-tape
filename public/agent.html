@@ -81,7 +81,7 @@ a { color: var(--ink); }
 
 <section>
   <div class="notes">
-    <p>The agent runs in the relay around the clock: from the start minute you set (default minute 5) to 15 seconds before each close, every 5 seconds, on Kalshi's own index and book. It trades when a side clears 3¢ after fees at the bad end of the model's band and the call has held for two looks: one limit order at the ask, immediate-or-cancel, a quarter Kelly, capped per window. One trade a window, 12 a day, nothing after the daily loss stop, nothing while Kalshi has trading paused.</p>
+    <p>The agent runs in the relay when enabled: from the start minute you set (default minute 5) to 15 seconds before each close, every 5 seconds, on Kalshi's own index and book. Its uncalibrated model considers a trade when a side clears 3¢ after fees at the bad end of the model's band and the call has held for two looks: one limit order at the ask, immediate-or-cancel, a quarter Kelly, capped per window. One trade a window, 12 a day, nothing after the daily loss stop, nothing while Kalshi has trading paused.</p>
     <p><b>Paper</b> decides and scores without orders. <b>Demo</b> trades Kalshi's demo exchange (its own key pair on the relay). <b>Live</b> trades your account. Controls need the stream token; Live asks you to type LIVE.</p>
   </div>
 </section>
@@ -97,17 +97,19 @@ const mmss = l => `${Math.floor((l || 0) / 60)}:${String((l || 0) % 60).padStart
 const pct = v => v == null ? "–" : Math.round(v * 100);
 const money = c => (c >= 0 ? "+" : "−") + "$" + (Math.abs(c) / 100).toFixed(2);
 const cents = v => (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + "¢";
-let cfg = null;
+let cfg = null, refreshing = false;
 async function refresh() {
+  if (refreshing) return; refreshing = true;
   try {
-    const r = await fetch("./trade/status" + q(), {cache: "no-store"});
-    if (!r.ok) { $("line").textContent = r.status === 403 ? "The relay wants the stream token: save it below." : "Relay answered " + r.status; $("when").textContent = "not updated"; return; }
+    const r = await fetch("./trade/status" + q(), {cache: "no-store", signal: AbortSignal.timeout(10000)});
+    if (!r.ok) { $("line").textContent = r.status === 403 ? "The relay wants the stream token: save it below." : "Relay answered " + r.status; $("when").textContent = "STALE · not updated"; refreshing = false; return; }
     const st = await r.json(); cfg = st.config;
+    $("csv").href = "./record.csv" + q(); $("json").href = "./record" + q();
     $("when").textContent = "updated " + new Date().toLocaleTimeString();
     $("mode").textContent = cfg.mode.toUpperCase(); $("mode").className = "mode " + cfg.mode;
     for (const [id, m] of [["bOff", "off"], ["bPaper", "paper"], ["bDemo", "demo"], ["bLive", "live"]]) $(id).classList.toggle("on", cfg.mode === m);
     $("line").textContent = (st.tokenSet ? "Controls unlocked." : "Controls locked: set FEED_TOKEN on the Worker (Settings → Runtime variables and secrets), then save the same token below.")
-      + (cfg.mode !== "off" && !st.hasDemoKey ? " No demo key on the relay." : "");
+      + (cfg.mode === "demo" && !st.hasDemoKey ? " No demo key on the relay." : "");
     const t = st.today;
     $("tToday").textContent = t ? money(t.pnlCents) : "–"; $("tToday").className = t ? (t.pnlCents > 0 ? "good" : t.pnlCents < 0 ? "bad" : "") : "";
     $("tTodayNote").textContent = t ? `${t.trades} trade${t.trades === 1 ? "" : "s"} on ${t.day}` : "no trades yet";
@@ -132,9 +134,10 @@ async function refresh() {
     $("errors").textContent = st.errors && st.errors.length ? st.errors.map(e => `${ET.format(new Date(e.at))} ${e.error}`).join("\n") : "none";
   } catch (e) { $("line").textContent = "Relay not reachable."; $("when").textContent = "not updated"; }
   try {
-    const c = await (await fetch("./collector/status" + q(), {cache: "no-store"})).json();
-    $("collector").textContent = `runs ${c.runs || 0} · last ${c.lastRun ? ET.format(new Date(c.lastRun)) : "never"} · next ${c.nextAlarm ? ET.format(new Date(c.nextAlarm)) : "–"}` + (c.errors && c.errors.length ? `\nlast error: ${c.errors[c.errors.length - 1].error}` : "");
-  } catch (e) {}
+    const c = await (await fetch("./collector/status" + q(), {cache: "no-store", signal: AbortSignal.timeout(10000)})).json();
+    $("collector").textContent = `${c.lastOk && Date.now() - c.lastOk < 120000 ? "ACTIVE" : "STALE — collection needs attention"} · runs ${c.runs || 0} · last ${c.lastRun ? ET.format(new Date(c.lastRun)) : "never"} · next ${c.nextAlarm ? ET.format(new Date(c.nextAlarm)) : "–"}` + (c.errors && c.errors.length ? `\nlast error: ${c.errors[c.errors.length - 1].error}` : "");
+  } catch (e) { $("collector").textContent = "Collector unavailable"; }
+  refreshing = false;
 }
 async function set(body) {
   if (!token) { $("ctlNote").textContent = "Save the stream token first."; return; }
