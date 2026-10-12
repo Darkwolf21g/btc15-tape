@@ -1035,6 +1035,7 @@ function depth(mk) {
   return {up: best(b.no), down: best(b.yes)};
 }
 function connectFeed() {
+  if(Date.now()<relayPauseUntil)return;
   if (feed.timer) { clearTimeout(feed.timer); feed.timer = null; }
   if (feed.ws && feed.ws.readyState <= 1) return;
   const url = feedUrl();
@@ -1584,14 +1585,16 @@ record.windows.filter(w => w.src !== "kalshi" && Date.now() / 1000 - w.close > 9
   .forEach((w, i) => setTimeout(() => settleOfficial(w), 8000 + i * 1500));
 // The relay scores every window on its own (it wakes at each checkpoint and after each close). Its
 // windows are merged in: checkpoints this page missed, results it has not fetched, windows it never saw.
-let relayRecordAt = 0, relayRecordBusy = false;
+let relayRecordAt = 0, relayRecordBusy = false, relayPauseUntil = 0;
 async function refreshCollector() {
+  if(Date.now()<relayPauseUntil)return;
   const base = kalshi.relay || SAME_SITE; if (!base) return;
   try {
     const r = await fetch(base + "/collector/status" + (feed.token ? "?token=" + encodeURIComponent(feed.token) : ""), {cache: "no-store", signal: AbortSignal.timeout(10000)});
     if (!r.ok) {
       const failure=await r.json().catch(()=>({}));
-      const labels={platform_limit:"Cloudflare limit reached",collector_overloaded:"collector overloaded",collector_storage:"collector storage error",collector_timeout:"collector timed out",collector_restarting:"collector restarting",collector_exception:"collector exception"};
+      if(failure.error==="platform_limit")relayPauseUntil=Date.now()+300000;
+      const labels={platform_limit:"Cloudflare request quota exhausted · retry in 5 min",collector_overloaded:"collector overloaded",collector_storage:"collector storage error",collector_timeout:"collector timed out",collector_restarting:"collector restarting",collector_exception:"collector exception"};
       throw Error(r.status===403?"token required":(labels[failure.error]||`HTTP ${r.status}`)+(failure.trace?" · ref "+failure.trace.slice(0,8):""));
     }
     const c = await r.json(), age = c.lastOk ? Math.max(0, (Date.now() - c.lastOk) / 1000) : Infinity;
@@ -1601,6 +1604,7 @@ async function refreshCollector() {
 }
 setInterval(refreshCollector, 30000); setTimeout(refreshCollector, 1500);
 async function mergeRelayRecord() {
+  if(Date.now()<relayPauseUntil)return;
   const base = kalshi.relay || SAME_SITE;
   if (!base || relayRecordBusy || Date.now() - relayRecordAt < 55000) return;
   relayRecordBusy = true;
@@ -1675,6 +1679,7 @@ function recordText() {
 let agentAt = 0;
 const pnlText = c => (c >= 0 ? "+" : "−") + "$" + (Math.abs(c) / 100).toFixed(2);
 async function agentRefresh(force) {
+  if(Date.now()<relayPauseUntil)return;
   const base = kalshi.relay || SAME_SITE;
   if (!base || (!force && Date.now() - agentAt < 30000)) return;
   agentAt = Date.now();

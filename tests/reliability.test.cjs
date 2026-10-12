@@ -150,7 +150,18 @@ test('paper report excludes legacy models and separates simulation settings',()=
 });
 
 test('collector exceptions become redacted diagnostic 503 responses',async()=>{
- const h=worker();const env={FEED:{idFromName:()=>1,get:()=>({fetch:async()=>{throw Error("daily storage limit exceeded SECRET");}})}};
+ const h=worker();const env={FEED:{idFromName:()=>1,get:()=>({fetch:async()=>{throw Error("Exceeded allowed volume of requests in Durable Objects SECRET");}})}};
  const response=await h.api.entry.fetch(new Request('https://test/collector/status'),env);const body=await response.json();
  assert.equal(response.status,503);assert.equal(body.error,'platform_limit');assert.ok(body.trace);assert.ok(!JSON.stringify(body).includes('SECRET'));assert.equal(response.headers.get('Retry-After'),'30');
+});
+
+test('background collection skips contract depth and only subscribes current market',()=>{
+ const h=worker(),messages=[];h.obj.up={send:raw=>messages.push(JSON.parse(raw))};h.obj.subscribeTickers();
+ assert.equal(messages.filter(m=>m.params.channels?.includes('orderbook_delta')).length,0);
+ assert.equal(messages.find(m=>m.params.channels?.includes('ticker')).params.market_tickers.length,1);
+ h.obj.clients.add({});h.obj.subscribeTickers();assert.equal(messages.filter(m=>m.params.channels?.includes('orderbook_delta')).length,1);
+ h.obj.clients.clear();h.obj.tickerSid=2;h.obj.bookSid=3;h.obj.subscribeTickers();assert.equal(h.obj.depthSubscribed,false);assert.ok(messages.some(m=>m.cmd==='unsubscribe'));
+});
+test('paper agent retains depth with no phone connected',()=>{
+ const h=worker(),messages=[];h.obj.agentActive=true;h.obj.up={send:raw=>messages.push(JSON.parse(raw))};h.obj.subscribeTickers();assert.ok(messages.some(m=>m.params.channels?.includes('orderbook_delta')));
 });
