@@ -165,3 +165,15 @@ test('background collection skips contract depth and only subscribes current mar
 test('paper agent retains depth with no phone connected',()=>{
  const h=worker(),messages=[];h.obj.agentActive=true;h.obj.up={send:raw=>messages.push(JSON.parse(raw))};h.obj.subscribeTickers();assert.ok(messages.some(m=>m.params.channels?.includes('orderbook_delta')));
 });
+
+test('relay retains delayed official observations and snapshots never promote fast spot', () => {
+  const h=worker();
+  const send=(type,msg)=>h.obj.onUpstream(JSON.stringify({type,msg}));
+  send('cfbenchmarks_value_5hz',{index_id:'BRTI',source_ts_ms:h.now,value_usd:'120'});
+  send('cfbenchmarks_value',{index_id:'BRTI',data:JSON.stringify({time:String(h.now-12000),value:'100'})});
+  assert.equal(h.obj.indexSeconds.get(h.now-12000),100); assert.equal(h.obj.ticks.at(-1)[1],120);
+  const snapshot=h.obj.indexSnapshot(); assert.equal(snapshot.msg.source,'cfbenchmarks_value'); assert.equal(snapshot.msg.ticks.length,1);
+  assert.equal(snapshot.msg.ticks[0][0],h.now-12000);
+  for(const ms of [h.now-1300000,h.now+10000]) send('cfbenchmarks_value',{index_id:'BRTI',data:JSON.stringify({time:ms,value:'100'})});
+  assert.equal(h.obj.indexSeconds.size,1);
+});

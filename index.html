@@ -1009,7 +1009,38 @@ function saneTick(v) {
   feed.odd = (feed.odd || 0) + 1; feed.oddTotal = (feed.oddTotal || 0) + 1;
   return feed.odd >= 2;
 }
-const officialSeconds = new Map();
+const officialSeconds = new Map(), officialTimes = new Map();
+// Historical index observations remain valid when transport is delayed. They must
+// never refresh the spot timestamp or count as a newly made forecast.
+function rememberOfficial(v, ms) {
+  const now = Date.now();
+  if (!Number.isFinite(v) || v <= 0 || !Number.isFinite(ms) || ms <= 0 || ms > now + 1000 || ms < now - 1200000) return false;
+  const sec = Math.floor(ms / 1000);
+  if (!officialTimes.has(sec) || ms >= officialTimes.get(sec)) {
+    officialSeconds.set(sec, v); officialTimes.set(sec, ms);
+  }
+  for (const t of officialSeconds.keys()) if (t < Math.floor(now / 1000) - 1200) { officialSeconds.delete(t); officialTimes.delete(t); }
+  return true;
+}
+function acceptOfficialMessage(m) {
+  if (m.index_id !== "BRTI") return;
+  let raw; try { raw = typeof m.data === "string" ? JSON.parse(m.data) : m.data; } catch (e) { return; }
+  if (!raw) return;
+  const ms = typeof raw.time === "number" || /^\d{13}$/.test(raw.time) ? +raw.time : Date.parse(raw.time), v = +raw.value;
+  if (!rememberOfficial(v, ms)) return;
+  acceptIndex(v, ms);
+  feed.oneHz = {at:ms, received:Date.now(), delay:Date.now()-ms};
+  const a = m.avg_60s_data;
+  if (a && +a.value > 0 && (!feed.avg60 || ms >= feed.avg60.at))
+    feed.avg60 = {v:+a.value, n:+a.window_size, start:+a.window_start_ts_ms, end:+a.window_end_ts_exclusive, at:ms};
+  const f = m.last_60s_windowed_average_15min;
+  if (!feed.settle || ms >= feed.settle.at)
+    feed.settle = f && +f.value > 0 ? {v:+f.value, n:+f.window_size, end:+f.window_end_ts_exclusive, at:ms} : null;
+}
+function acceptOfficialSnapshot(m) {
+  if (m.index_id !== "BRTI" || m.source !== "cfbenchmarks_value" || !Array.isArray(m.ticks)) return;
+  for (const row of m.ticks.slice(-1200)) if (Array.isArray(row) && row.length === 2) rememberOfficial(row[1], row[0]);
+}
 function acceptIndex(v, ms) {
   if (!Number.isFinite(ms) || Date.now() - ms > FEED_FRESH_MS || ms > Date.now() + 1000 || !saneTick(v)) return false;
   if (!feed.brti || ms > feed.brti.t) feed.brti = {v, t: ms, at: Date.now()};
@@ -1070,18 +1101,11 @@ function connectFeed() {
     feed.counts[d.type] = (feed.counts[d.type] || 0) + 1;
     const m = d.msg || {};
     if (d.type === "relay") { feed.relay = m; return; }
+    if (d.type === "brti_snapshot") { acceptOfficialSnapshot(m); return; }
     if (d.type === "cfbenchmarks_value_5hz") {
       const v = +m.value_usd; if (m.index_id === "BRTI") acceptIndex(v, +m.source_ts_ms);
     } else if (d.type === "cfbenchmarks_value") {
-      let raw; try { raw = JSON.parse(m.data); } catch (e) { return; }
-      const ms = typeof raw.time === "number" ? raw.time : Date.parse(raw.time), v = +raw.value;
-      if (m.index_id !== "BRTI" || !acceptIndex(v, ms)) return;
-      officialSeconds.set(Math.floor(ms / 1000), v);
-      for (const sec of officialSeconds.keys()) if (sec < Math.floor(ms / 1000) - 1200) officialSeconds.delete(sec);
-      const a = m.avg_60s_data;
-      if (a && +a.value > 0) feed.avg60 = {v: +a.value, n: +a.window_size, end: +a.window_end_ts_exclusive, at: ms};
-      const f = m.last_60s_windowed_average_15min;
-      feed.settle = f && +f.value > 0 ? {v: +f.value, n: +f.window_size, end: +f.window_end_ts_exclusive, at: ms} : null;
+      acceptOfficialMessage(m);
     } else if (d.type === "orderbook_snapshot" && m.market_ticker) {
       const b = {yes: new Map(), no: new Map(), at: Date.now()};
       for (const [px, q] of m.yes_dollars_fp || []) if (+q > 0) b.yes.set(+px, +q);
@@ -2037,6 +2061,11 @@ function diagnostics(now, open) {
   const fr = feed.relay || {};
   lines.push(`stream: ${feed.state}` + (feedUrl() ? ` to ${feedUrl().replace(/\?.*/, "")}` : " (no relay)") + ` · counts ${JSON.stringify(feed.counts)} · relay ${fr.state || "?"}${fr.error ? " " + fr.error : ""}${fr.hasKey === false ? " · no key set" : ""}`
     + (feed.brti ? ` · BRTI ${feed.brti.v.toFixed(2)} ${((t - feed.brti.at) / 1000).toFixed(1)}s` : "") + (feed.oddTotal ? ` · odd ticks ignored ${feed.oddTotal}` : "") + (feed.settle ? ` · settle avg ${feed.settle.v.toFixed(2)} n ${feed.settle.n}` : ""));
+  const av = trailingAverageStatus(t), one = feed.oneHz, ag = feed.avg60;
+  const latest = Math.max(-Infinity, ...officialSeconds.keys());
+  const recentTimes = [...officialTimes.values()].sort((a,b)=>a-b).slice(-8);
+  lines.push(`BRTI recovery v1: ${av.n}/60 seconds · one-Hz source age ${one ? ((t-one.at)/1000).toFixed(1) : "-"}s · transport delay ${one ? one.delay : "-"}ms · aggregate ${ag ? `${ag.n} ticks, end ${ag.end}, source ${ag.at}, span ${ag.end-ag.start}ms` : "none"}`);
+  lines.push(`BRTI raw times: ${recentTimes.join(",")} · missing seconds: ${Array.from({length:60},(_,i)=>latest-60+i).filter(s=>!officialSeconds.has(s)).join(",")}`);
   const st = calStats();
   lines.push(`nowcast: samples ${cal.n.toFixed(0)}` + (st ? ` · flow ${st.b1.toFixed(1)} $ per $1M (t ${st.t1.toFixed(1)}, ${st.flowOn ? "on" : "off"}) · perp gap ×${st.b2.toFixed(2)} (t ${st.t2.toFixed(1)}, ${st.leadOn ? "on" : "off"})` : " · needs 120")
     + ` · level sd ${levelSd().toFixed(1)}` + (basisSd != null ? ` (measured ${basisSd.toFixed(2)})` : "") + ` · bankroll $${bankroll}`);

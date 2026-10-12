@@ -383,16 +383,23 @@ export class KalshiFeed {
     const drop = () => { this.clients.delete(server); this.maybeIdle(); };
     server.addEventListener("close", drop);
     server.addEventListener("error", drop);
-    server.addEventListener("message", ev => { if (ev.data === "ping") { try { server.send("pong"); } catch (e) {} } });
+    server.addEventListener("message", ev => { if (ev.data === "ping") { try { server.send("pong"); server.send(JSON.stringify(this.indexSnapshot(90))); } catch (e) {} } });
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
     try {
       server.send(JSON.stringify(this.status()));
+      server.send(JSON.stringify(this.indexSnapshot()));
       if (this.upState === "open" && Date.now() - this.upMsgAt < 3000)
         for (const [type, f] of Object.entries(this.last)) if (type !== "ticker") server.send(f);
       for (const [tk, b] of Object.entries(this.books)) if (Date.now() - b.at < 15000) server.send(JSON.stringify(this.snapshotOf(tk, b)));   // the books as they stand now
     } catch (e) {}
     this.ensureUpstream();
     return new Response(null, {status: 101, webSocket: client});
+  }
+  indexSnapshot(limit = 1200) {
+    const now = Date.now();
+    const ticks = [...this.indexSeconds].filter(([ms,v]) => Number.isFinite(ms) && ms > 0 && ms >= now-1200000 && ms <= now+1000 && Number.isFinite(v) && v > 0)
+      .sort((a,b)=>a[0]-b[0]).slice(-limit);
+    return {type:"brti_snapshot", msg:{index_id:"BRTI", source:"cfbenchmarks_value", ticks}};
   }
   broadcast(text) {
     for (const c of this.clients) { try { c.send(text); } catch (e) { this.clients.delete(c); } }
@@ -724,10 +731,10 @@ export class KalshiFeed {
     if (d.type === "cfbenchmarks_value_5hz" && d.msg && d.msg.index_id === "BRTI" && +d.msg.value_usd > 0) this.pushTick(+d.msg.source_ts_ms, +d.msg.value_usd);
     if (d.type === "cfbenchmarks_value" && d.msg) {
       try {
-        const raw = JSON.parse(d.msg.data), v = +raw.value, ms = typeof raw.time === "number" ? raw.time : Date.parse(raw.time);
-        if (d.msg.index_id === "BRTI" && v > 0 && Number.isFinite(v) && ms > 0 && Date.now() - ms < 5000 && ms <= Date.now() + 1000) {
+        const raw = JSON.parse(d.msg.data), v = +raw.value, ms = typeof raw.time === "number" || /^\d{13}$/.test(raw.time) ? +raw.time : Date.parse(raw.time);
+        if (d.msg.index_id === "BRTI" && v > 0 && Number.isFinite(v) && ms > 0 && Date.now() - ms < 1200000 && ms <= Date.now() + 1000) {
           this.pushTick(ms, v); this.indexSeconds.set(ms, v);
-          for (const t of this.indexSeconds.keys()) if (t < ms - 1200000) this.indexSeconds.delete(t);
+          for (const t of this.indexSeconds.keys()) if (t < Date.now() - 1200000) this.indexSeconds.delete(t);
         }
       } catch (e) {}
       const f = d.msg.last_60s_windowed_average_15min;

@@ -37,7 +37,7 @@ function page(savedRecord = []) {
     globalThis.api = {
       avgAt, project, windowSamples, captureProxyClose, settleWindow, settleOfficial,
       scoreRecord, recordLine, recordText, verdict, render, target, tickers, record,
-      samples, backfill, venue, kalshi, pHist, feed, feedLive, officialSeconds, officialSettle, officialTrailing, trailingAverageStatus, acceptIndex, indexVols, decisionLine,
+      samples, backfill, venue, kalshi, pHist, feed, feedLive, officialSeconds, officialSettle, officialTrailing, trailingAverageStatus, acceptIndex, acceptOfficialMessage, acceptOfficialSnapshot, indexVols, decisionLine,
       setBasisValue(v, sd = 0.5) { basis = v; basisSrc = 'kalshi'; basisSd = sd; },
       setMarketResponse(market) { kalshiGet = async () => ({market}); },
       seedVol() { volN = 60; for (const row of vol) { row[0] = 4; row[1] = 1; } },
@@ -305,4 +305,24 @@ test('only a fresh complete BRTI aggregate can supply an average before local hi
   api.feed.avg60.n=59;assert.equal(api.trailingAverageStatus().v,null);
   api.feed.avg60.n=60;api.feed.avg60.at=3550000;assert.equal(api.trailingAverageStatus().v,null);
   api.feed.avg60.at=3565000;api.feed.avg60.end=3565000;assert.equal(api.trailingAverageStatus().v,null);
+});
+
+test('late one-Hz observations repair a missing average without refreshing live spot', () => {
+  const {api, setTime} = page(); const now = 1791811200000; setTime(now);
+  api.acceptIndex(120, now);
+  for(let i=0;i<=60;i++) if(i!==12) api.acceptOfficialMessage({index_id:'BRTI',data:JSON.stringify({time:now-i*1000,value:'100'})});
+  assert.equal(api.trailingAverageStatus().v,null);
+  api.acceptOfficialMessage({index_id:'BRTI',data:JSON.stringify({time:String(now-12000),value:'100'})});
+  assert.equal(api.trailingAverageStatus().v,100);
+  assert.equal(api.feed.brti.t,now); assert.equal(api.feed.brti.v,120);
+});
+test('relay snapshots hydrate the real one-Hz buffer without creating fresh spot or forecasts', () => {
+  const {api}=page(); const now=3560000;
+  const ticks=Array.from({length:61},(_,i)=>[now-i*1000,100]);
+  api.acceptOfficialSnapshot({index_id:'BRTI',source:'cfbenchmarks_value_5hz',ticks});
+  assert.equal(api.officialSeconds.size,0);
+  api.acceptOfficialSnapshot({index_id:'BRTI',source:'cfbenchmarks_value',ticks:[...ticks,[now+10000,100],[now-1300000,100],[now-2000,Infinity]]});
+  assert.equal(api.trailingAverageStatus().v,100); assert.equal(api.feed.brti,null); assert.equal(api.pHist.size,0);
+  api.acceptOfficialMessage({index_id:'ETHUSD_RTI',data:JSON.stringify({time:now,value:200})});
+  assert.equal(api.officialSeconds.get(now/1000),100);
 });
