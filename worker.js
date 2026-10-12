@@ -34,7 +34,14 @@ export default {
     if (path === "/feed" || path === "/feed/status" || path === "/record" || path === "/record.csv" || path === "/collector/status" || path === "/trade/status" || path === "/trade/config") {
       if (env.FEED_TOKEN && url.searchParams.get("token") !== env.FEED_TOKEN) return new Response("token", {status: 403, headers: CORS});
       if (!env.FEED) return new Response("feed not configured", {status: 503, headers: CORS});
-      return env.FEED.get(env.FEED.idFromName("brti")).fetch(request);
+      try { return await env.FEED.get(env.FEED.idFromName("brti")).fetch(request); }
+      catch (e) {
+        const message=String(e?.message || e), trace=crypto.randomUUID();
+        const code=/quota|daily|limit exceeded|exceeded.*limit/i.test(message)?"platform_limit":/overload/i.test(message)?"collector_overloaded":/storage|sqlite|database/i.test(message)?"collector_storage":/timeout|timed out/i.test(message)?"collector_timeout":/reset|restart/i.test(message)?"collector_restarting":"collector_exception";
+        // Full exception stays in private Worker logs. Never expose keys or raw upstream errors.
+        console.error("btc15 collector failure",{trace,code,path,error:e});
+        return new Response(JSON.stringify({healthy:false,error:code,trace,release:"collector-diagnostics-v1"}),{status:503,headers:{...CORS,"Content-Type":"application/json","Retry-After":"30"}});
+      }
     }
     // Self-test: sign a cheap authenticated REST call and report what Kalshi says (status codes only).
     if (path === "/feed/selftest") {

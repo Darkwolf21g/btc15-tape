@@ -1506,7 +1506,11 @@ async function refreshCollector() {
   const base = kalshi.relay || SAME_SITE; if (!base) return;
   try {
     const r = await fetch(base + "/collector/status" + (feed.token ? "?token=" + encodeURIComponent(feed.token) : ""), {cache: "no-store", signal: AbortSignal.timeout(10000)});
-    if (!r.ok) throw Error(r.status === 403 ? "token required" : `HTTP ${r.status}`);
+    if (!r.ok) {
+      const failure=await r.json().catch(()=>({}));
+      const labels={platform_limit:"Cloudflare limit reached",collector_overloaded:"collector overloaded",collector_storage:"collector storage error",collector_timeout:"collector timed out",collector_restarting:"collector restarting",collector_exception:"collector exception"};
+      throw Error(r.status===403?"token required":(labels[failure.error]||`HTTP ${r.status}`)+(failure.trace?" · ref "+failure.trace.slice(0,8):""));
+    }
     const c = await r.json(), age = c.lastOk ? Math.max(0, (Date.now() - c.lastOk) / 1000) : Infinity;
     $("healthCollector").textContent = age < 120 ? `Collector active · ${Math.round(age)}s ago · ${c.forecasts || 0} forecasts` : `Collector stale · ${Number.isFinite(age) ? Math.round(age / 60) + "m ago" : "no successful run"}`;
     $("healthCollector").className = age < 120 ? "good" : "bad";
@@ -1697,7 +1701,7 @@ function render() {
   let proj = null, p = null, band = null, projectionStatus = null;
   const vols = live ? indexVols() : sigmas(), f30 = flowSum(NOW_H, now);
   const lean = vols ? nowcast((f30.b + f30.pb - f30.s - f30.ps) / 1e6, lead != null && spot != null ? lead - spot : null, vols) : 0;
-  if (x != null && tgt != null && vols && (!feed.brti || live)) {
+  if (x != null && tgt != null && vols && live) {
     const drifts = driftsOf(lean);
     projectionStatus = project(now, close, x, vols, drifts);
     if (projectionStatus.mean != null) {
@@ -1706,7 +1710,7 @@ function render() {
       band = chanceBand(now, close, x, tgt, vols, drifts);
       pHist.set(Math.floor(now), p);
     } else pHist.delete(Math.floor(now));
-    fillProbHistory(open, now, close, tgt, vols);
+    // Do not reconstruct earlier forecasts from later observations.
   }
   // In the final minute: the average the remaining seconds must reach for Up to win.
   const need = proj && tgt != null && proj.observed && proj.m > 0 ? Math.ceil((((tgt - 0.005) * 60 - (proj.sum + (proj.official ? 0 : proj.observed * basis))) / proj.m) * 100 - 1e-7) / 100 : null;
@@ -1746,7 +1750,7 @@ function render() {
     big.textContent = "WAIT"; big.className = "p none";
     $("pBar").style.width = "0%";
     $("fairUp").textContent = "Up –"; $("fairDown").textContent = "Down –";
-    $("why").textContent = feed.brti && !live ? "BRTI is stale. Probability and signals pause until fresh index readings return." : projectionStatus && projectionStatus.missing ? `INCOMPLETE: ${projectionStatus.missing} elapsed samples missing. Probability and buy signals paused.` : x == null ? "Waiting for a fresh BRTI price or two exchanges…" : vols == null ? "Warming up volatility from fresh readings; usually 20–40 seconds." : "Needs this window's target. Type the one Robinhood shows.";
+    $("why").textContent = !live ? "WAIT: official BRTI is unavailable. Exchange prices are context only; probability and trade signals resume with fresh index data." : projectionStatus && projectionStatus.missing ? `INCOMPLETE: ${projectionStatus.missing} elapsed samples missing. Probability and buy signals paused.` : x == null ? "Waiting for a fresh BRTI price or two exchanges…" : vols == null ? "Warming up volatility from fresh readings; usually 20–40 seconds." : "Needs this window's target. Type the one Robinhood shows.";
     $("why").style.color = "";
   } else {
     big.textContent = Math.min(99, Math.max(1, Math.round(p * 100))) + "%"; big.className = "p " + (p >= 0.5 ? "up" : "down");
@@ -1782,7 +1786,7 @@ function render() {
   const typedUp = $("rhUp").value ? parseFloat($("rhUp").value) : null, typedDown = $("rhDown").value ? parseFloat($("rhDown").value) : null;
   const paused = tradingPaused();
   const waitReason = paused ? "WAIT: Kalshi has trading paused" + (exch.resume ? " (until about " + ET_CLOCK.format(new Date(exch.resume)) + ")" : "") : !exactTarget ? "WAIT: enter or retrieve the exact target" : "WAIT: incomplete data or model unavailable";
-  const signalP = exactTarget && !paused ? p : null;
+  const signalP = live && exactTarget && !paused ? p : null;
   const dep = depth(mk);
   const vUp = verdict($("vUp"), signalP, band && band.lo, typedUp != null ? typedUp : upC, waitReason, dep && dep.up);
   const vDown = verdict($("vDown"), signalP == null ? null : 1 - signalP, band && 1 - band.hi, typedDown != null ? typedDown : downC, waitReason, dep && dep.down);

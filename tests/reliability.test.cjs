@@ -101,3 +101,9 @@ test('a missing order-book sequence invalidates depth and reconnects',()=>{
  h.obj.onUpstream(JSON.stringify({type:'orderbook_delta',seq:12,msg:{market_ticker:'TEST',side:'yes',price_dollars:'0.5',delta_fp:'1'}}));
  assert.equal(Object.keys(h.obj.books).length,0);assert.equal(retried,true);
 });
+
+test('collector exceptions become redacted diagnostic 503 responses',async()=>{
+ const h=worker();const env={FEED:{idFromName:()=>1,get:()=>({fetch:async()=>{throw Error("daily storage limit exceeded SECRET");}})}};
+ const response=await h.api.entry.fetch(new Request('https://test/collector/status'),env);const body=await response.json();
+ assert.equal(response.status,503);assert.equal(body.error,'platform_limit');assert.ok(body.trace);assert.ok(!JSON.stringify(body).includes('SECRET'));assert.equal(response.headers.get('Retry-After'),'30');
+});
