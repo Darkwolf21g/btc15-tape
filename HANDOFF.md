@@ -1,5 +1,16 @@
 # BTC 15 Tape — handoff
 
+## Settlement research addition — October 12, 2026
+
+`shared-research.js` is embedded in the Worker by `scripts/sync-model.cjs` and
+imported by the offline evaluator. Research records use `r:<close>` and raw
+inputs `ri:<close>:<checkpoint>`; `research.pending` schedules arrival snapshots.
+Depth now runs in bounded research bursts without a browser, in addition to the
+existing browser/paper behavior. These details supersede the older no-background-
+depth behavior. See RESEARCH.md for the exact capture/evaluation contract and
+10-day summary / 24-hour raw retention. Production order writing remains blocked.
+No model promotion and no retrospective reconstruction of old observations.
+
 ## Reliability review — October 12, 2026
 
 This section supersedes older operational claims below. The collector now keeps the read-only BRTI stream connected without a phone, wakes at least every 30 seconds, and has a one-minute Cloudflare cron watchdog. It repairs overdue alarms, schedules recovery before network work, bounds upstream requests to 12 seconds, and retains up to 20 minutes of actual one-second observations. This creates ongoing Durable Object usage; check your Cloudflare usage rather than assuming it is free. Trading mode is not changed by these improvements.

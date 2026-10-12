@@ -1,5 +1,13 @@
 # BTC 15 Tape
 
+## Settlement research
+
+The collector now records seven settlement-aware checkpoints, delayed depth
+snapshots, and official outcomes for chronological evaluation. Open **Settlement
+research** on `/agent.html`; see [RESEARCH.md](RESEARCH.md) for data retention,
+export commands, model selection, fee assumptions and limitations. This does not
+change any trading mode. New records begin after deployment.
+
 ## Paper research release — October 12, 2026 (v3)
 
 This section supersedes the earlier release notes below.

@@ -61,6 +61,13 @@ a { color: var(--ink); }
   <div class="notes" id="ctlNote"></div>
 </section>
 
+<section id="researchPanel"><h2>Settlement research</h2>
+<p class="notes">Records official index inputs and market depth at 10m, 5m, 2m, 60s, 30s, 15s and 5s before close, even while paper trading is off.</p>
+<div class="row"><button id="researchRefresh" type="button">Refresh research</button><button id="researchExport" type="button">Download research data</button></div>
+<pre id="researchStatus" aria-live="polite">Loading research status…</pre>
+<pre id="researchScores"></pre>
+<p class="notes">Each checkpoint is a separate one-contract experiment. Fees, a one-second minimum delay and 50% of displayed depth are simulated. At least 60 earlier eligible windows per checkpoint are needed before later windows are scored. No proven edge yet.</p>
+</section>
 <section id="demoPanel"><h2>Kalshi demo · mock funds only</h2>
 <p class="notes">Separate from the paper model. Test one contract at a time against demo markets. Maximum 10 test orders per day. Reconcile each order before another submission.</p>
 <div class="row"><button id="demoLoad">Load demo markets</button><select id="demoMarket" aria-label="Demo market"><option value="">Load markets first</option></select></div>
@@ -208,6 +215,36 @@ for(const [id,path] of [["demoReconcile","reconcile"],["demoCancel","cancel"]])$
   if(!demoLast||demoSending)return;demoSending=true;
   try{demoShow((await demoAction(path,{clientId:demoLast.clientId})).order);}catch(e){$("demoResult").textContent=e.message;}finally{demoSending=false;}
 };
+let researchBusy=false;
+async function researchGet(path,params={}){
+ const u=new URL('./research/'+path,location.href);if(token)u.searchParams.set('token',token);
+ for(const [k,v] of Object.entries(params))u.searchParams.set(k,String(v));
+ const r=await fetch(u,{cache:'no-store',signal:AbortSignal.timeout(20000)});
+ if(!r.ok)throw Error(r.status===403?'Save the stream token to view research.':'Research unavailable (HTTP '+r.status+').');
+ return r.json();
+}
+async function refreshResearch(){
+ if(researchBusy)return;researchBusy=true;
+ try{
+  const st=await researchGet('status');
+  $('researchStatus').textContent=`${st.recordedWindows} windows recorded · ${st.settledWindows} settled\n${st.forecasts} forecasts · ${st.usableDepth} with fresh depth · ${st.arrivals} arrival snapshots\n${st.missed} missing or unusable forecasts\nLast capture: ${st.lastCaptureAt?ET.format(new Date(st.lastCaptureAt)):'waiting for first checkpoint'}\nRetention: 10 days summaries / 24 hours raw inputs`;
+  const r=await researchGet('report');
+  const lines=Object.entries(r.scores).filter(([,s])=>s.n).sort((a,b)=>Number(b[0])-Number(a[0])).map(([c,s])=>`${c}s · ${s.n} forecasts · Brier ${s.brier.toFixed(4)} / market ${s.marketBrier.toFixed(4)}\n  ${s.filled}/${s.attempts} simulated fills · net ${money(s.pnlCents)} · drawdown $${(s.maxDrawdownCents/100).toFixed(2)}`);
+  $('researchScores').textContent=r.status+(lines.length?'\n\n'+lines.join('\n'):'');
+ }catch(e){$('researchStatus').textContent=e.message;$('researchScores').textContent='';}
+ finally{researchBusy=false;}
+}
+$('researchRefresh').onclick=refreshResearch;
+$('researchExport').onclick=async()=>{
+ const b=$('researchExport');b.disabled=true;
+ try{
+  const rows=[],through=Math.floor(Date.now()/1000);let after=0,page;
+  do{page=await researchGet('export',{after,through,limit:100});rows.push(...page.rows);if(page.nextAfter!=null&&page.nextAfter<=after)throw Error('Invalid export cursor');after=page.nextAfter;}while(after!=null);
+  const blob=new Blob([JSON.stringify({schema:page.schema,model:page.model,settings:page.settings,capturedAt:new Date().toISOString(),rows},null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='btc15-settlement-research-'+new Date().toISOString().slice(0,10)+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+ }catch(e){$('researchStatus').textContent=e.message;}finally{b.disabled=false;}
+};
+refreshResearch(); setInterval(refreshResearch, 60000);
 refresh(); setInterval(refresh, 10000);
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(); });
 </script>
