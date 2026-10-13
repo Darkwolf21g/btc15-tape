@@ -1,5 +1,20 @@
 # BTC 15 Tape — handoff
 
+## Settlement correction — October 13, 2026 (v4)
+
+This section supersedes older close-inclusive settlement and streamed-aggregate
+substitution claims below. KXBTC15M contract samples are `[close - 60s, close)`,
+per [the series contract terms](https://assets.kalshi.com/contract_terms/CRYPTO.pdf).
+The WebSocket final-minute aggregate remains `(close - 60s, close]` and is only
+a separate diagnostic. Contract projections now require actual one-Hz samples;
+missing elapsed readings produce WAIT. Model `brti-driftless-v4` keeps the same
+volatility, rounding and $0.30 scale floor. Page and Worker use the shared model;
+exchange trailing diagnostics remain unchanged. Old forecasts and completed
+closing diagnostics are not recalculated. See RESEARCH.md for the separate
+prospective cohort and rollout-gap handling. Use the reference/last-trading close
+time, not API expiration_time. No trading, collection schedule, retention or
+deployment configuration changes are part of this correction.
+
 ## Pricing bias addition — October 12, 2026
 
 `shared-research.js` tags new snapshots with `btc15-bias-v2` and reports three

@@ -1,7 +1,8 @@
 // Canonical research calculations; embedded in worker.js and imported by the offline evaluator.
 (() => {
-const VERSION = 'settlement-research-v1';
-const BIAS_VERSION = 'btc15-bias-v2';
+const VERSION = 'settlement-research-v2';
+const BIAS_VERSION = 'btc15-bias-v3';
+const LEGACY_SETTLEMENT_CONVENTION = '(close-60s,close]';
 const PRICE_BANDS = [0,10,30,50,70,90,100];
 const CHECKS = [600, 300, 120, 60, 30, 15, 5];
 const SETTINGS = Object.freeze({delayMs:1000, maxArrivalLateMs:3000, bookMaxAgeMs:1500,
@@ -9,6 +10,7 @@ const SETTINGS = Object.freeze({delayMs:1000, maxArrivalLateMs:3000, bookMaxAgeM
   feeVenue:'kalshi', feeAssumption:'general taker multiplier 1; whole-cent rounding per fill level',
   checkpointToleranceMs:5000, minTrainWindows:60, testWindows:20});
 const finite = v => typeof v === 'number' && Number.isFinite(v);
+const currentCohort = w => w.schema===VERSION&&w.model===globalThis.BTC15Model.VERSION;
 const depthWanted = now => {
   const left = (Math.floor(now / 900000) + 1) * 900 - now / 1000;
   return CHECKS.some(c => left <= c + 5 && left > c - 10);
@@ -47,7 +49,8 @@ function snapshot({at, close, target, targetAt, ticks, book, exchange, marketSta
     previousIndexSourceAt:previous?.[0]??null,requiredRemainingMean:required,
     spotAbove:boundary!=null&&last?last[1]>=boundary:null,
     projectedAbove:boundary!=null&&finite(projection?.mean)?projection.mean>=boundary:null};
-  return {bias, at, leftSeconds:close-at/1000, target, targetAt, marketStatus, exchange,
+  return {model:globalThis.BTC15Model.VERSION,settlementConvention:globalThis.BTC15Model.SETTLEMENT_CONVENTION,
+    bias, at, leftSeconds:close-at/1000, target, targetAt, marketStatus, exchange,
     index:{source:'cfbenchmarks_value',sourceAt:last?.[0]??null,receivedAt:last?.[2]??null,value:last?.[1]??null,ageMs,samples:input.length},
     vols, projection, p, p2, status:reason||'forecast', depth:depthSnapshot(book,at)};
 }
@@ -79,7 +82,7 @@ function simulate(check, variant, close, forcedSide=null) {
 function report(all) {
   // Each chronological fold chooses ONLY the probability variant on earlier, already resolved windows.
   // Checkpoints are separate experiments. Never sum them as one strategy or pick their winner here.
-  const valid=all.filter(w=>w.schema===VERSION&&w.model===globalThis.BTC15Model.VERSION);
+  const valid=all.filter(currentCohort);
   const recorded=[...new Map(valid.map(w=>[w.mk,w])).values()].sort((a,b)=>a.close-b.close);
   const resolved=w=>w.src==='kalshi'&&['yes','no'].includes(w.result)&&finite(w.resultObservedAt)&&w.resultObservedAt>=w.close*1000;
   const windows=recorded.filter(resolved);
@@ -126,7 +129,8 @@ function report(all) {
     s.bins=s.bins.map(b=>({from:b.from,to:b.to,n:b.n,meanProbability:b.n?b.p/b.n:null,observedRate:b.n?b.y/b.n:null}));
     delete s.equity;delete s.peak;
   }
-  return {schema:VERSION,model:globalThis.BTC15Model.VERSION,settings:SETTINGS,recordedWindows:recorded.length,settledWindows:windows.length,
+  return {schema:VERSION,model:globalThis.BTC15Model.VERSION,settlementConvention:globalThis.BTC15Model.SETTLEMENT_CONVENTION,
+    settings:SETTINGS,recordedWindows:recorded.length,settledWindows:windows.length,
     evaluatedWindows:evaluated.size,folds,scores,bias:biasReport(recorded),readyForLive:false,
     expectedWindows:recorded.length?Math.round((recorded.at(-1).close-recorded[0].close)/900)+1:0,
     unrecordedWindows:recorded.length?Math.max(0,Math.round((recorded.at(-1).close-recorded[0].close)/900)+1-recorded.length):0,
@@ -168,7 +172,7 @@ function biasReport(recorded) {
     }
   };
   for(const w of [...recorded].sort((a,b)=>a.close-b.close)){
-    if(seen.has(w.mk)||w.schema!==VERSION||w.model!==globalThis.BTC15Model.VERSION)continue;seen.add(w.mk);
+    if(seen.has(w.mk)||!currentCohort(w))continue;seen.add(w.mk);
     for(const c of CHECKS){
       const k=w.checks?.[c];if(!k)continue;
       if(k.bias?.version!==BIAS_VERSION){coverage.legacy++;continue;}
@@ -210,5 +214,5 @@ function biasReport(recorded) {
       'Repeated windows may be dependent. No confidence, significance or automatic promotion claim.',
       'Fee multiplier 1 and depth haircut are assumptions; missing data and rolling retention may bias results.']};
 }
-globalThis.BTC15Research=Object.freeze({VERSION,BIAS_VERSION,CHECKS,SETTINGS,depthWanted,depthSnapshot,snapshot,simulate,report,biasReport});
+globalThis.BTC15Research=Object.freeze({VERSION,BIAS_VERSION,LEGACY_SETTLEMENT_CONVENTION,CHECKS,SETTINGS,currentCohort,depthWanted,depthSnapshot,snapshot,simulate,report,biasReport});
 })();

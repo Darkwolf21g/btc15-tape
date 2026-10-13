@@ -17,23 +17,27 @@ function worker() {
 }
 const ticks = (start, end, value = 100) => Array.from({length: end - start + 1}, (_, i) => [(start + i) * 1000, value]);
 test('backend rejects any missing elapsed settlement reading', () => {
-  const {api} = worker(); const p = api.projectFrom(ticks(61, 89), 90500, 120, 999, {s: 2, l: 2});
+  const {api} = worker(); const p = api.projectFrom(ticks(60, 89), 90500, 120, 999, {s: 2, l: 2});
   assert.equal(p.mean, null); assert.equal(p.missing, 1);
 });
-test('backend final-minute boundaries exclude start and include closing tick', () => {
+test('backend contract interval includes start and excludes closing tick', () => {
   const {api} = worker(); const t = ticks(60, 120); t[0][1] = 500; t.at(-1)[1] = 160;
-  assert.equal(api.projectFrom(t, 120000, 120, 100, {s: 2, l: 2}).mean, 101);
+  assert.equal(api.projectFrom(t, 120000, 120, 100, {s: 2, l: 2}).mean, (500 + 59*100)/60);
 });
-test('delayed aggregate cannot silently shrink denominator below sixty', () => {
+test('stream aggregates cannot replace missing contract readings, even with matching elapsed counts', () => {
   const {api} = worker();
-  const p = api.projectFrom([], 90500, 120, 100, {s: 2, l: 2}, {n: 29, v: 100, end: 89000});
-  assert.equal(p.mean, null);
-  const good = api.projectFrom([], 90500, 120, 110, {s: 2, l: 2}, {n: 30, v: 100, end: 90000});
-  assert.equal(good.mean, 105); assert.equal(good.observed + good.m, 60);
+  for (const aggregate of [{n:29,v:100,end:89000},{n:30,v:100,end:90000},{n:31,v:100,end:90000}]) {
+    const p = api.projectFrom([],90500,120,110,{s:2,l:2},aggregate);
+    assert.equal(p.mean,null); assert.equal(p.missing,31); assert.equal(p.m,29);
+  }
+  const complete = api.projectFrom(ticks(60,90),90500,120,110,{s:2,l:2},{n:30,v:999,end:90000});
+  assert.equal(complete.mean,(31*100+29*110)/60); assert.equal(complete.observed+complete.m,60);
 });
-test('partial-second variance is retained', () => {
-  const {api} = worker(); const p = api.projectFrom(ticks(61,119),119500,120,100,{s:2,l:2});
+test('partial-second variance ends at the final pre-close reading', () => {
+  const {api} = worker(); const p = api.projectFrom(ticks(60,118),118500,120,100,{s:2,l:2});
   assert.ok(Math.abs(p.sd ** 2 - (0.09 + 2 / 3600)) < 1e-12);
+  const final = api.projectFrom(ticks(60,119),119500,120,999,{s:2,l:2});
+  assert.equal(final.m,0); assert.equal(final.mean,100); assert.equal(final.sd,.3);
 });
 test('watchdog repairs overdue alarms and reconnects without a browser', async () => {
   const h = worker(); let connects = 0; h.obj.ensureUpstream = async () => connects++;

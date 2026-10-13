@@ -1,5 +1,14 @@
 # BTC 15 Tape
 
+## Settlement interval correction (v4)
+
+The KXBTC15M forecast now uses the 60 one-second BRTI readings strictly before
+its reference/close time: `[close - 60s, close)`. The model is
+`brti-driftless-v4`; older forecasts remain stored and are excluded from current
+version scores. This supersedes the v3 interval and aggregate-substitution
+behavior described in earlier release notes. No execution settings, collection
+cadence, retention or deployment configuration change.
+
 ## Pricing bias lab
 
 The agent page now compares fixed forward experiments for price bands, settlement
@@ -89,7 +98,7 @@ Browsers are not allowed to read Kalshi directly, so on its own the page estimat
 
 ## Kalshi's own stream (optional, recommended)
 
-With an API key the Worker also streams Kalshi's own data to the page: the official BRTI index up to five times a second, the official trailing 60-second average, the settlement average as Kalshi accumulates it in the final minute, and the market's bid/ask the moment they change. The page then shows "official" readings with their age instead of the exchange estimate, and buy calls use the real settlement average.
+With an API key the Worker also streams Kalshi's own data to the page: the official BRTI index up to five times a second, the official trailing 60-second average, Kalshi's close-inclusive final-minute aggregate as a separate diagnostic, and the market's bid/ask the moment they change. The page then shows "official" readings with their age instead of the exchange estimate, and contract forecasts use the actual one-second readings before close.
 
 1. On Kalshi: profile settings → **API Keys** → **Create New API Key**, Ed25519 (the default). Save the downloaded key file; the private key is shown once. Note the key ID.
 2. On Cloudflare: the `btc15-tape` Worker → **Settings → Variables and Secrets** → add secrets `KALSHI_KEY_ID` (the key ID) and `KALSHI_PRIVATE_KEY` (the whole key file, including the BEGIN/END lines). Optionally `FEED_TOKEN`: any password; then enter it in the page under *Target and calibration → Stream token*.
@@ -99,13 +108,15 @@ The key is used to sign the WebSocket handshake and, through `/brti/history`, re
 
 ## Settlement and data completeness
 
-The projection follows Kalshi's documented final-minute helper convention: `(close - 60 seconds, close]`. The start-boundary sample is excluded and the closing sample is included. With an 8:30 close, the second-indexed observations run from 8:29:01 through 8:30:00.
+KXBTC15M's [contract terms](https://assets.kalshi.com/contract_terms/CRYPTO.pdf), linked by its [series metadata](https://api.elections.kalshi.com/trade-api/v2/series/KXBTC15M), define the average over the 60 seconds prior to the reference time. The forecast uses `[close - 60 seconds, close)`: for an 8:30 close, observations run from 8:29:00 through 8:29:59. Use the reference/last-trading close, not the later API `expiration_time`. This is scoped to KXBTC15M, not an assumption about every Kalshi market.
 
-All 60 proxy samples are required for a completed average. During the final minute, a missing elapsed sample displays **WAIT / INCOMPLETE** and pauses probability and buy signals. Coinbase trade backfill is still an estimate and its sample count is identified; it does not become official BRTI data. A delayed capture accommodates the render loop rolling over before the closing sample is recorded.
+All 60 actual one-second BRTI samples are required for a completed contract average; the exchange-proxy diagnostic likewise needs 60 samples. During the final minute, a missing elapsed sample displays **WAIT / INCOMPLETE** and pauses probability and buy signals. Coinbase trade backfill is still an estimate and its sample count is identified; it does not become official BRTI data. A delayed diagnostic capture can receive a late pre-close sample; it never adds the tick at close. All 60 readings can be known in the final second before close. The existing $0.30 model-scale floor is unchanged, so a complete local average still does not set an official outcome.
 
 The probability model integrates the covariance of future price observations, including fractional seconds and the existing horizon-dependent volatility. It retains both the wider Student-t scale and the variance-matched comparison. Neither has demonstrated probability calibration. Measured exchange/index dispersion is not capped at $6, and a manually estimated offset has no guaranteed lifetime. Buy calls require an exact market target retrieved from Kalshi or entered by the user, rather than a candle-derived estimate.
 
-Reference: [Kalshi CF Benchmarks averaging semantics](https://docs.kalshi.com/websockets/cfbenchmarks-value#averaging-semantics). Official settlement comes from the market result and expiration value, not the locally calculated proxy.
+The [WebSocket final-minute helper](https://docs.kalshi.com/websockets/cfbenchmarks-value#averaging-semantics) separately uses `(close - 60s, close]`. Its values/counts are preserved as stream diagnostics, never substituted into the contract projection, even when a count appears to match. Trailing-average display semantics are unchanged. Official settlement still comes only from the published market result and expiration value.
+
+Regression coverage includes boundary ticks, incomplete/final projections, unchanged stream diagnostics, cohort separation, and four public finalized market records from October 12 (23:00–23:45 UTC). The public fixtures contain official metadata only; private feed observations are not included.
 
 ## Checks
 

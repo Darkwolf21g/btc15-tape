@@ -1,7 +1,10 @@
 // Canonical model. scripts/sync-model.cjs embeds this exact source in Worker and page.
 // Frozen baseline: no fitted flow lean; all parameters recorded under VERSION.
 (() => {
-const VERSION = "brti-driftless-v3";
+const VERSION = "brti-driftless-v4";
+// KXBTC15M contract: sixty one-second readings strictly before its reference/close time.
+// The WebSocket final-minute aggregate is a different, close-inclusive statistic.
+const SETTLEMENT_CONVENTION = "[close-60s,close)";
 const EXECUTION_VERSION = "paper-delayed-depth-v2";
 const SETTLE = 60, VOL_TAU = 180;
 const tailCdf = z => 0.5 + z * (z*z+6) / (2*Math.pow(z*z+4,1.5));
@@ -15,20 +18,14 @@ function volsFrom(ticks, nowMs) {
   const s = est(120), l = est(900);
   return s && l ? {s, l} : null;
 }
-function projectFrom(ticks, nowMs, closeS, x, vols, aggregate = null) {
+function projectFrom(ticks, nowMs, closeS, x, vols) {
   const now = nowMs / 1000, perSec = new Map(ticks.map(([ms, v]) => [Math.floor(ms / 1000), v]));
   let known = 0, observed = 0, missing = 0; const ahead = [];
-  for (let sec = closeS - SETTLE + 1; sec <= closeS; sec++) {
+  for (let sec = closeS - SETTLE; sec < closeS; sec++) {
     if (sec <= now) { const v = perSec.get(sec); if (Number.isFinite(v)) { known += v; observed++; } else missing++; }
     else ahead.push(sec - now);
   }
-  // A delayed aggregate must never turn a 60-reading contract into a 59-reading contract.
-  const elapsed = SETTLE - ahead.length;
-  if (aggregate && aggregate.n === elapsed && aggregate.n >= 1 && aggregate.n <= 60 &&
-      aggregate.end > (closeS - 60) * 1000 && aggregate.end <= closeS * 1000 &&
-      nowMs - aggregate.end >= -1000 && nowMs - aggregate.end < 3000 && Number.isFinite(aggregate.v)) {
-    known = aggregate.v * aggregate.n; observed = aggregate.n; missing = 0;
-  }
+  // Do not substitute last_60s_windowed_average_15min: its start/close membership differs.
   if (missing) return {mean: null, sd: null, observed, missing, m: ahead.length};
   const m = ahead.length, vs = vols.s ** 2, vl = vols.l ** 2;
   let variance = 0, previous = 0;
@@ -36,10 +33,10 @@ function projectFrom(ticks, nowMs, closeS, x, vols, aggregate = null) {
   return {sum: known, reconstructed: 0, mean: (known + m * x) / SETTLE, sd: Math.sqrt(variance / SETTLE ** 2 + 0.09), observed, missing: 0, m, official: observed > 0};
 }
 
-function band(ticks, nowMs, close, x, vols, target, aggregate=null) {
+function band(ticks, nowMs, close, x, vols, target) {
  let lo=1, hi=0; const adverse=vols.s*Math.sqrt(10);
  for(const k of [.7,1,1.5]) for(const shift of [-adverse,0,adverse]) {
-  const pr=projectFrom(ticks,nowMs,close,x+shift,{s:vols.s*k,l:vols.l*k},aggregate);
+  const pr=projectFrom(ticks,nowMs,close,x+shift,{s:vols.s*k,l:vols.l*k});
   if(pr.mean==null)return null;
   const p=chance(pr.mean,pr.sd,target);lo=Math.min(lo,p);hi=Math.max(hi,p);
  }
@@ -77,5 +74,5 @@ function paperFill(intent,book,nowMs,cfg) {
  if(!filled)return empty("no quantity at limit after depth haircut");
  return {filled,cost:Math.round(cost*100)/100,feesCents:fees,levels,status:remaining?"paper-partial":"paper-filled",reason:remaining?"available depth below requested size":"filled at arrival book",filledAt:nowMs,latencyMs:nowMs-intent.at};
 }
-globalThis.BTC15Model=Object.freeze({VERSION,EXECUTION_VERSION,tailCdf,chance,volsFrom,projectFrom,band,feesCents,asks,paperFill});
+globalThis.BTC15Model=Object.freeze({VERSION,SETTLEMENT_CONVENTION,EXECUTION_VERSION,tailCdf,chance,volsFrom,projectFrom,band,feesCents,asks,paperFill});
 })();

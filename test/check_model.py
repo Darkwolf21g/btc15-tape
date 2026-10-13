@@ -20,7 +20,7 @@ with sync_playwright() as p:
     print("projection: new variance sum vs the old closed form (equal volatilities must agree):", pg.evaluate("""() => {
       const now = Date.now()/1000, [open, close] = bounds(now), sig = 2.0;
       const newer = project(now, close, 83000, {s: sig, l: sig}, []);
-      let ahead = []; for (let s = close - SETTLE + 1; s <= close; s++) if (s > now) ahead.push(s - now);
+      let ahead = []; for (let s = close - SETTLE; s < close; s++) if (s > now) ahead.push(s - now);
       const m = ahead.length; let walk = 0; ahead.forEach((d, j) => { walk += d * (2 * (m - (j + 1)) + 1); });
       const oldSd = Math.sqrt(sig * sig * walk / 3600 + levelSd() ** 2);
       const burst = project(now, close, 83000, {s: 2 * sig, l: sig}, []), calm = project(now, close, 83000, {s: sig, l: 2 * sig}, []);

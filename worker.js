@@ -18,7 +18,7 @@ const WS_UPSTREAM = "https://external-api-ws.kalshi.com/trade-api/ws/v2";   // h
 const ALLOWED = [/^\/markets\/KXBTC15M-[A-Z0-9-]+$/, /^\/live_data\/events\/KXBTC15M-[A-Z0-9]+$/, /^\/exchange\/status$/];
 const CORS = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Cache-Control": "no-store"};
 const WINDOW = 900;
-const MODEL_VERSION = "brti-driftless-v3";
+const MODEL_VERSION = "brti-driftless-v4";
 // Bound network waits so a slow upstream cannot strand the alarm chain.
 const timedFetch = (url, options = {}) => fetch(url, {...options, signal: AbortSignal.timeout(12000)});
 // The timeout applies only to the HTTP upgrade. An AbortSignal.timeout left on
@@ -191,7 +191,10 @@ const SETTLE = 60, VOL_TAU = 180, CHECKS = [600, 300, 120, 60];
 // Canonical model. scripts/sync-model.cjs embeds this exact source in Worker and page.
 // Frozen baseline: no fitted flow lean; all parameters recorded under VERSION.
 (() => {
-const VERSION = "brti-driftless-v3";
+const VERSION = "brti-driftless-v4";
+// KXBTC15M contract: sixty one-second readings strictly before its reference/close time.
+// The WebSocket final-minute aggregate is a different, close-inclusive statistic.
+const SETTLEMENT_CONVENTION = "[close-60s,close)";
 const EXECUTION_VERSION = "paper-delayed-depth-v2";
 const SETTLE = 60, VOL_TAU = 180;
 const tailCdf = z => 0.5 + z * (z*z+6) / (2*Math.pow(z*z+4,1.5));
@@ -205,20 +208,14 @@ function volsFrom(ticks, nowMs) {
   const s = est(120), l = est(900);
   return s && l ? {s, l} : null;
 }
-function projectFrom(ticks, nowMs, closeS, x, vols, aggregate = null) {
+function projectFrom(ticks, nowMs, closeS, x, vols) {
   const now = nowMs / 1000, perSec = new Map(ticks.map(([ms, v]) => [Math.floor(ms / 1000), v]));
   let known = 0, observed = 0, missing = 0; const ahead = [];
-  for (let sec = closeS - SETTLE + 1; sec <= closeS; sec++) {
+  for (let sec = closeS - SETTLE; sec < closeS; sec++) {
     if (sec <= now) { const v = perSec.get(sec); if (Number.isFinite(v)) { known += v; observed++; } else missing++; }
     else ahead.push(sec - now);
   }
-  // A delayed aggregate must never turn a 60-reading contract into a 59-reading contract.
-  const elapsed = SETTLE - ahead.length;
-  if (aggregate && aggregate.n === elapsed && aggregate.n >= 1 && aggregate.n <= 60 &&
-      aggregate.end > (closeS - 60) * 1000 && aggregate.end <= closeS * 1000 &&
-      nowMs - aggregate.end >= -1000 && nowMs - aggregate.end < 3000 && Number.isFinite(aggregate.v)) {
-    known = aggregate.v * aggregate.n; observed = aggregate.n; missing = 0;
-  }
+  // Do not substitute last_60s_windowed_average_15min: its start/close membership differs.
   if (missing) return {mean: null, sd: null, observed, missing, m: ahead.length};
   const m = ahead.length, vs = vols.s ** 2, vl = vols.l ** 2;
   let variance = 0, previous = 0;
@@ -226,10 +223,10 @@ function projectFrom(ticks, nowMs, closeS, x, vols, aggregate = null) {
   return {sum: known, reconstructed: 0, mean: (known + m * x) / SETTLE, sd: Math.sqrt(variance / SETTLE ** 2 + 0.09), observed, missing: 0, m, official: observed > 0};
 }
 
-function band(ticks, nowMs, close, x, vols, target, aggregate=null) {
+function band(ticks, nowMs, close, x, vols, target) {
  let lo=1, hi=0; const adverse=vols.s*Math.sqrt(10);
  for(const k of [.7,1,1.5]) for(const shift of [-adverse,0,adverse]) {
-  const pr=projectFrom(ticks,nowMs,close,x+shift,{s:vols.s*k,l:vols.l*k},aggregate);
+  const pr=projectFrom(ticks,nowMs,close,x+shift,{s:vols.s*k,l:vols.l*k});
   if(pr.mean==null)return null;
   const p=chance(pr.mean,pr.sd,target);lo=Math.min(lo,p);hi=Math.max(hi,p);
  }
@@ -267,14 +264,15 @@ function paperFill(intent,book,nowMs,cfg) {
  if(!filled)return empty("no quantity at limit after depth haircut");
  return {filled,cost:Math.round(cost*100)/100,feesCents:fees,levels,status:remaining?"paper-partial":"paper-filled",reason:remaining?"available depth below requested size":"filled at arrival book",filledAt:nowMs,latencyMs:nowMs-intent.at};
 }
-globalThis.BTC15Model=Object.freeze({VERSION,EXECUTION_VERSION,tailCdf,chance,volsFrom,projectFrom,band,feesCents,asks,paperFill});
+globalThis.BTC15Model=Object.freeze({VERSION,SETTLEMENT_CONVENTION,EXECUTION_VERSION,tailCdf,chance,volsFrom,projectFrom,band,feesCents,asks,paperFill});
 })();
 // END SHARED BTC15 MODEL
 // BEGIN SHARED BTC15 RESEARCH
 // Canonical research calculations; embedded in worker.js and imported by the offline evaluator.
 (() => {
-const VERSION = 'settlement-research-v1';
-const BIAS_VERSION = 'btc15-bias-v2';
+const VERSION = 'settlement-research-v2';
+const BIAS_VERSION = 'btc15-bias-v3';
+const LEGACY_SETTLEMENT_CONVENTION = '(close-60s,close]';
 const PRICE_BANDS = [0,10,30,50,70,90,100];
 const CHECKS = [600, 300, 120, 60, 30, 15, 5];
 const SETTINGS = Object.freeze({delayMs:1000, maxArrivalLateMs:3000, bookMaxAgeMs:1500,
@@ -282,6 +280,7 @@ const SETTINGS = Object.freeze({delayMs:1000, maxArrivalLateMs:3000, bookMaxAgeM
   feeVenue:'kalshi', feeAssumption:'general taker multiplier 1; whole-cent rounding per fill level',
   checkpointToleranceMs:5000, minTrainWindows:60, testWindows:20});
 const finite = v => typeof v === 'number' && Number.isFinite(v);
+const currentCohort = w => w.schema===VERSION&&w.model===globalThis.BTC15Model.VERSION;
 const depthWanted = now => {
   const left = (Math.floor(now / 900000) + 1) * 900 - now / 1000;
   return CHECKS.some(c => left <= c + 5 && left > c - 10);
@@ -320,7 +319,8 @@ function snapshot({at, close, target, targetAt, ticks, book, exchange, marketSta
     previousIndexSourceAt:previous?.[0]??null,requiredRemainingMean:required,
     spotAbove:boundary!=null&&last?last[1]>=boundary:null,
     projectedAbove:boundary!=null&&finite(projection?.mean)?projection.mean>=boundary:null};
-  return {bias, at, leftSeconds:close-at/1000, target, targetAt, marketStatus, exchange,
+  return {model:globalThis.BTC15Model.VERSION,settlementConvention:globalThis.BTC15Model.SETTLEMENT_CONVENTION,
+    bias, at, leftSeconds:close-at/1000, target, targetAt, marketStatus, exchange,
     index:{source:'cfbenchmarks_value',sourceAt:last?.[0]??null,receivedAt:last?.[2]??null,value:last?.[1]??null,ageMs,samples:input.length},
     vols, projection, p, p2, status:reason||'forecast', depth:depthSnapshot(book,at)};
 }
@@ -352,7 +352,7 @@ function simulate(check, variant, close, forcedSide=null) {
 function report(all) {
   // Each chronological fold chooses ONLY the probability variant on earlier, already resolved windows.
   // Checkpoints are separate experiments. Never sum them as one strategy or pick their winner here.
-  const valid=all.filter(w=>w.schema===VERSION&&w.model===globalThis.BTC15Model.VERSION);
+  const valid=all.filter(currentCohort);
   const recorded=[...new Map(valid.map(w=>[w.mk,w])).values()].sort((a,b)=>a.close-b.close);
   const resolved=w=>w.src==='kalshi'&&['yes','no'].includes(w.result)&&finite(w.resultObservedAt)&&w.resultObservedAt>=w.close*1000;
   const windows=recorded.filter(resolved);
@@ -399,7 +399,8 @@ function report(all) {
     s.bins=s.bins.map(b=>({from:b.from,to:b.to,n:b.n,meanProbability:b.n?b.p/b.n:null,observedRate:b.n?b.y/b.n:null}));
     delete s.equity;delete s.peak;
   }
-  return {schema:VERSION,model:globalThis.BTC15Model.VERSION,settings:SETTINGS,recordedWindows:recorded.length,settledWindows:windows.length,
+  return {schema:VERSION,model:globalThis.BTC15Model.VERSION,settlementConvention:globalThis.BTC15Model.SETTLEMENT_CONVENTION,
+    settings:SETTINGS,recordedWindows:recorded.length,settledWindows:windows.length,
     evaluatedWindows:evaluated.size,folds,scores,bias:biasReport(recorded),readyForLive:false,
     expectedWindows:recorded.length?Math.round((recorded.at(-1).close-recorded[0].close)/900)+1:0,
     unrecordedWindows:recorded.length?Math.max(0,Math.round((recorded.at(-1).close-recorded[0].close)/900)+1-recorded.length):0,
@@ -441,7 +442,7 @@ function biasReport(recorded) {
     }
   };
   for(const w of [...recorded].sort((a,b)=>a.close-b.close)){
-    if(seen.has(w.mk)||w.schema!==VERSION||w.model!==globalThis.BTC15Model.VERSION)continue;seen.add(w.mk);
+    if(seen.has(w.mk)||!currentCohort(w))continue;seen.add(w.mk);
     for(const c of CHECKS){
       const k=w.checks?.[c];if(!k)continue;
       if(k.bias?.version!==BIAS_VERSION){coverage.legacy++;continue;}
@@ -483,7 +484,7 @@ function biasReport(recorded) {
       'Repeated windows may be dependent. No confidence, significance or automatic promotion claim.',
       'Fee multiplier 1 and depth haircut are assumptions; missing data and rolling retention may bias results.']};
 }
-globalThis.BTC15Research=Object.freeze({VERSION,BIAS_VERSION,CHECKS,SETTINGS,depthWanted,depthSnapshot,snapshot,simulate,report,biasReport});
+globalThis.BTC15Research=Object.freeze({VERSION,BIAS_VERSION,LEGACY_SETTLEMENT_CONVENTION,CHECKS,SETTINGS,currentCohort,depthWanted,depthSnapshot,snapshot,simulate,report,biasReport});
 })();
 // END SHARED BTC15 RESEARCH
 const research = globalThis.BTC15Research;
@@ -577,7 +578,7 @@ export class KalshiFeed {
     this.idleTimer = null; this.retryTimer = null; this.windowTimer = null;
     this.counts = {};
     this.ticks = [];                              // [[ms, value]] from the stream, last 20 minutes, for the agent
-    this.settleAvg = null;                        // Kalshi's accumulating final-minute average, when streamed
+    this.settleAvg = null;                        // Stream final-minute aggregate only; not contract settlement
     this.lastTicker = {};                         // ticker -> {bid, ask, at}
     this.agentBusy = false;
     this.indexSeconds = new Map(); // Only the 1 Hz BRTI channel can supply settlement readings.
@@ -694,13 +695,24 @@ export class KalshiFeed {
   async researchCapture() {
     if(!this.env.KALSHI_KEY_ID||!this.env.KALSHI_PRIVATE_KEY)return;
     const started=Date.now(),close=(Math.floor(started/900000)+1)*900,mk=marketTicker(close),key='r:'+close;
-    const row=(await this.state.storage.get(key))||{schema:research.VERSION,model:MODEL_VERSION,mk,close,settings:research.SETTINGS,checks:{},src:null,result:null};
+    const row=(await this.state.storage.get(key))||{schema:research.VERSION,model:MODEL_VERSION,
+      settlementConvention:globalThis.BTC15Model.SETTLEMENT_CONVENTION,mk,close,settings:research.SETTINGS,checks:{},src:null,result:null};
+    // An upgrade mid-window must not mix new forecasts into an older cohort or replace its raw inputs.
+    if(!research.currentCohort(row))return;
     let changed=false;
     for(const c of research.CHECKS)if(!row.checks[c]&&started-(close-c)*1000>research.SETTINGS.checkpointToleranceMs){
       row.checks[c]={at:started,status:'checkpoint missed',p:null,p2:null};changed=true;
     }
     const c=research.CHECKS.find(c=>!row.checks[c]&&started>=(close-c)*1000);
     if(c!=null){
+      const inputKey=`ri:${close}:${c}`;
+      if(await this.state.storage.get(inputKey)){
+        // A previous capture may have saved raw input before an interrupted summary write.
+        // Keep that original buffer; a later book/target cannot reconstruct the lost forecast.
+        row.checks[c]={at:started,status:'checkpoint skipped: original raw input already exists',p:null,p2:null};
+        await this.state.storage.put(key,row);
+        return;
+      }
       let market=null,exchange=null,error=null;
       try{
         market=(await signedGet(this.env,'/trade-api/v2/markets/'+mk))?.market;
@@ -712,7 +724,8 @@ export class KalshiFeed {
       const k=research.snapshot({at,close,target,targetAt:at,ticks:input,book:this.books[mk],exchange,marketStatus:market?.status??null});
       if(error||at-(close-c)*1000>research.SETTINGS.checkpointToleranceMs){k.status=error||'checkpoint missed during market read';k.p=null;k.p2=null;}
       row.checks[c]=k;row.target=target;row.rules={primary:market?.rules_primary??null,secondary:market?.rules_secondary??null,closeTime:market?.close_time??null};
-      await this.state.storage.put(`ri:${close}:${c}`,{schema:research.VERSION,model:MODEL_VERSION,mk,close,check:c,at,
+      await this.state.storage.put(inputKey,{schema:research.VERSION,model:MODEL_VERSION,
+        settlementConvention:globalThis.BTC15Model.SETTLEMENT_CONVENTION,mk,close,check:c,at,
         columns:['source_ms','value_usd','first_received_ms'],source:'cfbenchmarks_value',ticks:input,target,targetAt:at});
       const pending=(await this.state.storage.get('research.pending'))||[];
       if(k.status==='forecast')pending.push({key,check:c,readyAt:at+research.SETTINGS.delayMs});
@@ -726,7 +739,8 @@ export class KalshiFeed {
     for(const item of pending){
       if(Date.now()<item.readyAt){keep.push(item);continue;}
       const row=await this.state.storage.get(item.key),k=row?.checks?.[item.check];
-      if(!k||k.arrival)continue;
+      // Leave legacy checkpoints untouched; rollout can lose a pending arrival, never relabel it.
+      if(!k||k.arrival||!research.currentCohort(row))continue;
       const at=Date.now(),depth=research.depthSnapshot(this.books[row.mk],at);
       k.arrival={at,depth,exchange:k.exchange,exchangeObservedAt:k.at,exchangeAgeMs:at-k.at};
       // Reuses checkpoint status only for this bounded 1–4s simulation. No exchange order.
@@ -738,10 +752,19 @@ export class KalshiFeed {
     const now=Date.now(),rows=[...(await this.state.storage.list({prefix:'r:'})).values()].sort((a,b)=>a.close-b.close);
     for(const row of rows.filter(w=>w.close*1000<now-60000&&w.src!=='kalshi').slice(-4)){
       if(!row.closingCapture){
-        const ticks=[...this.researchTicks.values()].filter(t=>Math.floor(t[0]/1000)>row.close-60&&Math.floor(t[0]/1000)<=row.close).sort((a,b)=>a[0]-b[0]);
+        const inputKey=`ri:${row.close}:0`,saved=await this.state.storage.get(inputKey);
+        // Existing raw buffers may outlive an interrupted summary write. Reuse, never overwrite them.
+        const settlementConvention=saved?.settlementConvention??(research.currentCohort(saved||row)?
+          globalThis.BTC15Model.SETTLEMENT_CONVENTION:research.LEGACY_SETTLEMENT_CONVENTION);
+        const ticks=(saved?.ticks||[...this.researchTicks.values()]).filter(t=>{
+          const sec=Math.floor(t[0]/1000);
+          return settlementConvention===globalThis.BTC15Model.SETTLEMENT_CONVENTION?
+            sec>=row.close-60&&sec<row.close:sec>row.close-60&&sec<=row.close;
+        }).sort((a,b)=>a[0]-b[0]);
         const seconds=new Map(ticks.map(t=>[Math.floor(t[0]/1000),t[1]]));
-        row.closingCapture={at:now,samples:seconds.size,complete:seconds.size===60,localAverage:seconds.size===60?[...seconds.values()].reduce((a,b)=>a+b,0)/60:null};
-        await this.state.storage.put(`ri:${row.close}:0`,{schema:research.VERSION,mk:row.mk,close:row.close,check:0,at:now,source:'cfbenchmarks_value',columns:['source_ms','value_usd','first_received_ms'],ticks});
+        row.closingCapture={at:saved?.at??now,settlementConvention,samples:seconds.size,complete:seconds.size===60,localAverage:seconds.size===60?[...seconds.values()].reduce((a,b)=>a+b,0)/60:null};
+        if(!saved)await this.state.storage.put(inputKey,{schema:row.schema,model:row.model,settlementConvention,
+          mk:row.mk,close:row.close,check:0,at:now,source:'cfbenchmarks_value',columns:['source_ms','value_usd','first_received_ms'],ticks});
         await this.state.storage.put('r:'+row.close,row);
       }
       let m;
@@ -1010,7 +1033,6 @@ export class KalshiFeed {
     // Snapshot the live stream at the checkpoint before awaiting REST. Later ticks must
     // not leak into a forecast recorded for an earlier time.
     const liveTicks = this.ticks.filter(t => t[0] <= nowMs), seconds = [...this.indexSeconds].filter(t => t[0] <= nowMs);
-    const aggregate = this.settleAvg && {...this.settleAvg};
     const book=this.books[mk],tick=this.lastTicker[mk];
     const offers=book&&nowMs-book.at<1500?{ask:globalThis.BTC15Model.asks(book,"Up")[0]?.price/100,bid:1-globalThis.BTC15Model.asks(book,"Down")[0]?.price/100,at:book.at}:tick&&nowMs-tick.at<5000?{...tick}:null;
     let ticks = liveTicks;
@@ -1022,7 +1044,7 @@ export class KalshiFeed {
     const vols = volsFrom(ticks, nowMs), x = liveTicks.length ? liveTicks[liveTicks.length - 1][1] : null;
     const ageMs = liveTicks.length ? nowMs - liveTicks[liveTicks.length - 1][0] : null;
     const entry = {ask, bid, marketAt:offers?.at??null, x, at: nowMs, ticks: ticks.length, ageMs, model: MODEL_VERSION};
-    const pr = vols && x != null ? projectFrom(seconds, nowMs, close, x, vols, aggregate) : null;
+    const pr = vols && x != null ? projectFrom(seconds, nowMs, close, x, vols) : null;
     if (vols && x != null && w.tgt != null && ageMs >= 0 && ageMs < 3000 && pr.mean != null) {
       entry.p = +tailCdf((pr.mean - (w.tgt - 0.005)) / pr.sd).toFixed(3);
       entry.p2 = +tailCdf((pr.mean - (w.tgt - 0.005)) / (pr.sd / Math.SQRT2)).toFixed(3);
@@ -1087,11 +1109,11 @@ export class KalshiFeed {
       if (!tgt) { const d = await signedGet(this.env, "/trade-api/v2/markets/" + mk); tgt = d && d.market && +d.market.floor_strike > 0 ? +d.market.floor_strike : null; if (!tgt) return; w.tgt = tgt; }
       const vols = volsFrom([...this.indexSeconds], nowMs); if (!vols) return;
       const x = last[1];
-      const projectWith = (xx, vv) => projectFrom([...this.indexSeconds], nowMs, close, xx, vv, this.settleAvg);
+      const projectWith = (xx, vv) => projectFrom([...this.indexSeconds], nowMs, close, xx, vv);
       const base = projectWith(x, vols);
       if (base.mean == null) return;
       const p = tailFromBand(base.mean, base.sd, tgt);
-      const {lo,hi}=globalThis.BTC15Model.band([...this.indexSeconds],nowMs,close,x,vols,tgt,this.settleAvg);
+      const {lo,hi}=globalThis.BTC15Model.band([...this.indexSeconds],nowMs,close,x,vols,tgt);
       const b0=this.books[mk], b=b0 && nowMs-b0.at < cfg.paperBookMaxAgeMs ? b0:null;
       const first=side=>globalThis.BTC15Model.asks(b,side)[0]||null;
       const offer={Up:first("Up"),Down:first("Down")}; // Real depth required; ticker size is not liquidity.
