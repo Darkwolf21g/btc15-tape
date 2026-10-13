@@ -11,6 +11,7 @@ function harness(){
  vm.runInContext(source+'\nglobalThis.api={KalshiFeed,entry,research,marketTicker};',context);
  const data=new Map();let alarm=null;
  const storage={get:async k=>structuredClone(data.get(k)),put:async(k,v)=>data.set(k,structuredClone(v)),list:async({prefix})=>new Map([...data].filter(([k])=>k.startsWith(prefix)).map(([k,v])=>[k,structuredClone(v)])),delete:async k=>data.delete(k),getAlarm:async()=>alarm,setAlarm:async a=>{alarm=a;}};
+ storage.transaction=async fn=>fn(storage);
  const obj=new context.api.KalshiFeed({storage},{KALSHI_KEY_ID:'fixture',KALSHI_PRIVATE_KEY:'fixture'});
  return {context,obj,data,api:context.api,r:context.api.research,now:()=>now,setTime:v=>now=v,alarm:()=>alarm};
 }
@@ -71,7 +72,7 @@ test('arrival results cannot alter forecast scores or variant selection',()=>{
  const b=h.r.report(rows);assert.equal(b.scores[60].filled,0);assert.equal(b.scores[60].brier,a.scores[60].brier);assert.deepEqual(b.folds,a.folds);
 });
 test('research captures are durable and immutable, with pending delayed arrival separate from paper',async()=>{
- const h=harness(),close=1800000900,at=(close-60)*1000+20;h.setTime(at);
+ const h=harness(),close=1800000900,at=(close-60)*1000+750;h.setTime(at);
  h.obj.researchTicks=new Map(ticks(close-1000,close-60).map(t=>[t[0],t]));h.obj.books[h.api.marketTicker(close)]=book(at);
  vm.runInContext('signedGet=async(env,path)=>path.includes("/markets/")?{market:{floor_strike:100,status:"active"}}:{exchange_active:true,trading_active:true}',h.context);
  await h.obj.researchCapture();const row=h.data.get('r:'+close);assert.equal(row.checks[60].status,'forecast');assert.ok(h.data.has(`ri:${close}:60`));
@@ -176,4 +177,43 @@ test('fixed-point deltas remove canceled levels without leaving crossed phantom 
  assert.equal(h.obj.books.TEST.yes.has(.9),false);assert.equal(h.r.depthSnapshot(h.obj.books.TEST,at).valid,true);
  const fractional={...book(at),no:new Map([[.9,1e-12],[.5,.75]])};
  const asks=h.context.BTC15Model.asks(fractional,'Up');assert.equal(asks.length,1);assert.equal(asks[0].size,.75);
+});
+test('timed session routes require token, reject overlapping runs and keep legacy agent separate',async()=>{
+ const h=harness();h.obj.ensureUpstream=async()=>{};
+ const req=(p,method='POST')=>new Request('https://test/paper-session/'+p+'?token=unit-token',{method});
+ assert.equal((await h.obj.fetch(req('start'))).status,403);h.obj.env.FEED_TOKEN='unit-token';
+ assert.equal((await h.obj.fetch(req('start'))).status,200);
+ const s=h.data.get('session.current');assert.equal(s.status,'scheduled');assert.ok(h.alarm());
+ assert.equal((await h.obj.fetch(req('start'))).status,409);
+ const legacy=await h.obj.fetch(new Request('https://test/trade/config',{method:'POST',body:JSON.stringify({mode:'paper'})}));assert.equal(legacy.status,409);
+ assert.equal((await h.obj.fetch(req('stop'))).status,200);assert.equal(h.data.get('session.current').status,'complete');
+ assert.equal((await h.obj.fetch(req('start'))).status,200);assert.equal(h.data.get('session.previous').id,s.id);
+});
+test('manual stop during market read cannot be undone by the pending session tick',async()=>{
+ const h=harness();h.obj.env.FEED_TOKEN='unit-token';const S=h.context.BTC15Session,s=S.create(h.now(),'race-test');h.setTime(s.startAt);
+ h.data.set('session.current',s);
+ h.context.stopDuringRead=async()=>h.obj.fetch(new Request('https://test/paper-session/stop?token=unit-token',{method:'POST'}));
+ vm.runInContext('signedGet=async(env,path)=>{await stopDuringRead();return path.includes("/markets/")?{market:{floor_strike:100,status:"active"}}:{exchange_active:true,trading_active:true};}',h.context);
+ await h.obj.sessionTick();const final=h.data.get('session.current');assert.equal(final.status,'complete');assert.equal(final.pending,null);assert.equal(final.looks.length,0);
+});
+test('timed session durable deadline survives alarm failure and next event includes pending arrival',async()=>{
+ const h=harness(),S=h.context.BTC15Session,s=S.create(h.now(),'deadline-test');h.data.set('session.current',s);h.setTime(s.endAt+10000);
+ h.obj.ensureAlarm=async()=>{};h.obj.researchCapture=async()=>{};h.obj.researchSettle=async()=>{};h.obj.checkpoint=async()=>{};
+ await h.obj.alarm();assert.equal(h.data.get('session.current').status,'complete');assert.ok(h.alarm()>h.now());
+ const another=S.create(h.now(),'next');another.pending={readyAt:h.now()+1000};assert.equal(S.due(another,h.now()),h.now()+1000);
+});
+test('fixed checkpoint publication grace waits without relabeling later data as earlier',async()=>{
+ const h=harness(),close=1800000900,at=(close-30)*1000+100;h.setTime(at);
+ vm.runInContext('signedGet=async(env,path)=>path.includes("/markets/")?{market:{floor_strike:100,status:"active"}}:{exchange_active:true,trading_active:true}',h.context);
+ await h.obj.researchCapture();assert.equal(h.data.get('r:'+close).checks[30],undefined);
+ h.setTime(at+650);h.obj.researchTicks=new Map(ticks(close-1000,close-30).map(t=>[t[0],t]));h.obj.books[h.api.marketTicker(close)]=book(at+650);
+ await h.obj.researchCapture();const k=h.data.get('r:'+close).checks[30];assert.equal(k.at,at+650);assert.equal(k.status,'forecast');
+});
+test('session history is chunked and stale saves cannot undo a stop',async()=>{
+ const h=harness(),S=h.context.BTC15Session,s=S.create(h.now(),'chunks');
+ s.looks=Array.from({length:720},(_,i)=>({at:s.startAt+i*5000,reason:'fixture'}));
+ await h.obj.saveSession(s);assert.equal(h.data.get('session.current').looks.length,0);assert.equal(h.data.get('session.current').looksCount,720);
+ const loaded=await h.obj.loadSession();assert.equal(loaded.looks.length,720);
+ S.stop(loaded,h.now(),'manual stop');await h.obj.saveSession(loaded);
+ assert.equal(await h.obj.saveSession(s),false);assert.equal((await h.obj.loadSession()).status,'complete');
 });

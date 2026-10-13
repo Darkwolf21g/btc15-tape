@@ -79,7 +79,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url), path = url.pathname.replace(/\/+$/, "");
     if (request.method === "OPTIONS") return new Response(null, {headers: {...CORS, "Access-Control-Allow-Headers": "Content-Type"}});
-    if (path === "/feed" || path === "/feed/status" || path === "/record" || path === "/record.csv" || path === "/collector/status" || path === "/trade/status" || path === "/trade/config" || path.startsWith("/demo/") || path.startsWith("/research/")) {
+    if (path === "/feed" || path === "/feed/status" || path === "/record" || path === "/record.csv" || path === "/collector/status" || path === "/trade/status" || path === "/trade/config" || path.startsWith("/demo/") || path.startsWith("/research/") || path.startsWith("/paper-session/")) {
       if (env.FEED_TOKEN && url.searchParams.get("token") !== env.FEED_TOKEN) return new Response("token", {status: 403, headers: CORS});
       if (!env.FEED) return new Response("feed not configured", {status: 503, headers: CORS});
       try { return await env.FEED.get(env.FEED.idFromName("brti")).fetch(request); }
@@ -487,6 +487,60 @@ globalThis.BTC15Research=Object.freeze({VERSION,BIAS_VERSION,CHECKS,SETTINGS,dep
 })();
 // END SHARED BTC15 RESEARCH
 const research = globalThis.BTC15Research;
+// BEGIN SHARED BTC15 SESSION
+// Forward-only timed paper experiment. No exchange order calls.
+(() => {
+const VERSION='paper-session-v1';
+const SETTINGS=Object.freeze({durationMs:3600000,cadenceMs:5000,delayMs:1000,maxDelayMs:4000,depthFraction:.5,quantity:1,minEdgeCents:3,exitEdgeCents:3,maxEntriesPerWindow:3,cooldownMs:30000,lossStopCents:300,model:'brti-driftless-v3',feeAssumption:'general Kalshi taker fee, rounded up per one-contract fill'});
+const M=()=>globalThis.BTC15Model,finite=Number.isFinite;
+function create(now,id){const startAt=(Math.floor(now/900000)+1)*900000+750;return {version:VERSION,id,settings:{...SETTINGS},createdAt:now,startAt,endAt:startAt+SETTINGS.durationMs-750,status:'scheduled',looks:[],attempts:[],trades:[],pending:null,nextLookAt:startAt,entries:{},lastEntryAt:null,stoppedAt:null};}
+function active(s,at){return !!s&&!s.stoppedAt&&at<s.endAt&&['scheduled','running'].includes(s.status);}
+function position(s){return s.trades.find(t=>t.pnlCents==null);}
+function stop(s,at,reason='time limit'){s.stoppedAt=at;s.stopReason=reason;s.status=position(s)?'settling':'complete';if(s.pending){s.attempts.push({...s.pending,filled:0,arrivalAt:at,reason:'session stopped'});s.pending=null;}}
+function clock(s,at){if(!s.stoppedAt&&at>=s.endAt)stop(s,at);if(s.stoppedAt&&!position(s))s.status='complete';if(active(s,at)&&at>=s.startAt)s.status='running';}
+function valid(k){return M().VERSION===SETTINGS.model&&k?.status==='forecast'&&finite(k.p)&&k.p>=0&&k.p<=1&&k.depth?.valid&&k.marketStatus==='active'&&k.exchange?.exchange_active===true&&k.exchange?.trading_active===true;}
+function bid(depth,side){return side==='Up'?depth.bidCents:100-depth.askCents;}
+function decide(s,k,mk,close){const at=k.at;clock(s,at);if(!active(s,at)||at<s.startAt||at<s.nextLookAt||s.pending)return;
+ s.nextLookAt=at+SETTINGS.cadenceMs;
+ const record={at,mk,close,p:k.p,index:k.index,projection:k.projection,depth:k.depth,marketStatus:k.marketStatus,exchange:k.exchange,reason:null};
+ const finish=reason=>{record.reason=reason;s.looks.push(record);};
+ if(!valid(k))return finish(k.status!=='forecast'?k.status:k.depth?.reason||'market or exchange unavailable');
+ if(at+SETTINGS.maxDelayMs>=Math.min(close*1000,s.endAt))return finish('too close to deadline');
+ const held=position(s);record.action=held?'sell':'buy';let intent;
+ if(held){if(held.mk!==mk)return finish('awaiting official settlement');const price=bid(k.depth,held.side),prob=held.side==='Up'?k.p:1-k.p,edge=price-M().feesCents(price,1,'kalshi')-100*prob;
+  record.edgeCents=edge;if(edge<SETTINGS.exitEdgeCents)return finish('hold: exit advantage below 3c');
+  intent={action:'sell',side:held.side,limit:price,edgeCents:edge,tradeId:held.id};
+ }else{
+  const candidates=[['Up',k.p,k.depth.yes[0]],['Down',1-k.p,k.depth.no[0]]].filter(x=>x[2]).map(([side,p,l])=>({side,limit:l.price,edgeCents:100*p-l.price-M().feesCents(l.price,1,'kalshi')})).sort((a,b)=>b.edgeCents-a.edgeCents);
+  intent=candidates[0];record.edgeCents=intent?.edgeCents??null;
+  if(!intent||intent.edgeCents<SETTINGS.minEdgeCents)return finish('entry edge below 3c');
+  if(s.trades.reduce((n,t)=>n+(t.pnlCents||0),0)<=-SETTINGS.lossStopCents)return finish('session loss stop');
+  if((s.entries[mk]||0)>=SETTINGS.maxEntriesPerWindow)return finish('window entry-attempt cap');
+  if(s.lastEntryAt!=null&&at-s.lastEntryAt<SETTINGS.cooldownMs)return finish('entry cooldown');
+  intent.action='buy';s.entries[mk]=(s.entries[mk]||0)+1;s.lastEntryAt=at;
+ }
+ s.pending={...intent,at,readyAt:at+SETTINGS.delayMs,mk,close,p:k.p,decision:record};finish(intent.action+' intent');
+}
+function arrive(s,k){const at=k.at;clock(s,at);const q=s.pending;if(!q||at<q.readyAt)return;
+ s.pending=null;const result={...q,arrivalAt:at,arrivalDepth:k.depth,arrivalExchange:k.exchange,arrivalMarketStatus:k.marketStatus,filled:0,reason:null};s.attempts.push(result);
+ if(!active(s,at)||at>=q.close*1000||at-q.at>SETTINGS.maxDelayMs){result.reason='arrival outside allowed time';return;}
+ // Arrival requires a live market and book; never requires a new favourable prediction.
+ if(!k.depth?.valid||k.marketStatus!=='active'||k.exchange?.exchange_active!==true||k.exchange?.trading_active!==true){result.reason=k.depth?.reason||'arrival market or exchange unavailable';return;}
+ const levels=q.action==='buy'?(q.side==='Up'?k.depth.yes:k.depth.no):(q.side==='Up'?k.depth.no:k.depth.yes).map(l=>({...l,price:100-l.price}));
+ const level=levels.find(l=>Math.floor(l.size*SETTINGS.depthFraction)>=1&&(q.action==='buy'?l.price<=q.limit+1e-9:l.price>=q.limit-1e-9));
+ if(!level){result.reason='no depth at original limit after haircut';return;}
+ const fee=M().feesCents(level.price,1,'kalshi');result.filled=1;result.priceCents=level.price;result.feesCents=fee;result.reason='simulated fill';
+ if(q.action==='buy')s.trades.push({id:s.id+':'+s.trades.length,mk:q.mk,close:q.close,side:q.side,entryAt:at,entryCents:level.price,entryFeeCents:fee,pnlCents:null});
+ else{const t=s.trades.find(t=>t.id===q.tradeId&&t.pnlCents==null);if(!t)throw Error('paper position missing');Object.assign(t,{exitAt:at,exitCents:level.price,exitFeeCents:fee,pnlCents:level.price-fee-t.entryCents-t.entryFeeCents,resolution:'early exit'});}
+}
+function settle(s,mk,result,at){if(!['yes','no'].includes(result))return;for(const t of s.trades.filter(t=>t.mk===mk&&t.pnlCents==null&&at>=t.close*1000)){const won=(t.side==='Up')===(result==='yes');Object.assign(t,{exitAt:at,exitCents:won?100:0,exitFeeCents:0,pnlCents:(won?100:0)-t.entryCents-t.entryFeeCents,resolution:'official settlement',officialResult:result});}clock(s,at);}
+function report(s){const closed=s.trades.filter(t=>t.pnlCents!=null).sort((a,b)=>a.exitAt-b.exitAt);let pnl=0,peak=0,drawdown=0;for(const t of closed){pnl+=t.pnlCents;peak=Math.max(peak,pnl);drawdown=Math.max(drawdown,peak-pnl);}const reasons={};for(const r of [...s.looks,...s.attempts.filter(a=>!a.filled)])reasons[r.reason]=(reasons[r.reason]||0)+1;
+ return {looks:s.looks.length,eligible:s.looks.filter(l=>finite(l.edgeCents)).length,attempts:s.attempts.length+(s.pending?1:0),entryFills:s.trades.length,exitFills:closed.filter(t=>t.resolution==='early exit').length,wins:closed.filter(t=>t.pnlCents>0).length,losses:closed.filter(t=>t.pnlCents<0).length,open:s.trades.length-closed.length,feesCents:s.attempts.reduce((n,a)=>n+(a.feesCents||0),0),pnlCents:pnl,drawdownCents:drawdown,edgeAvailable:s.looks.some(l=>l.action==='buy'&&l.edgeCents>=SETTINGS.minEdgeCents),reasons,unrealizedExcluded:true};}
+function due(s,now){if(!s)return Infinity;if(!active(s,now))return !s.stoppedAt?now+100:Infinity;return Math.max(now+100,Math.min(s.endAt,s.pending?.readyAt??Infinity,s.nextLookAt));}
+globalThis.BTC15Session={VERSION,SETTINGS,create,active,clock,stop,decide,arrive,settle,report,due};
+})();
+// END SHARED BTC15 SESSION
+const paperSession = globalThis.BTC15Session;
 const {tailCdf,volsFrom,projectFrom} = globalThis.BTC15Model;
 function feeCents(p) { return globalThis.BTC15Model.feesCents(p*100); }
 async function signedGet(env, apiPath, query) { return signedCall(env,"live","GET",apiPath+(query||"")); }
@@ -594,6 +648,13 @@ export class KalshiFeed {
   }
   async fetch(request) {
     const url = new URL(request.url);
+    if(url.pathname.startsWith('/paper-session/')){
+      if(request.method==='POST'){
+        if(this.sessionControlBusy)return new Response(JSON.stringify({error:'Session control busy; refresh status before retrying.'}),{status:409,headers:{...CORS,'Content-Type':'application/json'}});
+        this.sessionControlBusy=true;try{return await this.sessionRequest(request,url);}finally{this.sessionControlBusy=false;}
+      }
+      return this.sessionRequest(request,url);
+    }
     if(url.pathname.startsWith('/research/'))return this.researchRequest(request,url);
     if(url.pathname==="/market-data")return this.marketData(url.searchParams.get("path")||"");
     if(url.pathname.startsWith("/demo/"))return this.demoRequest(request,url);
@@ -612,6 +673,10 @@ export class KalshiFeed {
       const cfg = await this.tradeConfig();
       if (body.mode != null) {
         if (!["off", "paper"].includes(body.mode)) return new Response("This research release supports off and paper only; exchange execution is not enabled", {status: 400, headers: CORS});
+        if(body.mode==='paper'){
+          const session=await this.state.storage.get('session.current');
+          if(session&&(paperSession.active(session,Date.now())||session.trades.some(t=>t.pnlCents==null)))return new Response('Stop and settle the timed session first',{status:409,headers:CORS});
+        }
         cfg.mode = body.mode;
       }
       for (const k of ["paperDelayMs", "paperBookMaxAgeMs", "paperDepthFraction", "paperExchangeFeeCents", "perWindowCents", "dailyLossStopCents", "maxTradesPerDay", "minEdge", "bankrollCents", "firstSeconds", "lastSeconds"]) if (body[k] != null) { if (typeof body[k] !== "number" || !Number.isFinite(body[k])) return new Response("invalid " + k, {status:400,headers:CORS}); cfg[k] = body[k]; }
@@ -665,6 +730,87 @@ export class KalshiFeed {
     this.ensureUpstream();
     return new Response(null, {status: 101, webSocket: client});
   }
+  async loadSession() {
+    const s=await this.state.storage.get('session.current');if(!s)return null;
+    for(const field of ['looks','attempts']){
+      const count=s[field+'Count'];if(count==null)continue;
+      s[field]=[];
+      for(let i=0;i<Math.ceil(count/20);i++)s[field].push(...((await this.state.storage.get(`se:${s.id}:${field}:${i}`))||[]));
+      if(s[field].length!==count)throw Error('Paper session history incomplete');
+    }
+    return s;
+  }
+  async saveSession(s) {
+    const meta={...s},chunks=[];
+    for(const field of ['looks','attempts']){
+      const from=Math.floor((s[field+'Count']||0)/20);
+      for(let i=from;i<Math.ceil(s[field].length/20);i++)chunks.push([`se:${s.id}:${field}:${i}`,s[field].slice(i*20,i*20+20)]);
+      meta[field+'Count']=s[field].length;meta[field]=[];
+    }
+    meta.revision=(s.revision||0)+1;
+    const saved=await this.state.storage.transaction(async tx=>{
+      const current=await tx.get('session.current');
+      if(current&&current.id!==s.id&&s.revision!=null)return false;
+      if(current?.id===s.id&&(current.revision||0)!==(s.revision||0))return false;
+      for(const [key,value]of chunks)await tx.put(key,value);
+      await tx.put('session.current',meta);return true;
+    });
+    if(saved){s.revision=meta.revision;s.looksCount=meta.looksCount;s.attemptsCount=meta.attemptsCount;}
+    return saved;
+  }
+  async sessionRequest(request,url) {
+    const reply=(d,status=200)=>new Response(JSON.stringify(d),{status,headers:{...CORS,'Content-Type':'application/json','Cache-Control':'no-store'}});
+    if(!this.env.FEED_TOKEN||url.searchParams.get('token')!==this.env.FEED_TOKEN)return reply({error:'Save the configured stream token to use timed paper sessions.'},403);
+    let s=await this.loadSession();
+    if(url.pathname==='/paper-session/status'&&request.method==='GET')return reply({session:s?{...s,looks:undefined,attempts:undefined}:null,report:s?paperSession.report(s):null,now:Date.now()});
+    if(url.pathname==='/paper-session/export'&&request.method==='GET')return reply({session:s||null,report:s?paperSession.report(s):null,now:Date.now()});
+    if(request.method!=='POST')return reply({error:'POST required'},405);
+    if(url.pathname==='/paper-session/stop'){
+      if(s){paperSession.stop(s,Date.now(),'manual stop');await this.saveSession(s);}
+      return reply({session:s});
+    }
+    if(url.pathname!=='/paper-session/start')return reply({error:'not found'},404);
+    if(!this.env.KALSHI_KEY_ID||!this.env.KALSHI_PRIVATE_KEY)return reply({error:'Official feed credentials are not configured.'},409);
+    const cfg=await this.tradeConfig(),old=[...(await this.state.storage.list({prefix:'t:'})).values()];
+    // Re-read after awaited storage: simultaneous start requests must not overwrite a session.
+    s=await this.loadSession();
+    if(cfg.mode!=='off'||old.some(w=>w.pendingPaper||(!w.settled&&w.trades?.some(t=>t.filled>0))))return reply({error:'Turn the legacy agent off and let its open paper positions settle first.'},409);
+    if(s&&(paperSession.active(s,Date.now())||s.trades.some(t=>t.pnlCents==null)))return reply({error:'A session is already scheduled, running or awaiting settlement.'},409);
+    if(s)await this.state.storage.put('session.previous',await this.state.storage.get('session.current'));
+    s=paperSession.create(Date.now(),crypto.randomUUID());
+    await this.saveSession(s);
+    this.agentActive=true;this.ensureUpstream();if(this.up)this.subscribeTickers();
+    await this.state.storage.setAlarm(Date.now()+1000);
+    return reply({session:s});
+  }
+  async sessionTick() {
+    let s=await this.loadSession();if(!s)return;
+    const id=s.id;paperSession.clock(s,Date.now());
+    // Fetch only official outcomes. A manual stop may interleave with network I/O.
+    const outcomes=[];
+    for(const t of s.trades.filter(t=>t.pnlCents==null&&Date.now()>=t.close*1000)){
+      try{const market=(await signedGet(this.env,'/trade-api/v2/markets/'+t.mk))?.market;outcomes.push({mk:t.mk,result:market?.result});}
+      catch(e){/* Keep the position pending and retry. */}
+    }
+    s=await this.loadSession();if(!s||s.id!==id)return;
+    for(const o of outcomes)paperSession.settle(s,o.mk,o.result,Date.now());
+    paperSession.clock(s,Date.now());
+    await this.saveSession(s);
+    if(!paperSession.active(s,Date.now())||Date.now()<s.startAt||(!s.pending&&Date.now()<s.nextLookAt))return;
+    const close=s.pending?.close??(Math.floor(Date.now()/900000)+1)*900,mk=s.pending?.mk??marketTicker(close);
+    let market,exchange,error;
+    try{market=(await signedGet(this.env,'/trade-api/v2/markets/'+mk))?.market;exchange=await signedGet(this.env,'/trade-api/v2/exchange/status');}catch(e){error='market or exchange read unavailable';}
+    // Stop can arrive during network reads. Reload before deciding or filling.
+    s=await this.loadSession();if(!s||s.id!==id)return;
+    const at=Date.now();paperSession.clock(s,at);
+    const target=market?.floor_strike!=null?Number(market.floor_strike):null;
+    const k=research.snapshot({at,close,target,targetAt:at,ticks:[...this.researchTicks.values()],book:this.books[mk],exchange,marketStatus:market?.status});
+    if(error){k.status=error;k.p=null;}
+    if(k.depth&&!k.depth.valid&&k.depth.reason==='empty or crossed book')k.depth.reason=k.depth.yes.length&&k.depth.no.length?'crossed order book':'one-sided or empty order book';
+    s.lastObservedAt=at;
+    if(s.pending)paperSession.arrive(s,k);else paperSession.decide(s,k,mk,close);
+    await this.saveSession(s);
+  }
   async researchRequest(request,url) {
     const reply=(d,status=200)=>new Response(JSON.stringify(d),{status,headers:{...CORS,'Content-Type':'application/json'}});
     if(request.method!=='GET')return reply({error:'read only'},405);
@@ -699,7 +845,7 @@ export class KalshiFeed {
     for(const c of research.CHECKS)if(!row.checks[c]&&started-(close-c)*1000>research.SETTINGS.checkpointToleranceMs){
       row.checks[c]={at:started,status:'checkpoint missed',p:null,p2:null};changed=true;
     }
-    const c=research.CHECKS.find(c=>!row.checks[c]&&started>=(close-c)*1000);
+    const c=research.CHECKS.find(c=>!row.checks[c]&&started>=(close-c)*1000+750);
     if(c!=null){
       let market=null,exchange=null,error=null;
       try{
@@ -942,14 +1088,15 @@ export class KalshiFeed {
     if (!this.alarmBusy && (alarm == null || alarm < now - 60000 || alarm > now + 60000))
       await this.state.storage.setAlarm(now + 1000);
     if (this.up && now - Math.max(this.upMsgAt, this.upSince) > 20000) this.closeUpstream("stale stream");
-    this.agentActive = (await this.tradeConfig()).mode !== "off";
+    const session=await this.state.storage.get('session.current');
+    this.agentActive = (await this.tradeConfig()).mode !== "off" || paperSession.active(session,now);
     await this.ensureUpstream();
     if(this.up) this.subscribeTickers();
   }
   nextEvent(nowMs, agentOn, cfg) {             // the next checkpoint, settlement or agent moment after now, in ms
     const now = nowMs / 1000, close = (Math.floor(now / WINDOW) + 1) * WINDOW, times = [];
     for (const c of [close - WINDOW, close, close + WINDOW]) { for (const k of CHECKS) times.push(c - k); times.push(c + 90, c + 400); }
-    for (const c of [close,close+WINDOW]) for(const k of research.CHECKS)times.push(c-k-5,c-k,c-k+10);
+    for (const c of [close,close+WINDOW]) for(const k of research.CHECKS)times.push(c-k-5,c-k+.75,c-k+10);
     if (agentOn) {
       const first = cfg ? cfg.firstSeconds : 300, lastS = cfg ? cfg.lastSeconds : 15;
       const zoneStart = close - WINDOW + first, zoneEnd = close - lastS;
@@ -968,6 +1115,7 @@ export class KalshiFeed {
     try {
       await this.state.storage.put("index.seconds", [...this.indexSeconds].slice(-1200));
       await this.ensureAlarm();
+      await this.sessionTick();
       await this.researchArrivals();
       const close = (Math.floor(now / WINDOW) + 1) * WINDOW, left = close - now;
       const check = CHECKS.find(k => left <= k && k - left < 20);
@@ -999,7 +1147,7 @@ export class KalshiFeed {
         const pending=await this.state.storage.list({prefix:"t:"});
         const due=[...pending.values()].filter(v=>v.pendingPaper).map(v=>Math.max(Date.now()+100,v.pendingPaper.readyAt));
         const researchDue=((await this.state.storage.get('research.pending'))||[]).map(p=>Math.max(Date.now()+100,p.readyAt));
-        await this.state.storage.setAlarm(Math.min(this.nextEvent(Date.now(), cfg.mode === "paper", cfg),...due,...researchDue));
+        await this.state.storage.setAlarm(Math.min(this.nextEvent(Date.now(), cfg.mode === "paper", cfg),...due,...researchDue,paperSession.due(await this.state.storage.get('session.current'),Date.now())));
         this.alarmBusy = false;
       }
     }
