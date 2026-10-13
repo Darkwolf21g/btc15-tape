@@ -12,39 +12,44 @@ function worker() {
   vm.runInContext(source + '\nglobalThis.api = {publicKalshi,retryDelay,signedCall,apiBudget,debitBudget,upgradeFetch, KalshiFeed, projectFrom, volsFrom, parseTicks, calibrationReport, MODEL_VERSION, entry, paperReport, model:globalThis.BTC15Model};', context);
   const data = new Map(); let alarm = null;
   const storage = {get: async k => data.get(k), put: async (k, v) => data.set(k, structuredClone(v)), getAlarm: async () => alarm, setAlarm: async v => { alarm = v; }, list: async ({prefix}) => new Map([...data].filter(([k]) => k.startsWith(prefix))), delete: async k => data.delete(k)};
-  const obj = new context.api.KalshiFeed({storage}, {KALSHI_KEY_ID: 'test', KALSHI_PRIVATE_KEY: 'test'});
-  return {api: context.api, context, obj, data, storage, now, setTime(t) { now = t; }, getAlarm: () => alarm};
+  storage.transaction=async fn=>fn(storage);
+  const tasks=[];const obj = new context.api.KalshiFeed({storage,waitUntil:task=>tasks.push(task)}, {KALSHI_KEY_ID: 'test', KALSHI_PRIVATE_KEY: 'test'});
+  return {api: context.api, context, obj, data, storage, tasks, now, setTime(t) { now = t; }, getAlarm: () => alarm};
 }
 const ticks = (start, end, value = 100) => Array.from({length: end - start + 1}, (_, i) => [(start + i) * 1000, value]);
 test('backend rejects any missing elapsed settlement reading', () => {
-  const {api} = worker(); const p = api.projectFrom(ticks(61, 89), 90500, 120, 999, {s: 2, l: 2});
+  const {api} = worker(); const p = api.projectFrom(ticks(60, 89), 90500, 120, 999, {s: 2, l: 2});
   assert.equal(p.mean, null); assert.equal(p.missing, 1);
 });
-test('backend final-minute boundaries exclude start and include closing tick', () => {
+test('backend contract interval includes start and excludes closing tick', () => {
   const {api} = worker(); const t = ticks(60, 120); t[0][1] = 500; t.at(-1)[1] = 160;
-  assert.equal(api.projectFrom(t, 120000, 120, 100, {s: 2, l: 2}).mean, 101);
+  assert.equal(api.projectFrom(t, 120000, 120, 100, {s: 2, l: 2}).mean, (500 + 59*100)/60);
 });
-test('delayed aggregate cannot silently shrink denominator below sixty', () => {
+test('stream aggregates cannot replace missing contract readings, even with matching elapsed counts', () => {
   const {api} = worker();
-  const p = api.projectFrom([], 90500, 120, 100, {s: 2, l: 2}, {n: 29, v: 100, end: 89000});
-  assert.equal(p.mean, null);
-  const good = api.projectFrom([], 90500, 120, 110, {s: 2, l: 2}, {n: 30, v: 100, end: 90000});
-  assert.equal(good.mean, 105); assert.equal(good.observed + good.m, 60);
+  for (const aggregate of [{n:29,v:100,end:89000},{n:30,v:100,end:90000},{n:31,v:100,end:90000}]) {
+    const p = api.projectFrom([],90500,120,110,{s:2,l:2},aggregate);
+    assert.equal(p.mean,null); assert.equal(p.missing,31); assert.equal(p.m,29);
+  }
+  const complete = api.projectFrom(ticks(60,90),90500,120,110,{s:2,l:2},{n:30,v:999,end:90000});
+  assert.equal(complete.mean,(31*100+29*110)/60); assert.equal(complete.observed+complete.m,60);
 });
-test('partial-second variance is retained', () => {
-  const {api} = worker(); const p = api.projectFrom(ticks(61,119),119500,120,100,{s:2,l:2});
+test('partial-second variance ends at the final pre-close reading', () => {
+  const {api} = worker(); const p = api.projectFrom(ticks(60,118),118500,120,100,{s:2,l:2});
   assert.ok(Math.abs(p.sd ** 2 - (0.09 + 2 / 3600)) < 1e-12);
+  const final = api.projectFrom(ticks(60,119),119500,120,999,{s:2,l:2});
+  assert.equal(final.m,0); assert.equal(final.mean,100); assert.equal(final.sd,.3);
 });
 test('watchdog repairs overdue alarms and reconnects without a browser', async () => {
   const h = worker(); let connects = 0; h.obj.ensureUpstream = async () => connects++;
   await h.storage.setAlarm(h.now - 120000); await h.obj.ensureAlarm();
-  assert.equal(h.getAlarm(), h.now + 1000); assert.equal(connects, 1); assert.equal(h.obj.clients.size, 0);
+  assert.ok(h.getAlarm()>h.now&&h.getAlarm()<=h.now+1000); assert.equal(connects, 1); assert.equal(h.obj.clients.size, 0);
 });
 test('alarm is rescheduled even when checkpoint request fails', async () => {
   const h = worker(); h.setTime(Math.floor(h.now / 900000) * 900000 + 300000);
   h.obj.ensureUpstream = async () => {};
   h.obj.checkpoint = async () => { throw Error('upstream timeout'); };
-  await h.obj.alarm(); assert.ok(h.getAlarm() > Math.floor(h.now / 900000) * 900000 + 300000);
+  await h.obj.alarm(); await Promise.all(h.tasks); assert.ok(h.getAlarm() > Math.floor(h.now / 900000) * 900000 + 300000);
   assert.equal(h.data.get('collector').errors.at(-1).error, 'upstream timeout');
   assert.equal(h.obj.alarmBusy, false);
 });
@@ -285,4 +290,15 @@ test('mixed-version deployment tolerates a collector without the new market rout
  const h=worker();h.context.rolloutReads=[];vm.runInContext('signedGet=async(env,path)=>{rolloutReads.push(path);return {exchange_active:true,trading_active:true}}',h.context);
  const env={...h.obj.env,FEED:{idFromName:()=>1,get:()=>({fetch:async()=>new Response('expected a websocket',{status:426})})}};
  const r=await h.api.entry.fetch(new Request('https://site/exchange/status'),env);assert.equal(r.status,200);assert.equal((await r.json()).trading_active,true);assert.equal(h.context.rolloutReads.length,1);
+});
+
+test('legacy checkpoint rejects later receipt timestamps for both depth and ticker fallbacks',async()=>{
+ const h=worker(),at=h.now,close=at/1000+300;h.obj.indexSeconds=new Map(ticks(at/1000-180,at/1000).map(([t,v],i)=>[t,v+Math.sin(i)]));h.obj.ticks=[...h.obj.indexSeconds];
+ vm.runInContext('signedGet=async()=>({market:{floor_strike:100}})',h.context);
+ for(const kind of ['book','ticker']){
+  h.obj.books.TEST=kind==='book'?{at:at+6000,yes:new Map([[.4,10]]),no:new Map([[.5,10]])}:null;
+  h.obj.lastTicker.TEST={at:at+6000,bid:.4,ask:.5};
+  await h.obj.checkpoint('TEST',close,kind,at);const k=h.data.get('w:TEST').checks[kind];
+  assert.equal(k.at,at);assert.equal(k.marketAt,null);assert.equal(k.bid,null);assert.equal(k.ask,null);
+ }
 });

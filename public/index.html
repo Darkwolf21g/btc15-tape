@@ -264,7 +264,7 @@ summary { display: list-item; padding-block: 10px; }
       <p><b>Closing average, projected.</b> The contract settles on the average of the last 60 seconds. Until that minute starts none of those seconds has happened, and a random walk's best forecast for every one of them is the price now, so the projection sits on spot (plus the lean) and only its uncertainty shrinks as the close nears. In the final minute, observed official BRTI readings contribute to the projection and future readings follow the current index. Missing elapsed BRTI readings pause the model. Only Kalshi confirms the winning outcome.</p>
       <p><b>Timing.</b> A trailing 60-second average smooths price changes. Its effective delay depends on the price path and is not a measured network delay or a guaranteed trading lead. Spot uses official BRTI when fresh and labels exchange estimates when unavailable. The blue average uses only official one-second BRTI observations, requires all 60 readings, and leaves gaps empty. This trailing window is different from the contract’s final settlement minute.</p>
       <p><b>Official history.</b> With the same key, any minute the page did not see itself (the one before the open, or after another app was in front) is rebuilt from the index's own tick history rather than from Coinbase trades.</p>
-      <p><b>Kalshi's own stream.</b> With an API key set on the relay (two secrets on the Cloudflare Worker; the README says how), the page shows the official BRTI index itself, up to five times a second, Kalshi's official trailing average, and, in the final minute, the settlement average exactly as Kalshi accumulates it, plus the market's prices the moment they change. The spot and average tiles then say "official" with the reading's age. Without the key exchange prices remain context only; the BRTI average and model signals stay unavailable.</p>
+      <p><b>Kalshi's own stream.</b> With an API key set on the relay (two secrets on the Cloudflare Worker; the README says how), the page shows the official BRTI index itself, up to five times a second, Kalshi's official trailing average, and, in the final minute, the streamed final-minute aggregate as a separate diagnostic, plus the market's prices the moment they change. The spot and average tiles then say "official" with the reading's age. Without the key exchange prices remain context only; the BRTI average and model signals stay unavailable.</p>
       <p><b>Relay.</b> Browsers are not allowed to read Kalshi directly. A small relay of your own (a free Cloudflare Worker; the code is in the README) lets this page read the exact target, the official 60-second average and Kalshi's own Up price. Paste its address here once.</p>
       <p><b>Fees.</b> The edge figures take off Robinhood's commission and Kalshi's 1¢ fee, about 2¢ a contract in the middle of the range.</p>
       <p><b>Buy, thin, no.</b> The chance is shown with a band: the range it covers if volatility were 30% lower or 50% higher, if the lean were off, and if spot moved one standard deviation of a ten-second move against you while you placed the order. <b>Buy</b> means the price still leaves 3¢ after fees at the bad end of that band, and comes with a size: a quarter of the Kelly stake on the bad end, never more than 2% of the bankroll set below. <b>Thin</b> means there is an edge at the model's own chance but not at the bad end. <b>No</b> means none at the model's chance.</p>
@@ -284,7 +284,10 @@ summary { display: list-item; padding-block: 10px; }
 // Canonical model. scripts/sync-model.cjs embeds this exact source in Worker and page.
 // Frozen baseline: no fitted flow lean; all parameters recorded under VERSION.
 (() => {
-const VERSION = "brti-driftless-v3";
+const VERSION = "brti-driftless-v4";
+// KXBTC15M contract: sixty one-second readings strictly before its reference/close time.
+// The WebSocket final-minute aggregate is a different, close-inclusive statistic.
+const SETTLEMENT_CONVENTION = "[close-60s,close)";
 const EXECUTION_VERSION = "paper-delayed-depth-v2";
 const SETTLE = 60, VOL_TAU = 180;
 const tailCdf = z => 0.5 + z * (z*z+6) / (2*Math.pow(z*z+4,1.5));
@@ -298,20 +301,14 @@ function volsFrom(ticks, nowMs) {
   const s = est(120), l = est(900);
   return s && l ? {s, l} : null;
 }
-function projectFrom(ticks, nowMs, closeS, x, vols, aggregate = null) {
+function projectFrom(ticks, nowMs, closeS, x, vols) {
   const now = nowMs / 1000, perSec = new Map(ticks.map(([ms, v]) => [Math.floor(ms / 1000), v]));
   let known = 0, observed = 0, missing = 0; const ahead = [];
-  for (let sec = closeS - SETTLE + 1; sec <= closeS; sec++) {
+  for (let sec = closeS - SETTLE; sec < closeS; sec++) {
     if (sec <= now) { const v = perSec.get(sec); if (Number.isFinite(v)) { known += v; observed++; } else missing++; }
     else ahead.push(sec - now);
   }
-  // A delayed aggregate must never turn a 60-reading contract into a 59-reading contract.
-  const elapsed = SETTLE - ahead.length;
-  if (aggregate && aggregate.n === elapsed && aggregate.n >= 1 && aggregate.n <= 60 &&
-      aggregate.end > (closeS - 60) * 1000 && aggregate.end <= closeS * 1000 &&
-      nowMs - aggregate.end >= -1000 && nowMs - aggregate.end < 3000 && Number.isFinite(aggregate.v)) {
-    known = aggregate.v * aggregate.n; observed = aggregate.n; missing = 0;
-  }
+  // Do not substitute last_60s_windowed_average_15min: its start/close membership differs.
   if (missing) return {mean: null, sd: null, observed, missing, m: ahead.length};
   const m = ahead.length, vs = vols.s ** 2, vl = vols.l ** 2;
   let variance = 0, previous = 0;
@@ -319,10 +316,10 @@ function projectFrom(ticks, nowMs, closeS, x, vols, aggregate = null) {
   return {sum: known, reconstructed: 0, mean: (known + m * x) / SETTLE, sd: Math.sqrt(variance / SETTLE ** 2 + 0.09), observed, missing: 0, m, official: observed > 0};
 }
 
-function band(ticks, nowMs, close, x, vols, target, aggregate=null) {
+function band(ticks, nowMs, close, x, vols, target) {
  let lo=1, hi=0; const adverse=vols.s*Math.sqrt(10);
  for(const k of [.7,1,1.5]) for(const shift of [-adverse,0,adverse]) {
-  const pr=projectFrom(ticks,nowMs,close,x+shift,{s:vols.s*k,l:vols.l*k},aggregate);
+  const pr=projectFrom(ticks,nowMs,close,x+shift,{s:vols.s*k,l:vols.l*k});
   if(pr.mean==null)return null;
   const p=chance(pr.mean,pr.sd,target);lo=Math.min(lo,p);hi=Math.max(hi,p);
  }
@@ -360,7 +357,7 @@ function paperFill(intent,book,nowMs,cfg) {
  if(!filled)return empty("no quantity at limit after depth haircut");
  return {filled,cost:Math.round(cost*100)/100,feesCents:fees,levels,status:remaining?"paper-partial":"paper-filled",reason:remaining?"available depth below requested size":"filled at arrival book",filledAt:nowMs,latencyMs:nowMs-intent.at};
 }
-globalThis.BTC15Model=Object.freeze({VERSION,EXECUTION_VERSION,tailCdf,chance,volsFrom,projectFrom,band,feesCents,asks,paperFill});
+globalThis.BTC15Model=Object.freeze({VERSION,SETTLEMENT_CONVENTION,EXECUTION_VERSION,tailCdf,chance,volsFrom,projectFrom,band,feesCents,asks,paperFill});
 })();
 // END SHARED BTC15 MODEL
 // ---------------------------------------------------------------- settings
@@ -634,10 +631,11 @@ function sampleAt(sec) {
   const own = samples.get(sec);
   return own != null ? own : backfill.has(sec) ? backfill.get(sec) : null;
 }
-function windowSamples(end, through = end) {
+function windowSamples(end, through = end, contract = false) {
   let sum = 0, observed = 0, missing = 0, reconstructed = 0;
-  // Kalshi's final-minute helper uses (end - 60, end]: exclude the start, include the close.
-  for (let s = end - SETTLE + 1; s <= end && s <= through; s++) {
+  // Keep the exchange trailing diagnostic inclusive; contract samples end one second earlier.
+  const last = contract ? end - 1 : end;
+  for (let s = last - SETTLE + 1; s <= last && s <= through; s++) {
     const p = sampleAt(s);
     if (!Number.isFinite(p)) { missing++; continue; }
     sum += p; observed++;
@@ -1151,8 +1149,8 @@ setInterval(() => {                                  // the relay answers "ping"
   if (ws && ws.readyState === 1) { if (Date.now() - feed.at > ALIVE_MS) ws.close(); else { try { ws.send("ping"); } catch (e) {} } }
   else if ((!ws || ws.readyState === 3) && !feed.timer && feedUrl()) retryFeed();
 }, 5000);
-// The settlement average Kalshi is accumulating for this window, if it is fresh: {sum, n}.
-function officialSettle(close) {
+// The streamed final-minute statistic uses (close-60, close], not contract settlement.
+function streamedFinalMinute(close) {
   const f = feed.settle;
   const elapsed = Math.max(0, Math.min(60, Math.floor(Date.now() / 1000) - close + 60));
   if (!f || Date.now() - f.at > FEED_FRESH_MS || !Number.isInteger(f.n) || f.n !== elapsed || f.n < 1 || f.n > 60) return null;
@@ -1196,7 +1194,8 @@ function target(open, mk) {
   const f = kalshi.feed.get(open - 1);
   if (f) return [r2(f), "from Kalshi's feed"];
   const level = basisSrc === "raw" ? "level not calibrated: tap to correct" : "level calibrated " + Math.round((Date.now() - basisAt) / 60000) + " min ago";
-  const a = avgAt(open);                            // same closing-boundary convention as settlement
+  const prior = windowSamples(open, open, true);
+  const a = prior.observed === SETTLE && !prior.missing ? prior.sum / SETTLE : null;
   if (a != null) return [r2(a + basis), "estimated; " + level];
   if (candle.open === open) {
     const cb = venue.coinbase ? venue.coinbase.offset : 0;
@@ -1215,23 +1214,13 @@ function target(open, mk) {
 // hour. `drifts` is a list of [dollars, seconds]: a lean that plays out over that many seconds.
 const VOL_TAU = 180;
 function project(now, close, x, vols, drifts) {
-  if(feed.brti) return globalThis.BTC15Model.projectFrom([...officialSeconds].map(([s,v])=>[s*1000,v]),now*1000,close,x,vols,feed.settle);
+  if(feed.brti) return globalThis.BTC15Model.projectFrom([...officialSeconds].map(([s,v])=>[s*1000,v]),now*1000,close,x,vols);
 
-  const off = officialSettle(close), ahead = [];
-  // Kalshi's own accumulating average, when streamed, is the known part exactly; otherwise the
-  // page's proxy, and past gaps in it are unknown: spot forecasts only future observations.
-  let w = off ? {sum: off.sum, observed: off.n, missing: 0, reconstructed: 0, official: true} : windowSamples(close, now);
-  if (!off && feed.brti) {
-    w = {sum: 0, observed: 0, missing: 0, reconstructed: 0, official: true};
-    for (let sec = close - SETTLE + 1; sec <= Math.min(Math.floor(now), close); sec++) {
-      const v = officialSeconds.get(sec);
-      if (Number.isFinite(v)) { w.sum += v; w.observed++; } else w.missing++;
-    }
-  }
+  const ahead = [], w = windowSamples(close, now, true);
+  // Exchange-proxy diagnostics use the same contract interval, but are never official.
   if (w.missing) return {...w, mean: null, sd: null};
-  for (let s = close - SETTLE + 1; s <= close; s++) if (s > now) ahead.push(s - now);
-  const m = off ? Math.min(ahead.length, SETTLE - off.n) : ahead.length;
-  if (off) ahead.splice(0, ahead.length - m);
+  for (let s = close - SETTLE; s < close; s++) if (s > now) ahead.push(s - now);
+  const m = ahead.length;
   // Variance of the sum of the future values: the step the index takes `u` seconds from now feeds
   // every settlement second after it, so it counts (how many of those there are) squared.
   let variance = 0;
@@ -1528,7 +1517,7 @@ function drawProb(open, close, now) {
 // placed. "Buy" has to clear the fee and 3c at the bad end of that band; "thin" clears only the
 // middle; "no" does not clear the middle.
 function chanceBand(now, close, x, tgt, vols, drifts) {
-  if(feed.brti) return globalThis.BTC15Model.band([...officialSeconds].map(([s,v])=>[s*1000,v]),now*1000,close,x,vols,tgt,feed.settle);
+  if(feed.brti) return globalThis.BTC15Model.band([...officialSeconds].map(([s,v])=>[s*1000,v]),now*1000,close,x,vols,tgt);
 
   let lo = 1, hi = 0;
   const adverse = vols.s * Math.sqrt(10);
@@ -1610,12 +1599,16 @@ function keepRecord(mk, close, left, tgt, p, p2, km, vUp, vDown, upC, downC, typ
 function settleWindow(r) {
   captureProxyClose(r);
   saveRecord();
-  // The render loop can change windows before onSecond captures the closing tick.
+  // Retry a late pre-close sample; the tick at close is never part of this contract.
   setTimeout(() => { captureProxyClose(r); saveRecord(); }, 1200);
   for (const delay of [45000, 150000, 600000]) setTimeout(() => settleOfficial(r), delay);
 }
 function captureProxyClose(r) {
-  const w = windowSamples(r.close), a = avgAt(r.close);
+  // A previously captured diagnostic is an observation, not a value to rewrite on reload.
+  if (r.closeAvg != null) return;
+  const w = windowSamples(r.close, r.close, true);
+  const a = w.observed === SETTLE && !w.missing ? w.sum / SETTLE : null;
+  r.proxyConvention = globalThis.BTC15Model.SETTLEMENT_CONVENTION;
   r.proxySamples = w.observed; r.proxyMissing = w.missing;
   r.closeAvg = a != null ? r2(a + basis) : null;
   r.proxyResult = r.closeAvg != null && r.tgt != null ? (r.closeAvg >= r.tgt ? "yes" : "no") : null;
@@ -1799,7 +1792,7 @@ function forecastView(mk, tgt, nowMs, live, proj, p, band, status, close) {
   }
   const sec = Math.floor(nowMs/1000), previous = lastForecastView;
   const pending = live && status && status.missing === 1 && !officialSeconds.has(sec)
-    && sec > close-60 && sec < close && nowMs-sec*1000 < 750
+    && sec >= close-60 && sec < close && nowMs-sec*1000 < 750
     && previous && previous.mk === mk && previous.tgt === tgt
     && nowMs-previous.at >= 0 && nowMs-previous.at < 1500;
   if (pending) return {...previous,pending:true};
@@ -1873,7 +1866,7 @@ function render() {
   // In the final minute: the average the remaining seconds must reach for Up to win.
   const need = proj && tgt != null && proj.observed && proj.m > 0 ? Math.ceil((((tgt - 0.005) * 60 - (proj.sum + (proj.official ? 0 : proj.observed * basis))) / proj.m) * 100 - 1e-7) / 100 : null;
   $("lvProj").textContent = proj ? money(proj.mean) : "–";
-  $("lvProjNote").textContent = proj ? (proj.observed ? (proj.official ? `${proj.observed}/60 s in Kalshi's own average` : `${proj.observed}/60 proxy samples, ${proj.reconstructed} reconstructed`) + (need != null ? ` · Up needs ≥ ${money(need)} over the last ${proj.m} s` : "") : (live ? "official index; forecast until the final minute" : "exchange-proxy forecast until the final minute")) + ` · ±${proj.sd.toFixed(0)} model scale · vol $${vols.s.toFixed(1)} now, $${vols.l.toFixed(1)}/√s over 15 min` + (lean ? ` · experimental lean ${signed(lean)} (not applied)` : "")
+  $("lvProjNote").textContent = proj ? (proj.observed ? (proj.official ? `${proj.observed}/60 pre-close BRTI readings` : `${proj.observed}/60 proxy samples, ${proj.reconstructed} reconstructed`) + (need != null ? ` · Up needs ≥ ${money(need)} over the last ${proj.m} s` : "") : (live ? "official index; forecast until the final minute" : "exchange-proxy forecast until the final minute")) + ` · ±${proj.sd.toFixed(0)} model scale · vol $${vols.s.toFixed(1)} now, $${vols.l.toFixed(1)}/√s over 15 min` + (lean ? ` · experimental lean ${signed(lean)} (not applied)` : "")
     : projectionStatus && projectionStatus.missing ? `INCOMPLETE: ${projectionStatus.missing} elapsed BRTI readings missing` : vols == null ? "measuring volatility…" : "needs the target";
   lastNeed = need;
   lastInputs = proj ? {x: +x.toFixed(2), src: live ? "stream" : "exchanges", sd: +proj.sd.toFixed(1), lean: +lean.toFixed(1), known: proj.official ? "official" : proj.observed + "/60", tgt, vol: +vols.s.toFixed(2)} : null;
@@ -1883,7 +1876,7 @@ function render() {
   if (inFinal && proj && proj.observed) {
     const soFar = (proj.sum + (proj.official ? 0 : proj.observed * basis)) / proj.observed;
     $("stIn").textContent = `${proj.observed} / 60`;
-    $("stInNote").textContent = proj.official ? "Kalshi's own count" : proj.reconstructed ? `${proj.reconstructed} rebuilt` : "page's own";
+    $("stInNote").textContent = proj.official ? "pre-close BRTI count" : proj.reconstructed ? `${proj.reconstructed} rebuilt` : "page's own";
     $("stAvg").textContent = money(soFar); $("stAvg").className = tgt != null ? (soFar >= tgt ? "up" : "down") : "";
     $("stAvgNote").textContent = tgt != null ? `${signed(soFar - tgt)} vs target` : "";
     $("stNeed").textContent = need != null ? money(need) : "–"; $("stNeed").className = need != null && x != null ? (x >= need ? "up" : "down") : "";
@@ -2100,7 +2093,7 @@ function diagnostics(now, open) {
   lines.push(`flow 60 s: spot bought ${fmtUsd(f.b)} sold ${fmtUsd(f.s)} · perp bought ${fmtUsd(f.pb)} sold ${fmtUsd(f.ps)} · liquidations kept ${liqs.length} · big prints ${whales.length} · sound ${snd.on ? "on" : "off"}`);
   const fr = feed.relay || {};
   lines.push(`stream: ${feed.state}` + (feedUrl() ? ` to ${feedUrl().replace(/\?.*/, "")}` : " (no relay)") + ` · counts ${JSON.stringify(feed.counts)} · relay ${fr.state || "?"}${fr.error ? " " + fr.error : ""}${fr.hasKey === false ? " · no key set" : ""}`
-    + (feed.brti ? ` · BRTI ${feed.brti.v.toFixed(2)} ${((t - feed.brti.at) / 1000).toFixed(1)}s` : "") + (feed.oddTotal ? ` · odd ticks ignored ${feed.oddTotal}` : "") + (feed.settle ? ` · settle avg ${feed.settle.v.toFixed(2)} n ${feed.settle.n}` : ""));
+    + (feed.brti ? ` · BRTI ${feed.brti.v.toFixed(2)} ${((t - feed.brti.at) / 1000).toFixed(1)}s` : "") + (feed.oddTotal ? ` · odd ticks ignored ${feed.oddTotal}` : "") + (feed.settle ? ` · stream final-minute avg ${feed.settle.v.toFixed(2)} n ${feed.settle.n}` : ""));
   const av = trailingAverageStatus(t), one = feed.oneHz, ag = feed.avg60;
   const latest = Math.max(-Infinity, ...officialSeconds.keys());
   const recentTimes = [...officialTimes.values()].sort((a,b)=>a-b).slice(-8);

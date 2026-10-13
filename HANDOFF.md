@@ -1,5 +1,42 @@
 # BTC 15 Tape — handoff
 
+## Settlement correction — October 13, 2026 (v4)
+
+This section supersedes older close-inclusive settlement and streamed-aggregate
+substitution claims below. KXBTC15M contract samples are `[close - 60s, close)`,
+per [the series contract terms](https://assets.kalshi.com/contract_terms/CRYPTO.pdf).
+The WebSocket final-minute aggregate remains `(close - 60s, close]` and is only
+a separate diagnostic. Contract projections now require actual one-Hz samples;
+missing elapsed readings produce WAIT. Model `brti-driftless-v4` keeps the same
+volatility, rounding and $0.30 scale floor. Page and Worker use the shared model;
+exchange trailing diagnostics remain unchanged. Old forecasts and completed
+closing diagnostics are not recalculated. See RESEARCH.md for the separate
+prospective cohort and rollout-gap handling. Use the reference/last-trading close
+time, not API expiration_time. Trading controls, checkpoint cadence, retention
+and deployment configuration are unchanged. The coordinated timed-session
+integration below changes alarm work isolation, not the experiment cadence.
+
+## Timed-session integration — October 13, 2026
+
+This integrates the already-merged timed-session work. New `paper-session-v2`
+sessions pin `brti-driftless-v4` and `[close-60s,close)` in settings and every
+new decision/intent/fill. Legacy sessions do not resume with the new model:
+they stop with an explicit compatibility reason and cancel queued simulations.
+Original version/settings, looks, attempts and trades remain attributed as saved;
+open simulated positions await official settlement. No session starts on deployment.
+
+The collector alarm handles due research arrivals and captures before launching
+single-flight session and maintenance jobs via Durable Object `waitUntil`.
+Slow REST calls cannot hold the alarm lock across the next arrival. All callers
+share an atomic earliest-wake scheduler; overdue wakes re-arm promptly and busy
+jobs do not cause 100ms polling loops. Stop/version saves use revision checks;
+official outcomes merge into the latest research row. Legacy checkpoint quotes
+must have been received at or before their actual capture timestamp.
+
+Run `npm test`, `npm run check`, `npm run test:runtime`,
+`node tests/websocket-runtime.mjs` and `node tests/alarm-runtime.mjs`.
+The latter tests real local workerd alarm delivery while background work is pending.
+
 ## Pricing bias addition — October 12, 2026
 
 `shared-research.js` tags new snapshots with `btc15-bias-v2` and reports three

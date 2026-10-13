@@ -29,6 +29,61 @@ checkpoint, even without a browser. Outside these bursts, the existing
 browser/paper policy applies. This adds WebSocket traffic, alarm wakeups, REST
 reads and storage usage; it is not a free-storage guarantee.
 
+### Prospective settlement-window correction
+
+The current cohort uses schema `settlement-research-v2`, model
+`brti-driftless-v4` and bias version `btc15-bias-v3`. For KXBTC15M, the contract's
+sixty seconds before `close_time` are `[close-60s, close)`: include the first
+second and exclude the close second. The stream trailing aggregate describes
+`(close-60s, close]` instead, so it is not a settlement input. New snapshots and
+closing diagnostics record `settlementConvention` explicitly. Source timestamps,
+first-receipt timestamps, checkpoint cadence and retention are unchanged.
+
+Versions start prospectively. The current evaluator excludes legacy schema/model
+cohorts and does not reconstruct their forecasts. An upgrade during a legacy
+window skips its remaining checkpoints and drops any unfinished delayed-arrival
+capture; collection resumes in the next window. This deliberate rollout gap
+keeps old forecast, target, book and bias observations intact. Official Kalshi
+outcomes can still attach to legacy windows.
+
+Existing closing captures and raw input buffers are never rewritten. A legacy
+window without a closing capture retains the old `(close-60s, close]` diagnostic
+convention, now explicitly tagged, and keeps its original schema/model labels.
+If a raw closing buffer already exists after an interrupted summary write, the
+diagnostic uses that buffer and its original capture time. These local averages
+remain diagnostics; only official Kalshi outcomes supply evaluation labels.
+An orphan checkpoint raw buffer is likewise preserved: its lost forecast is
+marked skipped rather than reconstructed from a later book or target.
+
+Contract reference: https://assets.kalshi.com/contract_terms/CRYPTO.pdf, page 1,
+sixty seconds before the reference time (last trading time).
+
+### Timed paper sessions and deployment boundaries
+
+The timed experiment remains five-second looks over four complete windows, with
+the same delayed one-contract simulated entries/exits, fees, depth haircut,
+thresholds, cooldown and loss stop. New sessions are `paper-session-v2`, explicitly
+pinned to model `brti-driftless-v4` and interval `[close-60s,close)`. Decisions,
+intents, attempts and trades retain that attribution; arrivals also record the
+arrival model/interval. Mismatched or unattributed snapshots cannot create fills.
+
+A saved v1 session is never silently upgraded. The first session clock tick
+stops further decisions, records a compatibility reason, cancels a queued
+simulation once, and leaves open positions pending their official outcome.
+Its original settings and observations remain unchanged; missing historical
+interval attribution stays missing. Status/export reads do not perform migration.
+Starting a new session first preserves any necessary transition in the old one.
+The release itself does not start a timed session or enable the legacy agent.
+
+Research capture/arrival runs in the alarm's fast path. Session REST and slower
+collector maintenance are independent single-flight `waitUntil` jobs. An atomic
+minimum-alarm scheduler preserves research wakes, including newly queued arrivals;
+busy background jobs cannot spin on their own overdue decision deadlines. These
+jobs do not change checkpoint cadence, the 750ms publication grace, receipt-time
+filters, maximum fill latency or retention. Slow research metadata itself still
+fails closed when the existing capture tolerance is exceeded. This is isolation
+from unrelated work, not a guarantee of network latency or executable fills.
+
 ## Chronological evaluation
 
 Fixed UTC test blocks contain 20 windows (five hours). For each checkpoint, choose
@@ -107,12 +162,13 @@ References reviewed 2026-10-12:
 - https://docs.kalshi.com/websockets/market-ticker
 - https://kalshi.com/docs/kalshi-fee-schedule.pdf
 
-## Pricing bias phase — btc15-bias-v2
+## Pricing bias phase — btc15-bias-v3
 
 This phase starts prospectively with checkpoints carrying `bias.version` equal to
-`btc15-bias-v2`. Older checkpoints remain in the settlement study but are excluded
-from the bias study. No historical signals are reconstructed. The live forecast,
-agent mode and order submission permissions do not change.
+`btc15-bias-v3` under the current schema/model cohort. Older checkpoints remain
+stored and exportable but are excluded from the current bias study. No historical
+signals are reconstructed. The settlement-window correction changes the forecast
+interval; agent mode and order submission permissions do not change.
 
 The following definitions are frozen before outcomes arrive:
 
@@ -183,5 +239,6 @@ Observed upstream book clocks led local receipt time by roughly 3–70 ms. Resea
 allows at most 250 ms of source-clock lead, records the raw signed source age and
 `clockAheadMs`, and still rejects local receipts after capture or source ages over
 1.5 seconds. This is a bounded clock-skew allowance, not a claim of synchronized
-clocks or permission to use data received later. The bias version is v2; v1
-captures are excluded. No prior captured book is repaired retrospectively.
+clocks or permission to use data received later. That correction introduced bias
+version v2, excluding v1 captures. The current settlement-window correction starts
+a separate v3 cohort. No prior captured book is repaired retrospectively.

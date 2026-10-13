@@ -18,7 +18,7 @@ const WS_UPSTREAM = "https://external-api-ws.kalshi.com/trade-api/ws/v2";   // h
 const ALLOWED = [/^\/markets\/KXBTC15M-[A-Z0-9-]+$/, /^\/live_data\/events\/KXBTC15M-[A-Z0-9]+$/, /^\/exchange\/status$/];
 const CORS = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Cache-Control": "no-store"};
 const WINDOW = 900;
-const MODEL_VERSION = "brti-driftless-v3";
+const MODEL_VERSION = "brti-driftless-v4";
 // Bound network waits so a slow upstream cannot strand the alarm chain.
 const timedFetch = (url, options = {}) => fetch(url, {...options, signal: AbortSignal.timeout(12000)});
 // The timeout applies only to the HTTP upgrade. An AbortSignal.timeout left on
@@ -191,7 +191,10 @@ const SETTLE = 60, VOL_TAU = 180, CHECKS = [600, 300, 120, 60];
 // Canonical model. scripts/sync-model.cjs embeds this exact source in Worker and page.
 // Frozen baseline: no fitted flow lean; all parameters recorded under VERSION.
 (() => {
-const VERSION = "brti-driftless-v3";
+const VERSION = "brti-driftless-v4";
+// KXBTC15M contract: sixty one-second readings strictly before its reference/close time.
+// The WebSocket final-minute aggregate is a different, close-inclusive statistic.
+const SETTLEMENT_CONVENTION = "[close-60s,close)";
 const EXECUTION_VERSION = "paper-delayed-depth-v2";
 const SETTLE = 60, VOL_TAU = 180;
 const tailCdf = z => 0.5 + z * (z*z+6) / (2*Math.pow(z*z+4,1.5));
@@ -205,20 +208,14 @@ function volsFrom(ticks, nowMs) {
   const s = est(120), l = est(900);
   return s && l ? {s, l} : null;
 }
-function projectFrom(ticks, nowMs, closeS, x, vols, aggregate = null) {
+function projectFrom(ticks, nowMs, closeS, x, vols) {
   const now = nowMs / 1000, perSec = new Map(ticks.map(([ms, v]) => [Math.floor(ms / 1000), v]));
   let known = 0, observed = 0, missing = 0; const ahead = [];
-  for (let sec = closeS - SETTLE + 1; sec <= closeS; sec++) {
+  for (let sec = closeS - SETTLE; sec < closeS; sec++) {
     if (sec <= now) { const v = perSec.get(sec); if (Number.isFinite(v)) { known += v; observed++; } else missing++; }
     else ahead.push(sec - now);
   }
-  // A delayed aggregate must never turn a 60-reading contract into a 59-reading contract.
-  const elapsed = SETTLE - ahead.length;
-  if (aggregate && aggregate.n === elapsed && aggregate.n >= 1 && aggregate.n <= 60 &&
-      aggregate.end > (closeS - 60) * 1000 && aggregate.end <= closeS * 1000 &&
-      nowMs - aggregate.end >= -1000 && nowMs - aggregate.end < 3000 && Number.isFinite(aggregate.v)) {
-    known = aggregate.v * aggregate.n; observed = aggregate.n; missing = 0;
-  }
+  // Do not substitute last_60s_windowed_average_15min: its start/close membership differs.
   if (missing) return {mean: null, sd: null, observed, missing, m: ahead.length};
   const m = ahead.length, vs = vols.s ** 2, vl = vols.l ** 2;
   let variance = 0, previous = 0;
@@ -226,10 +223,10 @@ function projectFrom(ticks, nowMs, closeS, x, vols, aggregate = null) {
   return {sum: known, reconstructed: 0, mean: (known + m * x) / SETTLE, sd: Math.sqrt(variance / SETTLE ** 2 + 0.09), observed, missing: 0, m, official: observed > 0};
 }
 
-function band(ticks, nowMs, close, x, vols, target, aggregate=null) {
+function band(ticks, nowMs, close, x, vols, target) {
  let lo=1, hi=0; const adverse=vols.s*Math.sqrt(10);
  for(const k of [.7,1,1.5]) for(const shift of [-adverse,0,adverse]) {
-  const pr=projectFrom(ticks,nowMs,close,x+shift,{s:vols.s*k,l:vols.l*k},aggregate);
+  const pr=projectFrom(ticks,nowMs,close,x+shift,{s:vols.s*k,l:vols.l*k});
   if(pr.mean==null)return null;
   const p=chance(pr.mean,pr.sd,target);lo=Math.min(lo,p);hi=Math.max(hi,p);
  }
@@ -267,14 +264,15 @@ function paperFill(intent,book,nowMs,cfg) {
  if(!filled)return empty("no quantity at limit after depth haircut");
  return {filled,cost:Math.round(cost*100)/100,feesCents:fees,levels,status:remaining?"paper-partial":"paper-filled",reason:remaining?"available depth below requested size":"filled at arrival book",filledAt:nowMs,latencyMs:nowMs-intent.at};
 }
-globalThis.BTC15Model=Object.freeze({VERSION,EXECUTION_VERSION,tailCdf,chance,volsFrom,projectFrom,band,feesCents,asks,paperFill});
+globalThis.BTC15Model=Object.freeze({VERSION,SETTLEMENT_CONVENTION,EXECUTION_VERSION,tailCdf,chance,volsFrom,projectFrom,band,feesCents,asks,paperFill});
 })();
 // END SHARED BTC15 MODEL
 // BEGIN SHARED BTC15 RESEARCH
 // Canonical research calculations; embedded in worker.js and imported by the offline evaluator.
 (() => {
-const VERSION = 'settlement-research-v1';
-const BIAS_VERSION = 'btc15-bias-v2';
+const VERSION = 'settlement-research-v2';
+const BIAS_VERSION = 'btc15-bias-v3';
+const LEGACY_SETTLEMENT_CONVENTION = '(close-60s,close]';
 const PRICE_BANDS = [0,10,30,50,70,90,100];
 const CHECKS = [600, 300, 120, 60, 30, 15, 5];
 const SETTINGS = Object.freeze({delayMs:1000, maxArrivalLateMs:3000, bookMaxAgeMs:1500,
@@ -282,6 +280,7 @@ const SETTINGS = Object.freeze({delayMs:1000, maxArrivalLateMs:3000, bookMaxAgeM
   feeVenue:'kalshi', feeAssumption:'general taker multiplier 1; whole-cent rounding per fill level',
   checkpointToleranceMs:5000, minTrainWindows:60, testWindows:20});
 const finite = v => typeof v === 'number' && Number.isFinite(v);
+const currentCohort = w => w.schema===VERSION&&w.model===globalThis.BTC15Model.VERSION;
 const depthWanted = now => {
   const left = (Math.floor(now / 900000) + 1) * 900 - now / 1000;
   return CHECKS.some(c => left <= c + 5 && left > c - 10);
@@ -320,7 +319,8 @@ function snapshot({at, close, target, targetAt, ticks, book, exchange, marketSta
     previousIndexSourceAt:previous?.[0]??null,requiredRemainingMean:required,
     spotAbove:boundary!=null&&last?last[1]>=boundary:null,
     projectedAbove:boundary!=null&&finite(projection?.mean)?projection.mean>=boundary:null};
-  return {bias, at, leftSeconds:close-at/1000, target, targetAt, marketStatus, exchange,
+  return {model:globalThis.BTC15Model.VERSION,settlementConvention:globalThis.BTC15Model.SETTLEMENT_CONVENTION,
+    bias, at, leftSeconds:close-at/1000, target, targetAt, marketStatus, exchange,
     index:{source:'cfbenchmarks_value',sourceAt:last?.[0]??null,receivedAt:last?.[2]??null,value:last?.[1]??null,ageMs,samples:input.length},
     vols, projection, p, p2, status:reason||'forecast', depth:depthSnapshot(book,at)};
 }
@@ -352,7 +352,7 @@ function simulate(check, variant, close, forcedSide=null) {
 function report(all) {
   // Each chronological fold chooses ONLY the probability variant on earlier, already resolved windows.
   // Checkpoints are separate experiments. Never sum them as one strategy or pick their winner here.
-  const valid=all.filter(w=>w.schema===VERSION&&w.model===globalThis.BTC15Model.VERSION);
+  const valid=all.filter(currentCohort);
   const recorded=[...new Map(valid.map(w=>[w.mk,w])).values()].sort((a,b)=>a.close-b.close);
   const resolved=w=>w.src==='kalshi'&&['yes','no'].includes(w.result)&&finite(w.resultObservedAt)&&w.resultObservedAt>=w.close*1000;
   const windows=recorded.filter(resolved);
@@ -399,7 +399,8 @@ function report(all) {
     s.bins=s.bins.map(b=>({from:b.from,to:b.to,n:b.n,meanProbability:b.n?b.p/b.n:null,observedRate:b.n?b.y/b.n:null}));
     delete s.equity;delete s.peak;
   }
-  return {schema:VERSION,model:globalThis.BTC15Model.VERSION,settings:SETTINGS,recordedWindows:recorded.length,settledWindows:windows.length,
+  return {schema:VERSION,model:globalThis.BTC15Model.VERSION,settlementConvention:globalThis.BTC15Model.SETTLEMENT_CONVENTION,
+    settings:SETTINGS,recordedWindows:recorded.length,settledWindows:windows.length,
     evaluatedWindows:evaluated.size,folds,scores,bias:biasReport(recorded),readyForLive:false,
     expectedWindows:recorded.length?Math.round((recorded.at(-1).close-recorded[0].close)/900)+1:0,
     unrecordedWindows:recorded.length?Math.max(0,Math.round((recorded.at(-1).close-recorded[0].close)/900)+1-recorded.length):0,
@@ -441,7 +442,7 @@ function biasReport(recorded) {
     }
   };
   for(const w of [...recorded].sort((a,b)=>a.close-b.close)){
-    if(seen.has(w.mk)||w.schema!==VERSION||w.model!==globalThis.BTC15Model.VERSION)continue;seen.add(w.mk);
+    if(seen.has(w.mk)||!currentCohort(w))continue;seen.add(w.mk);
     for(const c of CHECKS){
       const k=w.checks?.[c];if(!k)continue;
       if(k.bias?.version!==BIAS_VERSION){coverage.legacy++;continue;}
@@ -483,27 +484,51 @@ function biasReport(recorded) {
       'Repeated windows may be dependent. No confidence, significance or automatic promotion claim.',
       'Fee multiplier 1 and depth haircut are assumptions; missing data and rolling retention may bias results.']};
 }
-globalThis.BTC15Research=Object.freeze({VERSION,BIAS_VERSION,CHECKS,SETTINGS,depthWanted,depthSnapshot,snapshot,simulate,report,biasReport});
+globalThis.BTC15Research=Object.freeze({VERSION,BIAS_VERSION,LEGACY_SETTLEMENT_CONVENTION,CHECKS,SETTINGS,currentCohort,depthWanted,depthSnapshot,snapshot,simulate,report,biasReport});
 })();
 // END SHARED BTC15 RESEARCH
 const research = globalThis.BTC15Research;
 // BEGIN SHARED BTC15 SESSION
 // Forward-only timed paper experiment. No exchange order calls.
 (() => {
-const VERSION='paper-session-v1';
-const SETTINGS=Object.freeze({durationMs:3600000,cadenceMs:5000,delayMs:1000,maxDelayMs:4000,depthFraction:.5,quantity:1,minEdgeCents:3,exitEdgeCents:3,maxEntriesPerWindow:3,cooldownMs:30000,lossStopCents:300,model:'brti-driftless-v3',feeAssumption:'general Kalshi taker fee, rounded up per one-contract fill'});
+const VERSION='paper-session-v2';
+const SETTINGS=Object.freeze({durationMs:3600000,cadenceMs:5000,delayMs:1000,maxDelayMs:4000,depthFraction:.5,quantity:1,minEdgeCents:3,exitEdgeCents:3,maxEntriesPerWindow:3,cooldownMs:30000,lossStopCents:300,model:'brti-driftless-v4',settlementConvention:'[close-60s,close)',feeAssumption:'general Kalshi taker fee, rounded up per one-contract fill'});
 const M=()=>globalThis.BTC15Model,finite=Number.isFinite;
 function create(now,id){const startAt=(Math.floor(now/900000)+1)*900000+750;return {version:VERSION,id,settings:{...SETTINGS},createdAt:now,startAt,endAt:startAt+SETTINGS.durationMs-750,status:'scheduled',looks:[],attempts:[],trades:[],pending:null,nextLookAt:startAt,entries:{},lastEntryAt:null,stoppedAt:null};}
-function active(s,at){return !!s&&!s.stoppedAt&&at<s.endAt&&['scheduled','running'].includes(s.status);}
+// A saved experiment keeps its original cohort forever. Deployment may stop it,
+// but must never upgrade its settings or relabel observations with today's model.
+function compatibilityReason(s){
+ if(!s)return 'missing session';
+ if(s.version!==VERSION||s.settings?.model!==SETTINGS.model||s.settings?.settlementConvention!==SETTINGS.settlementConvention)
+  return 'incompatible session cohort: expected '+[VERSION,SETTINGS.model,SETTINGS.settlementConvention].join(' / ')+'; recorded '+[s.version??'unspecified',s.settings?.model??'unspecified',s.settings?.settlementConvention??'unspecified'].join(' / ');
+ if(M()?.VERSION!==SETTINGS.model||M()?.SETTLEMENT_CONVENTION!==SETTINGS.settlementConvention)return 'incompatible runtime model or settlement interval';
+ return null;
+}
+function compatible(s){return compatibilityReason(s)===null;}
+function attribution(s,q){return {sessionVersion:q?.sessionVersion??s.version??null,model:q?.model??q?.decision?.model??s.settings?.model??null,settlementConvention:q?.settlementConvention??q?.decision?.settlementConvention??s.settings?.settlementConvention??null};}
+function snapshotReason(k){return k?.model===SETTINGS.model&&k?.settlementConvention===SETTINGS.settlementConvention?null:'snapshot model or settlement interval mismatch';}
+function active(s,at){return !!s&&compatible(s)&&s.stoppedAt==null&&at<s.endAt&&['scheduled','running'].includes(s.status);}
 function position(s){return s.trades.find(t=>t.pnlCents==null);}
-function stop(s,at,reason='time limit'){s.stoppedAt=at;s.stopReason=reason;s.status=position(s)?'settling':'complete';if(s.pending){s.attempts.push({...s.pending,filled:0,arrivalAt:at,reason:'session stopped'});s.pending=null;}}
-function clock(s,at){if(!s.stoppedAt&&at>=s.endAt)stop(s,at);if(s.stoppedAt&&!position(s))s.status='complete';if(active(s,at)&&at>=s.startAt)s.status='running';}
-function valid(k){return M().VERSION===SETTINGS.model&&k?.status==='forecast'&&finite(k.p)&&k.p>=0&&k.p<=1&&k.depth?.valid&&k.marketStatus==='active'&&k.exchange?.exchange_active===true&&k.exchange?.trading_active===true;}
+function stop(s,at,reason='time limit',pendingReason='session stopped'){
+ if(s.stoppedAt==null){s.stoppedAt=at;s.stopReason=reason;}
+ s.status=position(s)?'settling':'complete';
+ if(s.pending){s.attempts.push({...s.pending,...attribution(s,s.pending),filled:0,arrivalAt:at,reason:pendingReason});s.pending=null;}
+}
+// Returns whether persistence is needed. Repeated loads and already-completed
+// historical reports do not append attempts, rewrite provenance or move timestamps.
+function reconcile(s,at){
+ const reason=compatibilityReason(s);
+ if(!s||!reason||(!s.pending&&(s.stoppedAt!=null||s.status==='complete')))return false;
+ stop(s,at,reason,reason);return true;
+}
+function clock(s,at){reconcile(s,at);if(s.stoppedAt==null&&at>=s.endAt)stop(s,at);if(s.stoppedAt!=null&&!position(s))s.status='complete';if(active(s,at)&&at>=s.startAt)s.status='running';}
+function valid(k){return k?.status==='forecast'&&finite(k.p)&&k.p>=0&&k.p<=1&&k.depth?.valid&&k.marketStatus==='active'&&k.exchange?.exchange_active===true&&k.exchange?.trading_active===true;}
 function bid(depth,side){return side==='Up'?depth.bidCents:100-depth.askCents;}
 function decide(s,k,mk,close){const at=k.at;clock(s,at);if(!active(s,at)||at<s.startAt||at<s.nextLookAt||s.pending)return;
  s.nextLookAt=at+SETTINGS.cadenceMs;
- const record={at,mk,close,p:k.p,index:k.index,projection:k.projection,depth:k.depth,marketStatus:k.marketStatus,exchange:k.exchange,reason:null};
+ const record={sessionVersion:s.version,model:k.model??null,settlementConvention:k.settlementConvention??null,at,mk,close,p:k.p,index:k.index,projection:k.projection,depth:k.depth,marketStatus:k.marketStatus,exchange:k.exchange,reason:null};
  const finish=reason=>{record.reason=reason;s.looks.push(record);};
+ const mismatch=snapshotReason(k);if(mismatch)return finish(mismatch);
  if(!valid(k))return finish(k.status!=='forecast'?k.status:k.depth?.reason||'market or exchange unavailable');
  if(at+SETTINGS.maxDelayMs>=Math.min(close*1000,s.endAt))return finish('too close to deadline');
  const held=position(s);record.action=held?'sell':'buy';let intent;
@@ -519,10 +544,12 @@ function decide(s,k,mk,close){const at=k.at;clock(s,at);if(!active(s,at)||at<s.s
   if(s.lastEntryAt!=null&&at-s.lastEntryAt<SETTINGS.cooldownMs)return finish('entry cooldown');
   intent.action='buy';s.entries[mk]=(s.entries[mk]||0)+1;s.lastEntryAt=at;
  }
- s.pending={...intent,at,readyAt:at+SETTINGS.delayMs,mk,close,p:k.p,decision:record};finish(intent.action+' intent');
+ s.pending={...intent,sessionVersion:s.version,model:k.model,settlementConvention:k.settlementConvention,at,readyAt:at+SETTINGS.delayMs,mk,close,p:k.p,decision:record};finish(intent.action+' intent');
 }
 function arrive(s,k){const at=k.at;clock(s,at);const q=s.pending;if(!q||at<q.readyAt)return;
- s.pending=null;const result={...q,arrivalAt:at,arrivalDepth:k.depth,arrivalExchange:k.exchange,arrivalMarketStatus:k.marketStatus,filled:0,reason:null};s.attempts.push(result);
+ s.pending=null;const result={...q,...attribution(s,q),arrivalModel:k.model??null,arrivalSettlementConvention:k.settlementConvention??null,arrivalAt:at,arrivalDepth:k.depth,arrivalExchange:k.exchange,arrivalMarketStatus:k.marketStatus,filled:0,reason:null};s.attempts.push(result);
+ if(q.sessionVersion!==s.version||q.model!==s.settings.model||q.settlementConvention!==s.settings.settlementConvention){result.reason='intent model or settlement interval mismatch';return;}
+ const mismatch=snapshotReason(k);if(mismatch){result.reason=mismatch;return;}
  if(!active(s,at)||at>=q.close*1000||at-q.at>SETTINGS.maxDelayMs){result.reason='arrival outside allowed time';return;}
  // Arrival requires a live market and book; never requires a new favourable prediction.
  if(!k.depth?.valid||k.marketStatus!=='active'||k.exchange?.exchange_active!==true||k.exchange?.trading_active!==true){result.reason=k.depth?.reason||'arrival market or exchange unavailable';return;}
@@ -530,14 +557,14 @@ function arrive(s,k){const at=k.at;clock(s,at);const q=s.pending;if(!q||at<q.rea
  const level=levels.find(l=>Math.floor(l.size*SETTINGS.depthFraction)>=1&&(q.action==='buy'?l.price<=q.limit+1e-9:l.price>=q.limit-1e-9));
  if(!level){result.reason='no depth at original limit after haircut';return;}
  const fee=M().feesCents(level.price,1,'kalshi');result.filled=1;result.priceCents=level.price;result.feesCents=fee;result.reason='simulated fill';
- if(q.action==='buy')s.trades.push({id:s.id+':'+s.trades.length,mk:q.mk,close:q.close,side:q.side,entryAt:at,entryCents:level.price,entryFeeCents:fee,pnlCents:null});
+ if(q.action==='buy')s.trades.push({...attribution(s,q),id:s.id+':'+s.trades.length,mk:q.mk,close:q.close,side:q.side,entryAt:at,entryCents:level.price,entryFeeCents:fee,pnlCents:null});
  else{const t=s.trades.find(t=>t.id===q.tradeId&&t.pnlCents==null);if(!t)throw Error('paper position missing');Object.assign(t,{exitAt:at,exitCents:level.price,exitFeeCents:fee,pnlCents:level.price-fee-t.entryCents-t.entryFeeCents,resolution:'early exit'});}
 }
 function settle(s,mk,result,at){if(!['yes','no'].includes(result))return;for(const t of s.trades.filter(t=>t.mk===mk&&t.pnlCents==null&&at>=t.close*1000)){const won=(t.side==='Up')===(result==='yes');Object.assign(t,{exitAt:at,exitCents:won?100:0,exitFeeCents:0,pnlCents:(won?100:0)-t.entryCents-t.entryFeeCents,resolution:'official settlement',officialResult:result});}clock(s,at);}
 function report(s){const closed=s.trades.filter(t=>t.pnlCents!=null).sort((a,b)=>a.exitAt-b.exitAt);let pnl=0,peak=0,drawdown=0;for(const t of closed){pnl+=t.pnlCents;peak=Math.max(peak,pnl);drawdown=Math.max(drawdown,peak-pnl);}const reasons={};for(const r of [...s.looks,...s.attempts.filter(a=>!a.filled)])reasons[r.reason]=(reasons[r.reason]||0)+1;
- return {looks:s.looks.length,eligible:s.looks.filter(l=>finite(l.edgeCents)).length,attempts:s.attempts.length+(s.pending?1:0),entryFills:s.trades.length,exitFills:closed.filter(t=>t.resolution==='early exit').length,wins:closed.filter(t=>t.pnlCents>0).length,losses:closed.filter(t=>t.pnlCents<0).length,open:s.trades.length-closed.length,feesCents:s.attempts.reduce((n,a)=>n+(a.feesCents||0),0),pnlCents:pnl,drawdownCents:drawdown,edgeAvailable:s.looks.some(l=>l.action==='buy'&&l.edgeCents>=SETTINGS.minEdgeCents),reasons,unrealizedExcluded:true};}
-function due(s,now){if(!s)return Infinity;if(!active(s,now))return !s.stoppedAt?now+100:Infinity;return Math.max(now+100,Math.min(s.endAt,s.pending?.readyAt??Infinity,s.nextLookAt));}
-globalThis.BTC15Session={VERSION,SETTINGS,create,active,clock,stop,decide,arrive,settle,report,due};
+ return {version:s.version,model:s.settings?.model??null,settlementConvention:s.settings?.settlementConvention??null,compatible:compatible(s),compatibilityReason:compatibilityReason(s),looks:s.looks.length,eligible:s.looks.filter(l=>finite(l.edgeCents)).length,attempts:s.attempts.length+(s.pending?1:0),entryFills:s.trades.length,exitFills:closed.filter(t=>t.resolution==='early exit').length,wins:closed.filter(t=>t.pnlCents>0).length,losses:closed.filter(t=>t.pnlCents<0).length,open:s.trades.length-closed.length,feesCents:s.attempts.reduce((n,a)=>n+(a.feesCents||0),0),pnlCents:pnl,drawdownCents:drawdown,edgeAvailable:s.looks.some(l=>l.action==='buy'&&l.edgeCents>=SETTINGS.minEdgeCents),reasons,unrealizedExcluded:true};}
+function due(s,now){if(!s)return Infinity;if(!active(s,now))return s.stoppedAt==null?now+100:Infinity;return Math.max(now+100,Math.min(s.endAt,s.pending?.readyAt??Infinity,s.nextLookAt));}
+globalThis.BTC15Session={VERSION,SETTINGS,create,compatible,reconcile,active,clock,stop,decide,arrive,settle,report,due};
 })();
 // END SHARED BTC15 SESSION
 const paperSession = globalThis.BTC15Session;
@@ -631,7 +658,7 @@ export class KalshiFeed {
     this.idleTimer = null; this.retryTimer = null; this.windowTimer = null;
     this.counts = {};
     this.ticks = [];                              // [[ms, value]] from the stream, last 20 minutes, for the agent
-    this.settleAvg = null;                        // Kalshi's accumulating final-minute average, when streamed
+    this.settleAvg = null;                        // Stream final-minute aggregate only; not contract settlement
     this.lastTicker = {};                         // ticker -> {bid, ask, at}
     this.agentBusy = false;
     this.indexSeconds = new Map(); // Only the 1 Hz BRTI channel can supply settlement readings.
@@ -685,9 +712,7 @@ export class KalshiFeed {
       for (const [k, [lo, hi]] of Object.entries(ranges)) if (!Number.isFinite(cfg[k]) || cfg[k] < lo || cfg[k] > hi || (!["minEdge","paperDepthFraction","paperExchangeFeeCents"].includes(k) && !Number.isInteger(cfg[k]))) return new Response("invalid " + k, {status: 400, headers: CORS});
       cfg.perWindowCents = Math.min(cfg.perWindowCents, 5000);                 // a hard ceiling of $50 a window, whatever is asked
       await this.state.storage.put("trade.cfg", cfg);
-      const pending=await this.state.storage.list({prefix:"t:"});
-        const due=[...pending.values()].filter(v=>v.pendingPaper).map(v=>Math.max(Date.now()+100,v.pendingPaper.readyAt));
-        await this.state.storage.setAlarm(Math.min(this.nextEvent(Date.now(), cfg.mode === "paper", cfg),...due));
+      await this.scheduleAlarm();
       if (cfg.mode !== "off") this.ensureUpstream();
       return new Response(JSON.stringify(cfg), {headers: {...CORS, "Content-Type": "application/json"}});
     }
@@ -762,11 +787,11 @@ export class KalshiFeed {
     const reply=(d,status=200)=>new Response(JSON.stringify(d),{status,headers:{...CORS,'Content-Type':'application/json','Cache-Control':'no-store'}});
     if(!this.env.FEED_TOKEN||url.searchParams.get('token')!==this.env.FEED_TOKEN)return reply({error:'Save the configured stream token to use timed paper sessions.'},403);
     let s=await this.loadSession();
-    if(url.pathname==='/paper-session/status'&&request.method==='GET')return reply({session:s?{...s,looks:undefined,attempts:undefined}:null,report:s?paperSession.report(s):null,now:Date.now()});
+    if(url.pathname==='/paper-session/status'&&request.method==='GET')return reply({session:s?{...s,looks:undefined,attempts:undefined}:null,report:s?paperSession.report(s):null,error:this.sessionError??null,now:Date.now()});
     if(url.pathname==='/paper-session/export'&&request.method==='GET')return reply({session:s||null,report:s?paperSession.report(s):null,now:Date.now()});
     if(request.method!=='POST')return reply({error:'POST required'},405);
     if(url.pathname==='/paper-session/stop'){
-      if(s){paperSession.stop(s,Date.now(),'manual stop');await this.saveSession(s);}
+      if(s){paperSession.stop(s,Date.now(),'manual stop');if(!await this.saveSession(s))return reply({error:'Session changed while stopping; refresh status and retry.'},409);}
       return reply({session:s});
     }
     if(url.pathname!=='/paper-session/start')return reply({error:'not found'},404);
@@ -774,18 +799,35 @@ export class KalshiFeed {
     const cfg=await this.tradeConfig(),old=[...(await this.state.storage.list({prefix:'t:'})).values()];
     // Re-read after awaited storage: simultaneous start requests must not overwrite a session.
     s=await this.loadSession();
+    if(s&&paperSession.reconcile(s,Date.now())&&!await this.saveSession(s))return reply({error:'Session changed during version transition; refresh status and retry.'},409);
     if(cfg.mode!=='off'||old.some(w=>w.pendingPaper||(!w.settled&&w.trades?.some(t=>t.filled>0))))return reply({error:'Turn the legacy agent off and let its open paper positions settle first.'},409);
     if(s&&(paperSession.active(s,Date.now())||s.trades.some(t=>t.pnlCents==null)))return reply({error:'A session is already scheduled, running or awaiting settlement.'},409);
     if(s)await this.state.storage.put('session.previous',await this.state.storage.get('session.current'));
     s=paperSession.create(Date.now(),crypto.randomUUID());
     await this.saveSession(s);
     this.agentActive=true;this.ensureUpstream();if(this.up)this.subscribeTickers();
-    await this.state.storage.setAlarm(Date.now()+1000);
+    await this.scheduleAlarm(Date.now()+1000);
     return reply({session:s});
+  }
+  startSessionTask() {
+    // waitUntil keeps I/O alive without holding the alarm-handler lock. Single flight
+    // plus saveSession's revision check protects stops/restarts across awaited reads.
+    if(this.sessionTask)return;
+    const task=this.sessionTick().catch(e=>{
+      this.sessionError={at:Date.now(),error:String(e.message||e).slice(0,200)};
+    }).finally(async()=>{
+      this.sessionTask=null;
+      try { await this.scheduleAlarm(); }
+      catch(e) { this.sessionError={at:Date.now(),error:String(e.message||e).slice(0,200)}; }
+    });
+    this.sessionTask=task;
+    this.state.waitUntil(task);
   }
   async sessionTick() {
     let s=await this.loadSession();if(!s)return;
     const id=s.id;paperSession.clock(s,Date.now());
+    // Persist a version stop/cancellation before any slow outcome reads.
+    if(!await this.saveSession(s))return;
     // Fetch only official outcomes. A manual stop may interleave with network I/O.
     const outcomes=[];
     for(const t of s.trades.filter(t=>t.pnlCents==null&&Date.now()>=t.close*1000)){
@@ -840,13 +882,24 @@ export class KalshiFeed {
   async researchCapture() {
     if(!this.env.KALSHI_KEY_ID||!this.env.KALSHI_PRIVATE_KEY)return;
     const started=Date.now(),close=(Math.floor(started/900000)+1)*900,mk=marketTicker(close),key='r:'+close;
-    const row=(await this.state.storage.get(key))||{schema:research.VERSION,model:MODEL_VERSION,mk,close,settings:research.SETTINGS,checks:{},src:null,result:null};
+    const row=(await this.state.storage.get(key))||{schema:research.VERSION,model:MODEL_VERSION,
+      settlementConvention:globalThis.BTC15Model.SETTLEMENT_CONVENTION,mk,close,settings:research.SETTINGS,checks:{},src:null,result:null};
+    // An upgrade mid-window must not mix new forecasts into an older cohort or replace its raw inputs.
+    if(!research.currentCohort(row))return;
     let changed=false;
     for(const c of research.CHECKS)if(!row.checks[c]&&started-(close-c)*1000>research.SETTINGS.checkpointToleranceMs){
       row.checks[c]={at:started,status:'checkpoint missed',p:null,p2:null};changed=true;
     }
     const c=research.CHECKS.find(c=>!row.checks[c]&&started>=(close-c)*1000+750);
     if(c!=null){
+      const inputKey=`ri:${close}:${c}`;
+      if(await this.state.storage.get(inputKey)){
+        // A previous capture may have saved raw input before an interrupted summary write.
+        // Keep that original buffer; a later book/target cannot reconstruct the lost forecast.
+        row.checks[c]={at:started,status:'checkpoint skipped: original raw input already exists',p:null,p2:null};
+        await this.state.storage.put(key,row);
+        return;
+      }
       let market=null,exchange=null,error=null;
       try{
         market=(await signedGet(this.env,'/trade-api/v2/markets/'+mk))?.market;
@@ -858,7 +911,8 @@ export class KalshiFeed {
       const k=research.snapshot({at,close,target,targetAt:at,ticks:input,book:this.books[mk],exchange,marketStatus:market?.status??null});
       if(error||at-(close-c)*1000>research.SETTINGS.checkpointToleranceMs){k.status=error||'checkpoint missed during market read';k.p=null;k.p2=null;}
       row.checks[c]=k;row.target=target;row.rules={primary:market?.rules_primary??null,secondary:market?.rules_secondary??null,closeTime:market?.close_time??null};
-      await this.state.storage.put(`ri:${close}:${c}`,{schema:research.VERSION,model:MODEL_VERSION,mk,close,check:c,at,
+      await this.state.storage.put(inputKey,{schema:research.VERSION,model:MODEL_VERSION,
+        settlementConvention:globalThis.BTC15Model.SETTLEMENT_CONVENTION,mk,close,check:c,at,
         columns:['source_ms','value_usd','first_received_ms'],source:'cfbenchmarks_value',ticks:input,target,targetAt:at});
       const pending=(await this.state.storage.get('research.pending'))||[];
       if(k.status==='forecast')pending.push({key,check:c,readyAt:at+research.SETTINGS.delayMs});
@@ -872,7 +926,8 @@ export class KalshiFeed {
     for(const item of pending){
       if(Date.now()<item.readyAt){keep.push(item);continue;}
       const row=await this.state.storage.get(item.key),k=row?.checks?.[item.check];
-      if(!k||k.arrival)continue;
+      // Leave legacy checkpoints untouched; rollout can lose a pending arrival, never relabel it.
+      if(!k||k.arrival||!research.currentCohort(row))continue;
       const at=Date.now(),depth=research.depthSnapshot(this.books[row.mk],at);
       k.arrival={at,depth,exchange:k.exchange,exchangeObservedAt:k.at,exchangeAgeMs:at-k.at};
       // Reuses checkpoint status only for this bounded 1–4s simulation. No exchange order.
@@ -884,10 +939,19 @@ export class KalshiFeed {
     const now=Date.now(),rows=[...(await this.state.storage.list({prefix:'r:'})).values()].sort((a,b)=>a.close-b.close);
     for(const row of rows.filter(w=>w.close*1000<now-60000&&w.src!=='kalshi').slice(-4)){
       if(!row.closingCapture){
-        const ticks=[...this.researchTicks.values()].filter(t=>Math.floor(t[0]/1000)>row.close-60&&Math.floor(t[0]/1000)<=row.close).sort((a,b)=>a[0]-b[0]);
+        const inputKey=`ri:${row.close}:0`,saved=await this.state.storage.get(inputKey);
+        // Existing raw buffers may outlive an interrupted summary write. Reuse, never overwrite them.
+        const settlementConvention=saved?.settlementConvention??(research.currentCohort(saved||row)?
+          globalThis.BTC15Model.SETTLEMENT_CONVENTION:research.LEGACY_SETTLEMENT_CONVENTION);
+        const ticks=(saved?.ticks||[...this.researchTicks.values()]).filter(t=>{
+          const sec=Math.floor(t[0]/1000);
+          return settlementConvention===globalThis.BTC15Model.SETTLEMENT_CONVENTION?
+            sec>=row.close-60&&sec<row.close:sec>row.close-60&&sec<=row.close;
+        }).sort((a,b)=>a[0]-b[0]);
         const seconds=new Map(ticks.map(t=>[Math.floor(t[0]/1000),t[1]]));
-        row.closingCapture={at:now,samples:seconds.size,complete:seconds.size===60,localAverage:seconds.size===60?[...seconds.values()].reduce((a,b)=>a+b,0)/60:null};
-        await this.state.storage.put(`ri:${row.close}:0`,{schema:research.VERSION,mk:row.mk,close:row.close,check:0,at:now,source:'cfbenchmarks_value',columns:['source_ms','value_usd','first_received_ms'],ticks});
+        row.closingCapture={at:saved?.at??now,settlementConvention,samples:seconds.size,complete:seconds.size===60,localAverage:seconds.size===60?[...seconds.values()].reduce((a,b)=>a+b,0)/60:null};
+        if(!saved)await this.state.storage.put(inputKey,{schema:row.schema,model:row.model,settlementConvention,
+          mk:row.mk,close:row.close,check:0,at:now,source:'cfbenchmarks_value',columns:['source_ms','value_usd','first_received_ms'],ticks});
         await this.state.storage.put('r:'+row.close,row);
       }
       let m;
@@ -895,9 +959,14 @@ export class KalshiFeed {
       if(existing?.src==='kalshi')m={result:existing.result,expiration_value:existing.officialCloseAvg};
       else m=(await signedGet(this.env,'/trade-api/v2/markets/'+row.mk))?.market;
       if(m&&['yes','no'].includes(m.result)){
-        row.result=m.result;row.src='kalshi';row.resultObservedAt=Date.now();
-        row.officialCloseAvg=m.expiration_value!=null&&Number.isFinite(Number(m.expiration_value))?Number(m.expiration_value):null;
-        await this.state.storage.put('r:'+row.close,row);
+        // A delayed arrival may have landed while the official outcome was fetched.
+        // Attach labels to the latest record without replacing that observation.
+        await this.state.storage.transaction(async tx=>{
+          const latest=await tx.get('r:'+row.close);if(!latest||latest.src==='kalshi')return;
+          latest.result=m.result;latest.src='kalshi';latest.resultObservedAt=Date.now();
+          latest.officialCloseAvg=m.expiration_value!=null&&Number.isFinite(Number(m.expiration_value))?Number(m.expiration_value):null;
+          await tx.put('r:'+row.close,latest);
+        });
       }
     }
     if(now-(this.researchPrunedAt||0)>3600000){
@@ -1086,7 +1155,7 @@ export class KalshiFeed {
     if (!(this.env.KALSHI_KEY_ID && this.env.KALSHI_PRIVATE_KEY)) return;
     const alarm = await this.state.storage.getAlarm(), now = Date.now();
     if (!this.alarmBusy && (alarm == null || alarm < now - 60000 || alarm > now + 60000))
-      await this.state.storage.setAlarm(now + 1000);
+      await this.scheduleAlarm(now + 1000);
     if (this.up && now - Math.max(this.upMsgAt, this.upSince) > 20000) this.closeUpstream("stale stream");
     const session=await this.state.storage.get('session.current');
     this.agentActive = (await this.tradeConfig()).mode !== "off" || paperSession.active(session,now);
@@ -1104,52 +1173,80 @@ export class KalshiFeed {
     }
     return Math.min(now + 30, ...times.filter(t => t > now + 0.5)) * 1000;
   }
+  async updateCollector(update) {
+    await this.state.storage.transaction(async tx=>{
+      const log=(await tx.get('collector'))||{runs:0,errors:[]};
+      update(log);await tx.put('collector',log);
+    });
+  }
+  async collectorError(e) {
+    await this.updateCollector(log=>{
+      log.errors=(log.errors||[]).concat([{at:Date.now(),error:String(e.message||e).slice(0,200)}]).slice(-10);
+    });
+  }
+  async scheduleAlarm(earlier=Infinity) {
+    // Background session/maintenance completions can race the fast alarm. Compute
+    // and shorten atomically; never push an earlier research or arrival wake back.
+    await this.state.storage.transaction(async tx=>{
+      const now=Date.now(),cfg=Object.assign({mode:'off',firstSeconds:300,lastSeconds:15},await tx.get('trade.cfg'));
+      const pending=await tx.list({prefix:'t:'});
+      const due=this.collectorTask?[]:[...pending.values()].filter(v=>v.pendingPaper).map(v=>Math.max(now+100,v.pendingPaper.readyAt));
+      const researchDue=((await tx.get('research.pending'))||[]).map(p=>Math.max(now+100,p.readyAt));
+      const session=await tx.get('session.current');
+      const sessionDue=this.sessionTask?Infinity:paperSession.due(session,now);
+      const next=Math.min(earlier,this.nextEvent(now,cfg.mode==='paper',cfg),...due,...researchDue,sessionDue);
+      const existing=await tx.getAlarm();
+      // An overdue wake may be queued for delivery. Re-arm promptly rather than
+      // postponing it to a distant event when a background request completes.
+      const wake=existing!=null&&existing<=now?Math.min(next,now+100):next;
+      if(existing==null||existing<=now||wake<existing)await tx.setAlarm(wake);
+    });
+  }
+  startCollectorTask() {
+    if(this.collectorTask)return;
+    const task=this.collectorMaintenance().catch(e=>this.collectorError(e)).finally(async()=>{
+      this.collectorTask=null;
+      try { await this.scheduleAlarm(); } catch(e) { await this.collectorError(e); }
+    });
+    this.collectorTask=task;
+    this.state.waitUntil(task);
+  }
+  async collectorMaintenance() {
+    await this.ensureAlarm();
+    const cfg=await this.tradeConfig();
+    await this.processPaper(Date.now(),cfg);
+    const at=Date.now(),now=at/1000,close=(Math.floor(now/WINDOW)+1)*WINDOW,left=close-now;
+    const check=CHECKS.find(k=>left<=k&&k-left<20);
+    if(check)await this.checkpoint(marketTicker(close),close,check,at);
+    const rows=await this.state.storage.list({prefix:'w:'});
+    for(const w of [...rows.values()].filter(w=>w.close<now-60&&w.src!=='kalshi').slice(-4))await this.settle(w.mk,w.close);
+    await this.researchSettle();
+    const trades=await this.state.storage.list({prefix:'t:'});
+    for(const w of [...trades.values()].filter(w=>w.close<now-60&&!w.settled&&w.trades?.length).slice(-8))await this.settleTrades(w.mk,w.close);
+    if(cfg.mode==='paper')await this.agentTick(Date.now());
+    if(rows.size>5000)for(const [key]of [...rows].slice(0,rows.size-5000))await this.state.storage.delete(key);
+    await this.updateCollector(log=>{
+      log.lastOk=Date.now();
+      log.indexAgeMs=this.ticks.length?Date.now()-this.ticks[this.ticks.length-1][0]:null;
+    });
+  }
   async alarm() {
-    if (this.alarmBusy) return;
-    this.alarmBusy = true;
-    const nowMs = Date.now(), now = nowMs / 1000;
-    const log = (await this.state.storage.get("collector")) || {runs: 0, errors: []};
-    log.runs++; log.lastRun = nowMs;
-    // Schedule before network work and again in finally: errors must not stop collection.
-    await this.state.storage.setAlarm(nowMs + 30000);
+    if(this.alarmBusy)return;
+    this.alarmBusy=true;
     try {
-      await this.state.storage.put("index.seconds", [...this.indexSeconds].slice(-1200));
-      await this.ensureAlarm();
-      await this.sessionTick();
+      await this.updateCollector(log=>{log.runs++;log.lastRun=Date.now();});
+      // Repair wake before network work. Expensive unrelated I/O runs in separate
+      // single-flight tasks so a newly queued +1s research arrival can fire on time.
+      await this.scheduleAlarm();
+      await this.state.storage.put('index.seconds',[...this.indexSeconds].slice(-1200));
       await this.researchArrivals();
-      const close = (Math.floor(now / WINDOW) + 1) * WINDOW, left = close - now;
-      const check = CHECKS.find(k => left <= k && k - left < 20);
-      if (check) await this.checkpoint(marketTicker(close), close, check, nowMs);
       await this.researchCapture();
-      // Retry old unresolved windows as well as the most recent close.
-      const rows = await this.state.storage.list({prefix: "w:"});
-      const pending = [...rows.values()].filter(w => w.close < now - 60 && w.src !== "kalshi").slice(-4);
-      for (const w of pending) await this.settle(w.mk, w.close);
-      await this.researchSettle();
-      const prevClose = close - WINDOW;
-      const trades=await this.state.storage.list({prefix:"t:"});
-      for(const tradeWindow of [...trades.values()].filter(v=>v.close<now-60&&!v.settled&&v.trades?.length).slice(-8)) await this.settleTrades(tradeWindow.mk,tradeWindow.close);
-      log.lastOk = nowMs;
-      log.indexAgeMs = this.ticks.length ? nowMs - this.ticks[this.ticks.length - 1][0] : null;
-      const cfg = await this.tradeConfig();
-      await this.processPaper(Date.now(),cfg);
-      if (cfg.mode === "paper") await this.agentTick(Date.now());
-      // Persist bounded read-only history so a cold object can warm up without a phone.
-
-      if (rows.size > 5000) for (const [key] of [...rows].slice(0, rows.size - 5000)) await this.state.storage.delete(key);
-    } catch (e) {
-      log.errors = (log.errors || []).concat([{at: Date.now(), error: String(e.message || e).slice(0, 200)}]).slice(-10);
-    } finally {
-      try {
-        await this.state.storage.put("collector", log);
-      } finally {
-        const cfg = await this.tradeConfig().catch(() => ({mode: "off"}));
-        const pending=await this.state.storage.list({prefix:"t:"});
-        const due=[...pending.values()].filter(v=>v.pendingPaper).map(v=>Math.max(Date.now()+100,v.pendingPaper.readyAt));
-        const researchDue=((await this.state.storage.get('research.pending'))||[]).map(p=>Math.max(Date.now()+100,p.readyAt));
-        await this.state.storage.setAlarm(Math.min(this.nextEvent(Date.now(), cfg.mode === "paper", cfg),...due,...researchDue,paperSession.due(await this.state.storage.get('session.current'),Date.now())));
-        this.alarmBusy = false;
-      }
+      this.startSessionTask();
+      this.startCollectorTask();
+    } catch(e) { await this.collectorError(e); }
+    finally {
+      try { await this.scheduleAlarm(); }
+      finally { this.alarmBusy=false; }
     }
   }
   async checkpoint(mk, close, check, nowMs) {
@@ -1158,9 +1255,8 @@ export class KalshiFeed {
     // Snapshot the live stream at the checkpoint before awaiting REST. Later ticks must
     // not leak into a forecast recorded for an earlier time.
     const liveTicks = this.ticks.filter(t => t[0] <= nowMs), seconds = [...this.indexSeconds].filter(t => t[0] <= nowMs);
-    const aggregate = this.settleAvg && {...this.settleAvg};
     const book=this.books[mk],tick=this.lastTicker[mk];
-    const offers=book&&nowMs-book.at<1500?{ask:globalThis.BTC15Model.asks(book,"Up")[0]?.price/100,bid:1-globalThis.BTC15Model.asks(book,"Down")[0]?.price/100,at:book.at}:tick&&nowMs-tick.at<5000?{...tick}:null;
+    const offers=book&&nowMs-book.at>=0&&nowMs-book.at<1500?{ask:globalThis.BTC15Model.asks(book,"Up")[0]?.price/100,bid:1-globalThis.BTC15Model.asks(book,"Down")[0]?.price/100,at:book.at}:tick&&nowMs-tick.at>=0&&nowMs-tick.at<5000?{...tick}:null;
     let ticks = liveTicks;
     ticks = seconds; // Immutable one-Hz input snapshot; no retrospective forecast reconstruction.
     const mkt = await signedGet(this.env, "/trade-api/v2/markets/" + mk);
@@ -1170,7 +1266,7 @@ export class KalshiFeed {
     const vols = volsFrom(ticks, nowMs), x = liveTicks.length ? liveTicks[liveTicks.length - 1][1] : null;
     const ageMs = liveTicks.length ? nowMs - liveTicks[liveTicks.length - 1][0] : null;
     const entry = {ask, bid, marketAt:offers?.at??null, x, at: nowMs, ticks: ticks.length, ageMs, model: MODEL_VERSION};
-    const pr = vols && x != null ? projectFrom(seconds, nowMs, close, x, vols, aggregate) : null;
+    const pr = vols && x != null ? projectFrom(seconds, nowMs, close, x, vols) : null;
     if (vols && x != null && w.tgt != null && ageMs >= 0 && ageMs < 3000 && pr.mean != null) {
       entry.p = +tailCdf((pr.mean - (w.tgt - 0.005)) / pr.sd).toFixed(3);
       entry.p2 = +tailCdf((pr.mean - (w.tgt - 0.005)) / (pr.sd / Math.SQRT2)).toFixed(3);
@@ -1235,11 +1331,11 @@ export class KalshiFeed {
       if (!tgt) { const d = await signedGet(this.env, "/trade-api/v2/markets/" + mk); tgt = d && d.market && +d.market.floor_strike > 0 ? +d.market.floor_strike : null; if (!tgt) return; w.tgt = tgt; }
       const vols = volsFrom([...this.indexSeconds], nowMs); if (!vols) return;
       const x = last[1];
-      const projectWith = (xx, vv) => projectFrom([...this.indexSeconds], nowMs, close, xx, vv, this.settleAvg);
+      const projectWith = (xx, vv) => projectFrom([...this.indexSeconds], nowMs, close, xx, vv);
       const base = projectWith(x, vols);
       if (base.mean == null) return;
       const p = tailFromBand(base.mean, base.sd, tgt);
-      const {lo,hi}=globalThis.BTC15Model.band([...this.indexSeconds],nowMs,close,x,vols,tgt,this.settleAvg);
+      const {lo,hi}=globalThis.BTC15Model.band([...this.indexSeconds],nowMs,close,x,vols,tgt);
       const b0=this.books[mk], b=b0 && nowMs-b0.at < cfg.paperBookMaxAgeMs ? b0:null;
       const first=side=>globalThis.BTC15Model.asks(b,side)[0]||null;
       const offer={Up:first("Up"),Down:first("Down")}; // Real depth required; ticker size is not liquidity.
@@ -1270,7 +1366,7 @@ export class KalshiFeed {
       trade.feeVenue=cfg.paperVenue;trade.feeAssumption=cfg.paperVenue==="kalshi"?"general taker, whole-cent conservative rounding":"Robinhood cost scenario on Kalshi depth";
       w.pendingPaper={...trade,close,readyAt:nowMs+cfg.paperDelayMs,bookAt:b.at,cfg:{...cfg}};
       await this.state.storage.put(key,w);
-      await this.state.storage.setAlarm(Math.min(w.pendingPaper.readyAt,Date.now()+1000));
+      await this.scheduleAlarm(Math.min(w.pendingPaper.readyAt,Date.now()+1000));
       return;
     } catch (e) {
       log.errors = (log.errors || []).concat([{at: nowMs, error: String(e.message || e).slice(0, 200)}]).slice(-20);
