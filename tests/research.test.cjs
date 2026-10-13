@@ -11,8 +11,9 @@ function harness(){
  vm.runInContext(source+'\nglobalThis.api={KalshiFeed,entry,research,marketTicker};',context);
  const data=new Map();let alarm=null;
  const storage={get:async k=>structuredClone(data.get(k)),put:async(k,v)=>data.set(k,structuredClone(v)),list:async({prefix})=>new Map([...data].filter(([k])=>k.startsWith(prefix)).map(([k,v])=>[k,structuredClone(v)])),delete:async k=>data.delete(k),getAlarm:async()=>alarm,setAlarm:async a=>{alarm=a;}};
- const obj=new context.api.KalshiFeed({storage},{KALSHI_KEY_ID:'fixture',KALSHI_PRIVATE_KEY:'fixture'});
- return {context,obj,data,api:context.api,r:context.api.research,now:()=>now,setTime:v=>now=v,alarm:()=>alarm};
+ storage.transaction=async fn=>fn(storage);
+ const tasks=[];const obj=new context.api.KalshiFeed({storage,waitUntil:task=>tasks.push(task)},{KALSHI_KEY_ID:'fixture',KALSHI_PRIVATE_KEY:'fixture'});
+ return {context,obj,data,tasks,api:context.api,r:context.api.research,now:()=>now,setTime:v=>now=v,alarm:()=>alarm};
 }
 const book=at=>({at,sourceAt:at-20,sourceKind:'ts_ms',yes:new Map([[.4,10]]),no:new Map([[.5,10]])});
 const ticks=(from,to)=>Array.from({length:to-from+1},(_,i)=>[(from+i)*1000,100+Math.sin(i), (from+i)*1000+10]);
@@ -71,7 +72,7 @@ test('arrival results cannot alter forecast scores or variant selection',()=>{
  const b=h.r.report(rows);assert.equal(b.scores[60].filled,0);assert.equal(b.scores[60].brier,a.scores[60].brier);assert.deepEqual(b.folds,a.folds);
 });
 test('research captures are durable and immutable, with pending delayed arrival separate from paper',async()=>{
- const h=harness(),close=1800000900,at=(close-60)*1000+20;h.setTime(at);
+ const h=harness(),close=1800000900,at=(close-60)*1000+750;h.setTime(at);
  h.obj.researchTicks=new Map(ticks(close-1000,close-60).map(t=>[t[0],t]));h.obj.books[h.api.marketTicker(close)]=book(at);
  vm.runInContext('signedGet=async(env,path)=>path.includes("/markets/")?{market:{floor_strike:100,status:"active"}}:{exchange_active:true,trading_active:true}',h.context);
  await h.obj.researchCapture();const row=h.data.get('r:'+close);assert.equal(row.checks[60].status,'forecast');assert.ok(h.data.has(`ri:${close}:60`));
@@ -129,7 +130,7 @@ test('research reports isolate old schema, model and bias cohorts without rewrit
  assert.equal(report.settlementConvention,'[close-60s,close)');assert.deepEqual(rows,original);
 });
 test('an orphan checkpoint raw buffer is preserved without reconstructing a forecast or blocking later checkpoints',async()=>{
- const h=harness(),close=1800000900,key='r:'+close,at=(close-60)*1000+20;h.setTime(at);
+ const h=harness(),close=1800000900,key='r:'+close,at=(close-60)*1000+750;h.setTime(at);
  const original={schema:'settlement-research-v1',model:'brti-driftless-v3',mk:h.api.marketTicker(close),close,
   check:60,at,ticks:ticks(close-120,close-60),target:100,targetAt:at};
  h.data.set(`ri:${close}:60`,structuredClone(original));
@@ -138,7 +139,7 @@ test('an orphan checkpoint raw buffer is preserved without reconstructing a fore
  assert.deepEqual(h.data.get(`ri:${close}:60`),original);assert.equal(h.data.get(key).checks[60].p,null);
  assert.match(h.data.get(key).checks[60].status,/original raw input already exists/);
  assert.equal(h.data.has('research.pending'),false);
- const later=(close-30)*1000+20;h.setTime(later);
+ const later=(close-30)*1000+750;h.setTime(later);
  h.obj.researchTicks=new Map(ticks(close-1000,close-30).map(t=>[t[0],t]));h.obj.books[original.mk]=book(later);
  vm.runInContext('signedGet=async(env,path)=>path.includes("/markets/")?{market:{floor_strike:101,status:"active"}}:{exchange_active:true,trading_active:true}',h.context);
  await h.obj.researchCapture();
@@ -264,4 +265,142 @@ test('fixed-point deltas remove canceled levels without leaving crossed phantom 
  assert.equal(h.obj.books.TEST.yes.has(.9),false);assert.equal(h.r.depthSnapshot(h.obj.books.TEST,at).valid,true);
  const fractional={...book(at),no:new Map([[.9,1e-12],[.5,.75]])};
  const asks=h.context.BTC15Model.asks(fractional,'Up');assert.equal(asks.length,1);assert.equal(asks[0].size,.75);
+});
+test('timed session routes require token, reject overlapping runs and keep legacy agent separate',async()=>{
+ const h=harness();h.obj.ensureUpstream=async()=>{};
+ const req=(p,method='POST')=>new Request('https://test/paper-session/'+p+'?token=unit-token',{method});
+ assert.equal((await h.obj.fetch(req('start'))).status,403);h.obj.env.FEED_TOKEN='unit-token';
+ assert.equal((await h.obj.fetch(req('start'))).status,200);
+ const s=h.data.get('session.current');assert.equal(s.status,'scheduled');assert.ok(h.alarm());
+ assert.equal((await h.obj.fetch(req('start'))).status,409);
+ const legacy=await h.obj.fetch(new Request('https://test/trade/config',{method:'POST',body:JSON.stringify({mode:'paper'})}));assert.equal(legacy.status,409);
+ assert.equal((await h.obj.fetch(req('stop'))).status,200);assert.equal(h.data.get('session.current').status,'complete');
+ assert.equal((await h.obj.fetch(req('start'))).status,200);assert.equal(h.data.get('session.previous').id,s.id);
+});
+test('manual stop during market read cannot be undone by the pending session tick',async()=>{
+ const h=harness();h.obj.env.FEED_TOKEN='unit-token';const S=h.context.BTC15Session,s=S.create(h.now(),'race-test');h.setTime(s.startAt);
+ h.data.set('session.current',s);
+ h.context.stopDuringRead=async()=>h.obj.fetch(new Request('https://test/paper-session/stop?token=unit-token',{method:'POST'}));
+ vm.runInContext('signedGet=async(env,path)=>{await stopDuringRead();return path.includes("/markets/")?{market:{floor_strike:100,status:"active"}}:{exchange_active:true,trading_active:true};}',h.context);
+ await h.obj.sessionTick();const final=h.data.get('session.current');assert.equal(final.status,'complete');assert.equal(final.pending,null);assert.equal(final.looks.length,0);
+});
+test('timed session durable deadline survives alarm failure and next event includes pending arrival',async()=>{
+ const h=harness(),S=h.context.BTC15Session,s=S.create(h.now(),'deadline-test');h.data.set('session.current',s);h.setTime(s.endAt+10000);
+ h.obj.ensureAlarm=async()=>{};h.obj.researchCapture=async()=>{};h.obj.researchSettle=async()=>{};h.obj.checkpoint=async()=>{};
+ await h.obj.alarm();await Promise.all(h.tasks);assert.equal(h.data.get('session.current').status,'complete');assert.ok(h.alarm()>h.now());
+ const another=S.create(h.now(),'next');another.pending={readyAt:h.now()+1000};assert.equal(S.due(another,h.now()),h.now()+1000);
+});
+test('fixed checkpoint publication grace waits without relabeling later data as earlier',async()=>{
+ const h=harness(),close=1800000900,at=(close-30)*1000+100;h.setTime(at);
+ vm.runInContext('signedGet=async(env,path)=>path.includes("/markets/")?{market:{floor_strike:100,status:"active"}}:{exchange_active:true,trading_active:true}',h.context);
+ await h.obj.researchCapture();assert.equal(h.data.get('r:'+close).checks[30],undefined);
+ h.setTime(at+650);h.obj.researchTicks=new Map(ticks(close-1000,close-30).map(t=>[t[0],t]));h.obj.books[h.api.marketTicker(close)]=book(at+650);
+ await h.obj.researchCapture();const k=h.data.get('r:'+close).checks[30];assert.equal(k.at,at+650);assert.equal(k.status,'forecast');
+});
+test('session history is chunked and stale saves cannot undo a stop',async()=>{
+ const h=harness(),S=h.context.BTC15Session,s=S.create(h.now(),'chunks');
+ s.looks=Array.from({length:720},(_,i)=>({at:s.startAt+i*5000,reason:'fixture'}));
+ await h.obj.saveSession(s);assert.equal(h.data.get('session.current').looks.length,0);assert.equal(h.data.get('session.current').looksCount,720);
+ const loaded=await h.obj.loadSession();assert.equal(loaded.looks.length,720);
+ S.stop(loaded,h.now(),'manual stop');await h.obj.saveSession(loaded);
+ assert.equal(await h.obj.saveSession(s),false);assert.equal((await h.obj.loadSession()).status,'complete');
+});
+
+test('slow session and maintenance reads cannot hold capture or newly queued research arrivals', {timeout:3000}, async()=>{
+ const h=harness(),close=1800000900,at=(close-300)*1000+750,mk=h.api.marketTicker(close);h.setTime(at);
+ const S=h.context.BTC15Session,s=S.create(at-900000,'slow-session');await h.obj.saveSession(s);
+ h.obj.ensureAlarm=async()=>{};h.obj.researchSettle=async()=>{};
+ h.obj.researchTicks=new Map(ticks(close-1000,close-300).map(t=>[t[0],t]));h.obj.books[mk]=book(at);
+ let release;const blocked=new Promise(resolve=>release=resolve);let sessionReads=0,maintenanceReads=0,reads=0;
+ h.context.read=async(_env,path)=>{
+  // Capture gets its two timely reads first. Session's first read stays pending
+  // across the next alarm, just as a delayed HTTP response would.
+  if(++reads===3){sessionReads++;await blocked;}
+  return path.includes('/markets/')?{market:{floor_strike:100,status:'active'}}:{exchange_active:true,trading_active:true};
+ };
+ vm.runInContext('signedGet=read',h.context);
+ h.obj.checkpoint=async()=>{maintenanceReads++;await blocked;};
+ await h.obj.alarm();
+ const k=h.data.get('r:'+close).checks[300];assert.equal(k.status,'forecast');assert.equal(k.at,at);
+ // Ensure both background tasks entered their blocked I/O, but alarm returned.
+ for(let i=0;i<20&&sessionReads===0;i++)await Promise.resolve();
+ assert.equal(sessionReads,1);assert.equal(maintenanceReads,1);assert.ok(h.alarm()>at&&h.alarm()<=at+1000);
+ assert.ok(h.obj.sessionTask);assert.ok(h.obj.collectorTask);assert.equal(h.obj.alarmBusy,false);
+ h.setTime(at+1000);h.obj.books[mk]=book(h.now());await h.obj.alarm();
+ const captured=h.data.get('r:'+close).checks[300];assert.equal(captured.arrival.at-captured.at,1000);
+ assert.equal(captured.arrival.depth.valid,true);assert.equal(sessionReads,1);assert.equal(maintenanceReads,1);
+ assert.equal(h.data.get('collector').runs,2);
+ // No later result can relabel the already-recorded research input.
+ const frozen=structuredClone(captured);h.setTime(at+6000);release();await Promise.all(h.tasks);
+ assert.deepEqual(h.data.get('r:'+close).checks[300],frozen);
+ assert.equal(h.obj.sessionTask,null);assert.equal(h.obj.collectorTask,null);
+});
+
+test('alarm scheduling preserves earlier wakes and does not spin on in-flight session I/O',async()=>{
+ const h=harness(),now=h.now()+10000;h.setTime(now);const S=h.context.BTC15Session,s=S.create(now-900000,'scheduling');
+ s.nextLookAt=now-5000;await h.obj.saveSession(s);h.obj.sessionTask=Promise.resolve();h.obj.collectorTask=Promise.resolve();h.data.set('t:pending',{pendingPaper:{readyAt:now-1000}});
+ await h.obj.scheduleAlarm();assert.ok(h.alarm()>now+100);
+ await h.obj.state.storage.setAlarm(now+350);h.data.set('research.pending',[{readyAt:now+1000}]);
+ await h.obj.scheduleAlarm();assert.equal(h.alarm(),now+350);
+ h.obj.sessionTask=null;await h.obj.scheduleAlarm();assert.equal(h.alarm(),now+100);
+ h.data.set('trade.cfg',{mode:'paper'});await h.obj.scheduleAlarm();assert.ok(Number.isFinite(h.alarm()));
+ h.obj.sessionTask=Promise.resolve();h.data.set('research.pending',[]);await h.obj.state.storage.setAlarm(now-1);
+ await h.obj.scheduleAlarm();assert.equal(h.alarm(),now+100);
+});
+
+test('background errors are observable and do not wedge the next session job or collector alarm',async()=>{
+ const h=harness();let calls=0;h.obj.sessionTick=async()=>{calls++;throw Error('session fixture timeout');};
+ h.obj.startSessionTask();h.obj.startSessionTask();await Promise.all(h.tasks);
+ assert.equal(calls,1);assert.equal(h.obj.sessionTask,null);assert.equal(h.obj.sessionError.error,'session fixture timeout');
+ h.obj.startSessionTask();await Promise.all(h.tasks);assert.equal(calls,2);assert.ok(h.alarm()>h.now());
+ h.obj.collectorMaintenance=async()=>{throw Error('maintenance fixture timeout');};
+ h.obj.startCollectorTask();await Promise.all(h.tasks);
+ assert.equal(h.obj.collectorTask,null);assert.equal(h.data.get('collector').errors.at(-1).error,'maintenance fixture timeout');
+});
+
+test('legacy session cancellation persists before slow official outcome reads and exports retain attribution',async()=>{
+ const h=harness(),S=h.context.BTC15Session,s=S.create(h.now()-900000,'old-session'),at=h.now();
+ s.version='paper-session-v1';s.settings.model='brti-driftless-v3';delete s.settings.settlementConvention;
+ s.looks=[{at:at-5000,p:.8,reason:'old observation'}];
+ s.trades=[{id:'old-trade',mk:'OLD',close:at/1000-10,side:'Up',entryCents:50,entryFeeCents:2,pnlCents:null}];
+ s.pending={action:'sell',mk:'OLD',close:at/1000-10,at:at-1000,readyAt:at,decision:{p:.2}};
+ const old=structuredClone(s);await h.obj.saveSession(s);
+ assert.deepEqual(structuredClone((await h.obj.loadSession()).looks),old.looks);assert.equal((await h.obj.loadSession()).stoppedAt,null);
+ let release;const gate=new Promise(resolve=>release=resolve);h.context.read=async()=>{await gate;return {market:{result:'yes'}};};vm.runInContext('signedGet=read',h.context);
+ const job=h.obj.sessionTick();for(let i=0;i<20&&!h.data.get('session.current').stoppedAt;i++)await Promise.resolve();
+ const stopped=await h.obj.loadSession();assert.equal(stopped.status,'settling');assert.equal(stopped.pending,null);
+ assert.equal(stopped.version,old.version);assert.deepEqual(stopped.settings,old.settings);assert.deepEqual(structuredClone(stopped.looks),old.looks);
+ assert.match(stopped.stopReason,/incompatible session cohort/);assert.match(stopped.attempts[0].reason,/incompatible/);
+ release();await job;const settled=await h.obj.loadSession();assert.equal(settled.status,'complete');assert.equal(settled.trades[0].resolution,'official settlement');
+ assert.equal(settled.trades[0].model,undefined);assert.equal(settled.settings.model,'brti-driftless-v3');assert.deepEqual(structuredClone(settled.looks),old.looks);
+});
+
+test('a rejected stop save returns conflict instead of claiming the session stopped',async()=>{
+ const h=harness(),s=h.context.BTC15Session.create(h.now(),'stop-conflict');await h.obj.saveSession(s);h.obj.env.FEED_TOKEN='unit-token';
+ h.obj.saveSession=async()=>false;
+ const response=await h.obj.fetch(new Request('https://test/paper-session/stop?token=unit-token',{method:'POST'}));
+ assert.equal(response.status,409);assert.equal((await h.obj.loadSession()).stoppedAt,null);
+});
+
+test('official outcome reads preserve an arrival recorded while background settlement was awaiting I/O',async()=>{
+ const h=harness(),close=1800000900,key='r:'+close;h.setTime((close+90)*1000);
+ const row={schema:h.r.VERSION,model:h.context.BTC15Model.VERSION,mk:'OLD',close,checks:{60:fixtureCheck(h,close)},src:null,closingCapture:{complete:true}};
+ delete row.checks[60].arrival;h.data.set(key,row);h.data.set('research.pending',[{key,check:60,readyAt:close*1000}]);h.obj.books.OLD=book(h.now());
+ h.context.arriveDuringRead=async()=>h.obj.researchArrivals();
+ vm.runInContext('signedGet=async()=>{await arriveDuringRead();return {market:{result:"yes",expiration_value:"101.23"}};}',h.context);
+ await h.obj.researchSettle();const saved=h.data.get(key);
+ assert.equal(saved.src,'kalshi');assert.equal(saved.officialCloseAvg,101.23);assert.equal(saved.checks[60].arrival.at,h.now());
+});
+
+test('starting v2 reconciles and archives a pending legacy session before replacing it',async()=>{
+ const h=harness(),S=h.context.BTC15Session,s=S.create(h.now()-900000,'old-pending');
+ s.version='paper-session-v1';s.settings.model='brti-driftless-v3';delete s.settings.settlementConvention;
+ s.status='running';s.pending={action:'buy',at:h.now()-1000,readyAt:h.now(),mk:'OLD',close:h.now()/1000+900};
+ await h.obj.saveSession(s);h.obj.env.FEED_TOKEN='unit-token';h.obj.ensureUpstream=async()=>{};
+ const response=await h.obj.fetch(new Request('https://test/paper-session/start?token=unit-token',{method:'POST'}));
+ assert.equal(response.status,200);const previous=h.data.get('session.previous');
+ assert.equal(previous.version,'paper-session-v1');assert.equal(previous.settings.model,'brti-driftless-v3');
+ assert.equal(previous.status,'complete');assert.equal(previous.pending,null);assert.equal(previous.stoppedAt,h.now());
+ assert.equal(previous.attemptsCount,1);assert.match(h.data.get('se:old-pending:attempts:0')[0].reason,/incompatible session cohort/);
+ assert.equal(h.data.get('session.current').version,'paper-session-v2');assert.equal(h.data.get('session.current').status,'scheduled');
 });

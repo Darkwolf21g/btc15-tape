@@ -79,7 +79,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url), path = url.pathname.replace(/\/+$/, "");
     if (request.method === "OPTIONS") return new Response(null, {headers: {...CORS, "Access-Control-Allow-Headers": "Content-Type"}});
-    if (path === "/feed" || path === "/feed/status" || path === "/record" || path === "/record.csv" || path === "/collector/status" || path === "/trade/status" || path === "/trade/config" || path.startsWith("/demo/") || path.startsWith("/research/")) {
+    if (path === "/feed" || path === "/feed/status" || path === "/record" || path === "/record.csv" || path === "/collector/status" || path === "/trade/status" || path === "/trade/config" || path.startsWith("/demo/") || path.startsWith("/research/") || path.startsWith("/paper-session/")) {
       if (env.FEED_TOKEN && url.searchParams.get("token") !== env.FEED_TOKEN) return new Response("token", {status: 403, headers: CORS});
       if (!env.FEED) return new Response("feed not configured", {status: 503, headers: CORS});
       try { return await env.FEED.get(env.FEED.idFromName("brti")).fetch(request); }
@@ -488,6 +488,86 @@ globalThis.BTC15Research=Object.freeze({VERSION,BIAS_VERSION,LEGACY_SETTLEMENT_C
 })();
 // END SHARED BTC15 RESEARCH
 const research = globalThis.BTC15Research;
+// BEGIN SHARED BTC15 SESSION
+// Forward-only timed paper experiment. No exchange order calls.
+(() => {
+const VERSION='paper-session-v2';
+const SETTINGS=Object.freeze({durationMs:3600000,cadenceMs:5000,delayMs:1000,maxDelayMs:4000,depthFraction:.5,quantity:1,minEdgeCents:3,exitEdgeCents:3,maxEntriesPerWindow:3,cooldownMs:30000,lossStopCents:300,model:'brti-driftless-v4',settlementConvention:'[close-60s,close)',feeAssumption:'general Kalshi taker fee, rounded up per one-contract fill'});
+const M=()=>globalThis.BTC15Model,finite=Number.isFinite;
+function create(now,id){const startAt=(Math.floor(now/900000)+1)*900000+750;return {version:VERSION,id,settings:{...SETTINGS},createdAt:now,startAt,endAt:startAt+SETTINGS.durationMs-750,status:'scheduled',looks:[],attempts:[],trades:[],pending:null,nextLookAt:startAt,entries:{},lastEntryAt:null,stoppedAt:null};}
+// A saved experiment keeps its original cohort forever. Deployment may stop it,
+// but must never upgrade its settings or relabel observations with today's model.
+function compatibilityReason(s){
+ if(!s)return 'missing session';
+ if(s.version!==VERSION||s.settings?.model!==SETTINGS.model||s.settings?.settlementConvention!==SETTINGS.settlementConvention)
+  return 'incompatible session cohort: expected '+[VERSION,SETTINGS.model,SETTINGS.settlementConvention].join(' / ')+'; recorded '+[s.version??'unspecified',s.settings?.model??'unspecified',s.settings?.settlementConvention??'unspecified'].join(' / ');
+ if(M()?.VERSION!==SETTINGS.model||M()?.SETTLEMENT_CONVENTION!==SETTINGS.settlementConvention)return 'incompatible runtime model or settlement interval';
+ return null;
+}
+function compatible(s){return compatibilityReason(s)===null;}
+function attribution(s,q){return {sessionVersion:q?.sessionVersion??s.version??null,model:q?.model??q?.decision?.model??s.settings?.model??null,settlementConvention:q?.settlementConvention??q?.decision?.settlementConvention??s.settings?.settlementConvention??null};}
+function snapshotReason(k){return k?.model===SETTINGS.model&&k?.settlementConvention===SETTINGS.settlementConvention?null:'snapshot model or settlement interval mismatch';}
+function active(s,at){return !!s&&compatible(s)&&s.stoppedAt==null&&at<s.endAt&&['scheduled','running'].includes(s.status);}
+function position(s){return s.trades.find(t=>t.pnlCents==null);}
+function stop(s,at,reason='time limit',pendingReason='session stopped'){
+ if(s.stoppedAt==null){s.stoppedAt=at;s.stopReason=reason;}
+ s.status=position(s)?'settling':'complete';
+ if(s.pending){s.attempts.push({...s.pending,...attribution(s,s.pending),filled:0,arrivalAt:at,reason:pendingReason});s.pending=null;}
+}
+// Returns whether persistence is needed. Repeated loads and already-completed
+// historical reports do not append attempts, rewrite provenance or move timestamps.
+function reconcile(s,at){
+ const reason=compatibilityReason(s);
+ if(!s||!reason||(!s.pending&&(s.stoppedAt!=null||s.status==='complete')))return false;
+ stop(s,at,reason,reason);return true;
+}
+function clock(s,at){reconcile(s,at);if(s.stoppedAt==null&&at>=s.endAt)stop(s,at);if(s.stoppedAt!=null&&!position(s))s.status='complete';if(active(s,at)&&at>=s.startAt)s.status='running';}
+function valid(k){return k?.status==='forecast'&&finite(k.p)&&k.p>=0&&k.p<=1&&k.depth?.valid&&k.marketStatus==='active'&&k.exchange?.exchange_active===true&&k.exchange?.trading_active===true;}
+function bid(depth,side){return side==='Up'?depth.bidCents:100-depth.askCents;}
+function decide(s,k,mk,close){const at=k.at;clock(s,at);if(!active(s,at)||at<s.startAt||at<s.nextLookAt||s.pending)return;
+ s.nextLookAt=at+SETTINGS.cadenceMs;
+ const record={sessionVersion:s.version,model:k.model??null,settlementConvention:k.settlementConvention??null,at,mk,close,p:k.p,index:k.index,projection:k.projection,depth:k.depth,marketStatus:k.marketStatus,exchange:k.exchange,reason:null};
+ const finish=reason=>{record.reason=reason;s.looks.push(record);};
+ const mismatch=snapshotReason(k);if(mismatch)return finish(mismatch);
+ if(!valid(k))return finish(k.status!=='forecast'?k.status:k.depth?.reason||'market or exchange unavailable');
+ if(at+SETTINGS.maxDelayMs>=Math.min(close*1000,s.endAt))return finish('too close to deadline');
+ const held=position(s);record.action=held?'sell':'buy';let intent;
+ if(held){if(held.mk!==mk)return finish('awaiting official settlement');const price=bid(k.depth,held.side),prob=held.side==='Up'?k.p:1-k.p,edge=price-M().feesCents(price,1,'kalshi')-100*prob;
+  record.edgeCents=edge;if(edge<SETTINGS.exitEdgeCents)return finish('hold: exit advantage below 3c');
+  intent={action:'sell',side:held.side,limit:price,edgeCents:edge,tradeId:held.id};
+ }else{
+  const candidates=[['Up',k.p,k.depth.yes[0]],['Down',1-k.p,k.depth.no[0]]].filter(x=>x[2]).map(([side,p,l])=>({side,limit:l.price,edgeCents:100*p-l.price-M().feesCents(l.price,1,'kalshi')})).sort((a,b)=>b.edgeCents-a.edgeCents);
+  intent=candidates[0];record.edgeCents=intent?.edgeCents??null;
+  if(!intent||intent.edgeCents<SETTINGS.minEdgeCents)return finish('entry edge below 3c');
+  if(s.trades.reduce((n,t)=>n+(t.pnlCents||0),0)<=-SETTINGS.lossStopCents)return finish('session loss stop');
+  if((s.entries[mk]||0)>=SETTINGS.maxEntriesPerWindow)return finish('window entry-attempt cap');
+  if(s.lastEntryAt!=null&&at-s.lastEntryAt<SETTINGS.cooldownMs)return finish('entry cooldown');
+  intent.action='buy';s.entries[mk]=(s.entries[mk]||0)+1;s.lastEntryAt=at;
+ }
+ s.pending={...intent,sessionVersion:s.version,model:k.model,settlementConvention:k.settlementConvention,at,readyAt:at+SETTINGS.delayMs,mk,close,p:k.p,decision:record};finish(intent.action+' intent');
+}
+function arrive(s,k){const at=k.at;clock(s,at);const q=s.pending;if(!q||at<q.readyAt)return;
+ s.pending=null;const result={...q,...attribution(s,q),arrivalModel:k.model??null,arrivalSettlementConvention:k.settlementConvention??null,arrivalAt:at,arrivalDepth:k.depth,arrivalExchange:k.exchange,arrivalMarketStatus:k.marketStatus,filled:0,reason:null};s.attempts.push(result);
+ if(q.sessionVersion!==s.version||q.model!==s.settings.model||q.settlementConvention!==s.settings.settlementConvention){result.reason='intent model or settlement interval mismatch';return;}
+ const mismatch=snapshotReason(k);if(mismatch){result.reason=mismatch;return;}
+ if(!active(s,at)||at>=q.close*1000||at-q.at>SETTINGS.maxDelayMs){result.reason='arrival outside allowed time';return;}
+ // Arrival requires a live market and book; never requires a new favourable prediction.
+ if(!k.depth?.valid||k.marketStatus!=='active'||k.exchange?.exchange_active!==true||k.exchange?.trading_active!==true){result.reason=k.depth?.reason||'arrival market or exchange unavailable';return;}
+ const levels=q.action==='buy'?(q.side==='Up'?k.depth.yes:k.depth.no):(q.side==='Up'?k.depth.no:k.depth.yes).map(l=>({...l,price:100-l.price}));
+ const level=levels.find(l=>Math.floor(l.size*SETTINGS.depthFraction)>=1&&(q.action==='buy'?l.price<=q.limit+1e-9:l.price>=q.limit-1e-9));
+ if(!level){result.reason='no depth at original limit after haircut';return;}
+ const fee=M().feesCents(level.price,1,'kalshi');result.filled=1;result.priceCents=level.price;result.feesCents=fee;result.reason='simulated fill';
+ if(q.action==='buy')s.trades.push({...attribution(s,q),id:s.id+':'+s.trades.length,mk:q.mk,close:q.close,side:q.side,entryAt:at,entryCents:level.price,entryFeeCents:fee,pnlCents:null});
+ else{const t=s.trades.find(t=>t.id===q.tradeId&&t.pnlCents==null);if(!t)throw Error('paper position missing');Object.assign(t,{exitAt:at,exitCents:level.price,exitFeeCents:fee,pnlCents:level.price-fee-t.entryCents-t.entryFeeCents,resolution:'early exit'});}
+}
+function settle(s,mk,result,at){if(!['yes','no'].includes(result))return;for(const t of s.trades.filter(t=>t.mk===mk&&t.pnlCents==null&&at>=t.close*1000)){const won=(t.side==='Up')===(result==='yes');Object.assign(t,{exitAt:at,exitCents:won?100:0,exitFeeCents:0,pnlCents:(won?100:0)-t.entryCents-t.entryFeeCents,resolution:'official settlement',officialResult:result});}clock(s,at);}
+function report(s){const closed=s.trades.filter(t=>t.pnlCents!=null).sort((a,b)=>a.exitAt-b.exitAt);let pnl=0,peak=0,drawdown=0;for(const t of closed){pnl+=t.pnlCents;peak=Math.max(peak,pnl);drawdown=Math.max(drawdown,peak-pnl);}const reasons={};for(const r of [...s.looks,...s.attempts.filter(a=>!a.filled)])reasons[r.reason]=(reasons[r.reason]||0)+1;
+ return {version:s.version,model:s.settings?.model??null,settlementConvention:s.settings?.settlementConvention??null,compatible:compatible(s),compatibilityReason:compatibilityReason(s),looks:s.looks.length,eligible:s.looks.filter(l=>finite(l.edgeCents)).length,attempts:s.attempts.length+(s.pending?1:0),entryFills:s.trades.length,exitFills:closed.filter(t=>t.resolution==='early exit').length,wins:closed.filter(t=>t.pnlCents>0).length,losses:closed.filter(t=>t.pnlCents<0).length,open:s.trades.length-closed.length,feesCents:s.attempts.reduce((n,a)=>n+(a.feesCents||0),0),pnlCents:pnl,drawdownCents:drawdown,edgeAvailable:s.looks.some(l=>l.action==='buy'&&l.edgeCents>=SETTINGS.minEdgeCents),reasons,unrealizedExcluded:true};}
+function due(s,now){if(!s)return Infinity;if(!active(s,now))return s.stoppedAt==null?now+100:Infinity;return Math.max(now+100,Math.min(s.endAt,s.pending?.readyAt??Infinity,s.nextLookAt));}
+globalThis.BTC15Session={VERSION,SETTINGS,create,compatible,reconcile,active,clock,stop,decide,arrive,settle,report,due};
+})();
+// END SHARED BTC15 SESSION
+const paperSession = globalThis.BTC15Session;
 const {tailCdf,volsFrom,projectFrom} = globalThis.BTC15Model;
 function feeCents(p) { return globalThis.BTC15Model.feesCents(p*100); }
 async function signedGet(env, apiPath, query) { return signedCall(env,"live","GET",apiPath+(query||"")); }
@@ -595,6 +675,13 @@ export class KalshiFeed {
   }
   async fetch(request) {
     const url = new URL(request.url);
+    if(url.pathname.startsWith('/paper-session/')){
+      if(request.method==='POST'){
+        if(this.sessionControlBusy)return new Response(JSON.stringify({error:'Session control busy; refresh status before retrying.'}),{status:409,headers:{...CORS,'Content-Type':'application/json'}});
+        this.sessionControlBusy=true;try{return await this.sessionRequest(request,url);}finally{this.sessionControlBusy=false;}
+      }
+      return this.sessionRequest(request,url);
+    }
     if(url.pathname.startsWith('/research/'))return this.researchRequest(request,url);
     if(url.pathname==="/market-data")return this.marketData(url.searchParams.get("path")||"");
     if(url.pathname.startsWith("/demo/"))return this.demoRequest(request,url);
@@ -613,6 +700,10 @@ export class KalshiFeed {
       const cfg = await this.tradeConfig();
       if (body.mode != null) {
         if (!["off", "paper"].includes(body.mode)) return new Response("This research release supports off and paper only; exchange execution is not enabled", {status: 400, headers: CORS});
+        if(body.mode==='paper'){
+          const session=await this.state.storage.get('session.current');
+          if(session&&(paperSession.active(session,Date.now())||session.trades.some(t=>t.pnlCents==null)))return new Response('Stop and settle the timed session first',{status:409,headers:CORS});
+        }
         cfg.mode = body.mode;
       }
       for (const k of ["paperDelayMs", "paperBookMaxAgeMs", "paperDepthFraction", "paperExchangeFeeCents", "perWindowCents", "dailyLossStopCents", "maxTradesPerDay", "minEdge", "bankrollCents", "firstSeconds", "lastSeconds"]) if (body[k] != null) { if (typeof body[k] !== "number" || !Number.isFinite(body[k])) return new Response("invalid " + k, {status:400,headers:CORS}); cfg[k] = body[k]; }
@@ -621,9 +712,7 @@ export class KalshiFeed {
       for (const [k, [lo, hi]] of Object.entries(ranges)) if (!Number.isFinite(cfg[k]) || cfg[k] < lo || cfg[k] > hi || (!["minEdge","paperDepthFraction","paperExchangeFeeCents"].includes(k) && !Number.isInteger(cfg[k]))) return new Response("invalid " + k, {status: 400, headers: CORS});
       cfg.perWindowCents = Math.min(cfg.perWindowCents, 5000);                 // a hard ceiling of $50 a window, whatever is asked
       await this.state.storage.put("trade.cfg", cfg);
-      const pending=await this.state.storage.list({prefix:"t:"});
-        const due=[...pending.values()].filter(v=>v.pendingPaper).map(v=>Math.max(Date.now()+100,v.pendingPaper.readyAt));
-        await this.state.storage.setAlarm(Math.min(this.nextEvent(Date.now(), cfg.mode === "paper", cfg),...due));
+      await this.scheduleAlarm();
       if (cfg.mode !== "off") this.ensureUpstream();
       return new Response(JSON.stringify(cfg), {headers: {...CORS, "Content-Type": "application/json"}});
     }
@@ -666,6 +755,104 @@ export class KalshiFeed {
     this.ensureUpstream();
     return new Response(null, {status: 101, webSocket: client});
   }
+  async loadSession() {
+    const s=await this.state.storage.get('session.current');if(!s)return null;
+    for(const field of ['looks','attempts']){
+      const count=s[field+'Count'];if(count==null)continue;
+      s[field]=[];
+      for(let i=0;i<Math.ceil(count/20);i++)s[field].push(...((await this.state.storage.get(`se:${s.id}:${field}:${i}`))||[]));
+      if(s[field].length!==count)throw Error('Paper session history incomplete');
+    }
+    return s;
+  }
+  async saveSession(s) {
+    const meta={...s},chunks=[];
+    for(const field of ['looks','attempts']){
+      const from=Math.floor((s[field+'Count']||0)/20);
+      for(let i=from;i<Math.ceil(s[field].length/20);i++)chunks.push([`se:${s.id}:${field}:${i}`,s[field].slice(i*20,i*20+20)]);
+      meta[field+'Count']=s[field].length;meta[field]=[];
+    }
+    meta.revision=(s.revision||0)+1;
+    const saved=await this.state.storage.transaction(async tx=>{
+      const current=await tx.get('session.current');
+      if(current&&current.id!==s.id&&s.revision!=null)return false;
+      if(current?.id===s.id&&(current.revision||0)!==(s.revision||0))return false;
+      for(const [key,value]of chunks)await tx.put(key,value);
+      await tx.put('session.current',meta);return true;
+    });
+    if(saved){s.revision=meta.revision;s.looksCount=meta.looksCount;s.attemptsCount=meta.attemptsCount;}
+    return saved;
+  }
+  async sessionRequest(request,url) {
+    const reply=(d,status=200)=>new Response(JSON.stringify(d),{status,headers:{...CORS,'Content-Type':'application/json','Cache-Control':'no-store'}});
+    if(!this.env.FEED_TOKEN||url.searchParams.get('token')!==this.env.FEED_TOKEN)return reply({error:'Save the configured stream token to use timed paper sessions.'},403);
+    let s=await this.loadSession();
+    if(url.pathname==='/paper-session/status'&&request.method==='GET')return reply({session:s?{...s,looks:undefined,attempts:undefined}:null,report:s?paperSession.report(s):null,error:this.sessionError??null,now:Date.now()});
+    if(url.pathname==='/paper-session/export'&&request.method==='GET')return reply({session:s||null,report:s?paperSession.report(s):null,now:Date.now()});
+    if(request.method!=='POST')return reply({error:'POST required'},405);
+    if(url.pathname==='/paper-session/stop'){
+      if(s){paperSession.stop(s,Date.now(),'manual stop');if(!await this.saveSession(s))return reply({error:'Session changed while stopping; refresh status and retry.'},409);}
+      return reply({session:s});
+    }
+    if(url.pathname!=='/paper-session/start')return reply({error:'not found'},404);
+    if(!this.env.KALSHI_KEY_ID||!this.env.KALSHI_PRIVATE_KEY)return reply({error:'Official feed credentials are not configured.'},409);
+    const cfg=await this.tradeConfig(),old=[...(await this.state.storage.list({prefix:'t:'})).values()];
+    // Re-read after awaited storage: simultaneous start requests must not overwrite a session.
+    s=await this.loadSession();
+    if(s&&paperSession.reconcile(s,Date.now())&&!await this.saveSession(s))return reply({error:'Session changed during version transition; refresh status and retry.'},409);
+    if(cfg.mode!=='off'||old.some(w=>w.pendingPaper||(!w.settled&&w.trades?.some(t=>t.filled>0))))return reply({error:'Turn the legacy agent off and let its open paper positions settle first.'},409);
+    if(s&&(paperSession.active(s,Date.now())||s.trades.some(t=>t.pnlCents==null)))return reply({error:'A session is already scheduled, running or awaiting settlement.'},409);
+    if(s)await this.state.storage.put('session.previous',await this.state.storage.get('session.current'));
+    s=paperSession.create(Date.now(),crypto.randomUUID());
+    await this.saveSession(s);
+    this.agentActive=true;this.ensureUpstream();if(this.up)this.subscribeTickers();
+    await this.scheduleAlarm(Date.now()+1000);
+    return reply({session:s});
+  }
+  startSessionTask() {
+    // waitUntil keeps I/O alive without holding the alarm-handler lock. Single flight
+    // plus saveSession's revision check protects stops/restarts across awaited reads.
+    if(this.sessionTask)return;
+    const task=this.sessionTick().catch(e=>{
+      this.sessionError={at:Date.now(),error:String(e.message||e).slice(0,200)};
+    }).finally(async()=>{
+      this.sessionTask=null;
+      try { await this.scheduleAlarm(); }
+      catch(e) { this.sessionError={at:Date.now(),error:String(e.message||e).slice(0,200)}; }
+    });
+    this.sessionTask=task;
+    this.state.waitUntil(task);
+  }
+  async sessionTick() {
+    let s=await this.loadSession();if(!s)return;
+    const id=s.id;paperSession.clock(s,Date.now());
+    // Persist a version stop/cancellation before any slow outcome reads.
+    if(!await this.saveSession(s))return;
+    // Fetch only official outcomes. A manual stop may interleave with network I/O.
+    const outcomes=[];
+    for(const t of s.trades.filter(t=>t.pnlCents==null&&Date.now()>=t.close*1000)){
+      try{const market=(await signedGet(this.env,'/trade-api/v2/markets/'+t.mk))?.market;outcomes.push({mk:t.mk,result:market?.result});}
+      catch(e){/* Keep the position pending and retry. */}
+    }
+    s=await this.loadSession();if(!s||s.id!==id)return;
+    for(const o of outcomes)paperSession.settle(s,o.mk,o.result,Date.now());
+    paperSession.clock(s,Date.now());
+    await this.saveSession(s);
+    if(!paperSession.active(s,Date.now())||Date.now()<s.startAt||(!s.pending&&Date.now()<s.nextLookAt))return;
+    const close=s.pending?.close??(Math.floor(Date.now()/900000)+1)*900,mk=s.pending?.mk??marketTicker(close);
+    let market,exchange,error;
+    try{market=(await signedGet(this.env,'/trade-api/v2/markets/'+mk))?.market;exchange=await signedGet(this.env,'/trade-api/v2/exchange/status');}catch(e){error='market or exchange read unavailable';}
+    // Stop can arrive during network reads. Reload before deciding or filling.
+    s=await this.loadSession();if(!s||s.id!==id)return;
+    const at=Date.now();paperSession.clock(s,at);
+    const target=market?.floor_strike!=null?Number(market.floor_strike):null;
+    const k=research.snapshot({at,close,target,targetAt:at,ticks:[...this.researchTicks.values()],book:this.books[mk],exchange,marketStatus:market?.status});
+    if(error){k.status=error;k.p=null;}
+    if(k.depth&&!k.depth.valid&&k.depth.reason==='empty or crossed book')k.depth.reason=k.depth.yes.length&&k.depth.no.length?'crossed order book':'one-sided or empty order book';
+    s.lastObservedAt=at;
+    if(s.pending)paperSession.arrive(s,k);else paperSession.decide(s,k,mk,close);
+    await this.saveSession(s);
+  }
   async researchRequest(request,url) {
     const reply=(d,status=200)=>new Response(JSON.stringify(d),{status,headers:{...CORS,'Content-Type':'application/json'}});
     if(request.method!=='GET')return reply({error:'read only'},405);
@@ -703,7 +890,7 @@ export class KalshiFeed {
     for(const c of research.CHECKS)if(!row.checks[c]&&started-(close-c)*1000>research.SETTINGS.checkpointToleranceMs){
       row.checks[c]={at:started,status:'checkpoint missed',p:null,p2:null};changed=true;
     }
-    const c=research.CHECKS.find(c=>!row.checks[c]&&started>=(close-c)*1000);
+    const c=research.CHECKS.find(c=>!row.checks[c]&&started>=(close-c)*1000+750);
     if(c!=null){
       const inputKey=`ri:${close}:${c}`;
       if(await this.state.storage.get(inputKey)){
@@ -772,9 +959,14 @@ export class KalshiFeed {
       if(existing?.src==='kalshi')m={result:existing.result,expiration_value:existing.officialCloseAvg};
       else m=(await signedGet(this.env,'/trade-api/v2/markets/'+row.mk))?.market;
       if(m&&['yes','no'].includes(m.result)){
-        row.result=m.result;row.src='kalshi';row.resultObservedAt=Date.now();
-        row.officialCloseAvg=m.expiration_value!=null&&Number.isFinite(Number(m.expiration_value))?Number(m.expiration_value):null;
-        await this.state.storage.put('r:'+row.close,row);
+        // A delayed arrival may have landed while the official outcome was fetched.
+        // Attach labels to the latest record without replacing that observation.
+        await this.state.storage.transaction(async tx=>{
+          const latest=await tx.get('r:'+row.close);if(!latest||latest.src==='kalshi')return;
+          latest.result=m.result;latest.src='kalshi';latest.resultObservedAt=Date.now();
+          latest.officialCloseAvg=m.expiration_value!=null&&Number.isFinite(Number(m.expiration_value))?Number(m.expiration_value):null;
+          await tx.put('r:'+row.close,latest);
+        });
       }
     }
     if(now-(this.researchPrunedAt||0)>3600000){
@@ -963,16 +1155,17 @@ export class KalshiFeed {
     if (!(this.env.KALSHI_KEY_ID && this.env.KALSHI_PRIVATE_KEY)) return;
     const alarm = await this.state.storage.getAlarm(), now = Date.now();
     if (!this.alarmBusy && (alarm == null || alarm < now - 60000 || alarm > now + 60000))
-      await this.state.storage.setAlarm(now + 1000);
+      await this.scheduleAlarm(now + 1000);
     if (this.up && now - Math.max(this.upMsgAt, this.upSince) > 20000) this.closeUpstream("stale stream");
-    this.agentActive = (await this.tradeConfig()).mode !== "off";
+    const session=await this.state.storage.get('session.current');
+    this.agentActive = (await this.tradeConfig()).mode !== "off" || paperSession.active(session,now);
     await this.ensureUpstream();
     if(this.up) this.subscribeTickers();
   }
   nextEvent(nowMs, agentOn, cfg) {             // the next checkpoint, settlement or agent moment after now, in ms
     const now = nowMs / 1000, close = (Math.floor(now / WINDOW) + 1) * WINDOW, times = [];
     for (const c of [close - WINDOW, close, close + WINDOW]) { for (const k of CHECKS) times.push(c - k); times.push(c + 90, c + 400); }
-    for (const c of [close,close+WINDOW]) for(const k of research.CHECKS)times.push(c-k-5,c-k,c-k+10);
+    for (const c of [close,close+WINDOW]) for(const k of research.CHECKS)times.push(c-k-5,c-k+.75,c-k+10);
     if (agentOn) {
       const first = cfg ? cfg.firstSeconds : 300, lastS = cfg ? cfg.lastSeconds : 15;
       const zoneStart = close - WINDOW + first, zoneEnd = close - lastS;
@@ -980,51 +1173,80 @@ export class KalshiFeed {
     }
     return Math.min(now + 30, ...times.filter(t => t > now + 0.5)) * 1000;
   }
+  async updateCollector(update) {
+    await this.state.storage.transaction(async tx=>{
+      const log=(await tx.get('collector'))||{runs:0,errors:[]};
+      update(log);await tx.put('collector',log);
+    });
+  }
+  async collectorError(e) {
+    await this.updateCollector(log=>{
+      log.errors=(log.errors||[]).concat([{at:Date.now(),error:String(e.message||e).slice(0,200)}]).slice(-10);
+    });
+  }
+  async scheduleAlarm(earlier=Infinity) {
+    // Background session/maintenance completions can race the fast alarm. Compute
+    // and shorten atomically; never push an earlier research or arrival wake back.
+    await this.state.storage.transaction(async tx=>{
+      const now=Date.now(),cfg=Object.assign({mode:'off',firstSeconds:300,lastSeconds:15},await tx.get('trade.cfg'));
+      const pending=await tx.list({prefix:'t:'});
+      const due=this.collectorTask?[]:[...pending.values()].filter(v=>v.pendingPaper).map(v=>Math.max(now+100,v.pendingPaper.readyAt));
+      const researchDue=((await tx.get('research.pending'))||[]).map(p=>Math.max(now+100,p.readyAt));
+      const session=await tx.get('session.current');
+      const sessionDue=this.sessionTask?Infinity:paperSession.due(session,now);
+      const next=Math.min(earlier,this.nextEvent(now,cfg.mode==='paper',cfg),...due,...researchDue,sessionDue);
+      const existing=await tx.getAlarm();
+      // An overdue wake may be queued for delivery. Re-arm promptly rather than
+      // postponing it to a distant event when a background request completes.
+      const wake=existing!=null&&existing<=now?Math.min(next,now+100):next;
+      if(existing==null||existing<=now||wake<existing)await tx.setAlarm(wake);
+    });
+  }
+  startCollectorTask() {
+    if(this.collectorTask)return;
+    const task=this.collectorMaintenance().catch(e=>this.collectorError(e)).finally(async()=>{
+      this.collectorTask=null;
+      try { await this.scheduleAlarm(); } catch(e) { await this.collectorError(e); }
+    });
+    this.collectorTask=task;
+    this.state.waitUntil(task);
+  }
+  async collectorMaintenance() {
+    await this.ensureAlarm();
+    const cfg=await this.tradeConfig();
+    await this.processPaper(Date.now(),cfg);
+    const at=Date.now(),now=at/1000,close=(Math.floor(now/WINDOW)+1)*WINDOW,left=close-now;
+    const check=CHECKS.find(k=>left<=k&&k-left<20);
+    if(check)await this.checkpoint(marketTicker(close),close,check,at);
+    const rows=await this.state.storage.list({prefix:'w:'});
+    for(const w of [...rows.values()].filter(w=>w.close<now-60&&w.src!=='kalshi').slice(-4))await this.settle(w.mk,w.close);
+    await this.researchSettle();
+    const trades=await this.state.storage.list({prefix:'t:'});
+    for(const w of [...trades.values()].filter(w=>w.close<now-60&&!w.settled&&w.trades?.length).slice(-8))await this.settleTrades(w.mk,w.close);
+    if(cfg.mode==='paper')await this.agentTick(Date.now());
+    if(rows.size>5000)for(const [key]of [...rows].slice(0,rows.size-5000))await this.state.storage.delete(key);
+    await this.updateCollector(log=>{
+      log.lastOk=Date.now();
+      log.indexAgeMs=this.ticks.length?Date.now()-this.ticks[this.ticks.length-1][0]:null;
+    });
+  }
   async alarm() {
-    if (this.alarmBusy) return;
-    this.alarmBusy = true;
-    const nowMs = Date.now(), now = nowMs / 1000;
-    const log = (await this.state.storage.get("collector")) || {runs: 0, errors: []};
-    log.runs++; log.lastRun = nowMs;
-    // Schedule before network work and again in finally: errors must not stop collection.
-    await this.state.storage.setAlarm(nowMs + 30000);
+    if(this.alarmBusy)return;
+    this.alarmBusy=true;
     try {
-      await this.state.storage.put("index.seconds", [...this.indexSeconds].slice(-1200));
-      await this.ensureAlarm();
+      await this.updateCollector(log=>{log.runs++;log.lastRun=Date.now();});
+      // Repair wake before network work. Expensive unrelated I/O runs in separate
+      // single-flight tasks so a newly queued +1s research arrival can fire on time.
+      await this.scheduleAlarm();
+      await this.state.storage.put('index.seconds',[...this.indexSeconds].slice(-1200));
       await this.researchArrivals();
-      const close = (Math.floor(now / WINDOW) + 1) * WINDOW, left = close - now;
-      const check = CHECKS.find(k => left <= k && k - left < 20);
-      if (check) await this.checkpoint(marketTicker(close), close, check, nowMs);
       await this.researchCapture();
-      // Retry old unresolved windows as well as the most recent close.
-      const rows = await this.state.storage.list({prefix: "w:"});
-      const pending = [...rows.values()].filter(w => w.close < now - 60 && w.src !== "kalshi").slice(-4);
-      for (const w of pending) await this.settle(w.mk, w.close);
-      await this.researchSettle();
-      const prevClose = close - WINDOW;
-      const trades=await this.state.storage.list({prefix:"t:"});
-      for(const tradeWindow of [...trades.values()].filter(v=>v.close<now-60&&!v.settled&&v.trades?.length).slice(-8)) await this.settleTrades(tradeWindow.mk,tradeWindow.close);
-      log.lastOk = nowMs;
-      log.indexAgeMs = this.ticks.length ? nowMs - this.ticks[this.ticks.length - 1][0] : null;
-      const cfg = await this.tradeConfig();
-      await this.processPaper(Date.now(),cfg);
-      if (cfg.mode === "paper") await this.agentTick(Date.now());
-      // Persist bounded read-only history so a cold object can warm up without a phone.
-
-      if (rows.size > 5000) for (const [key] of [...rows].slice(0, rows.size - 5000)) await this.state.storage.delete(key);
-    } catch (e) {
-      log.errors = (log.errors || []).concat([{at: Date.now(), error: String(e.message || e).slice(0, 200)}]).slice(-10);
-    } finally {
-      try {
-        await this.state.storage.put("collector", log);
-      } finally {
-        const cfg = await this.tradeConfig().catch(() => ({mode: "off"}));
-        const pending=await this.state.storage.list({prefix:"t:"});
-        const due=[...pending.values()].filter(v=>v.pendingPaper).map(v=>Math.max(Date.now()+100,v.pendingPaper.readyAt));
-        const researchDue=((await this.state.storage.get('research.pending'))||[]).map(p=>Math.max(Date.now()+100,p.readyAt));
-        await this.state.storage.setAlarm(Math.min(this.nextEvent(Date.now(), cfg.mode === "paper", cfg),...due,...researchDue));
-        this.alarmBusy = false;
-      }
+      this.startSessionTask();
+      this.startCollectorTask();
+    } catch(e) { await this.collectorError(e); }
+    finally {
+      try { await this.scheduleAlarm(); }
+      finally { this.alarmBusy=false; }
     }
   }
   async checkpoint(mk, close, check, nowMs) {
@@ -1034,7 +1256,7 @@ export class KalshiFeed {
     // not leak into a forecast recorded for an earlier time.
     const liveTicks = this.ticks.filter(t => t[0] <= nowMs), seconds = [...this.indexSeconds].filter(t => t[0] <= nowMs);
     const book=this.books[mk],tick=this.lastTicker[mk];
-    const offers=book&&nowMs-book.at<1500?{ask:globalThis.BTC15Model.asks(book,"Up")[0]?.price/100,bid:1-globalThis.BTC15Model.asks(book,"Down")[0]?.price/100,at:book.at}:tick&&nowMs-tick.at<5000?{...tick}:null;
+    const offers=book&&nowMs-book.at>=0&&nowMs-book.at<1500?{ask:globalThis.BTC15Model.asks(book,"Up")[0]?.price/100,bid:1-globalThis.BTC15Model.asks(book,"Down")[0]?.price/100,at:book.at}:tick&&nowMs-tick.at>=0&&nowMs-tick.at<5000?{...tick}:null;
     let ticks = liveTicks;
     ticks = seconds; // Immutable one-Hz input snapshot; no retrospective forecast reconstruction.
     const mkt = await signedGet(this.env, "/trade-api/v2/markets/" + mk);
@@ -1144,7 +1366,7 @@ export class KalshiFeed {
       trade.feeVenue=cfg.paperVenue;trade.feeAssumption=cfg.paperVenue==="kalshi"?"general taker, whole-cent conservative rounding":"Robinhood cost scenario on Kalshi depth";
       w.pendingPaper={...trade,close,readyAt:nowMs+cfg.paperDelayMs,bookAt:b.at,cfg:{...cfg}};
       await this.state.storage.put(key,w);
-      await this.state.storage.setAlarm(Math.min(w.pendingPaper.readyAt,Date.now()+1000));
+      await this.scheduleAlarm(Math.min(w.pendingPaper.readyAt,Date.now()+1000));
       return;
     } catch (e) {
       log.errors = (log.errors || []).concat([{at: nowMs, error: String(e.message || e).slice(0, 200)}]).slice(-20);

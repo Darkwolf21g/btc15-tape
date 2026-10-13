@@ -118,15 +118,32 @@ The [WebSocket final-minute helper](https://docs.kalshi.com/websockets/cfbenchma
 
 Regression coverage includes boundary ticks, incomplete/final projections, unchanged stream diagnostics, cohort separation, and four public finalized market records from October 12 (23:00–23:45 UTC). The public fixtures contain official metadata only; private feed observations are not included.
 
+## Timed-session compatibility
+
+New timed paper sessions use `paper-session-v2` with explicit model `brti-driftless-v4`
+and settlement interval `[close-60s,close)`. Existing v1 sessions stop new decisions
+and cancel pending simulations on upgrade while keeping their original history;
+open positions still await official settlement. A fresh session requires an explicit
+start. Five-second looks, four-window duration and strategy thresholds are unchanged.
+
+Slow session and collector maintenance requests run outside the research alarm's
+critical path. Single-flight jobs and atomic earliest-wake scheduling allow the next
+research arrival to run while those requests are pending. Legacy checkpoint quotes
+cannot come from a later receipt timestamp. See RESEARCH.md for rollout limits.
+
 ## Checks
 
-Requires Node.js 18 or newer; no npm dependencies:
+The page/model unit checks require Node.js 18 or newer and no npm dependencies:
 
 ```sh
 node --test tests/settlement.test.cjs
 ```
 
 Tests run the actual page script with network calls and browser side effects stubbed. They cover settlement boundaries, incomplete averages, fractional-second covariance, reconstructed samples, official-only scoring, closing-sample timing, target confirmation, and clearing probability/buy indicators when data becomes incomplete. They also check the two page copies are identical. These checks do not measure live feed latency or establish a trading advantage.
+
+The complete release checks are `npm test`, `npm run check`, `npm run test:runtime`,
+`node tests/websocket-runtime.mjs` and `node tests/alarm-runtime.mjs`. Runtime checks
+use the pinned development dependencies and local Miniflare/workerd, not production.
 
 ## If a feed shows nothing
 

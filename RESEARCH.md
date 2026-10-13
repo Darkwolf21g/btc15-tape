@@ -58,6 +58,32 @@ marked skipped rather than reconstructed from a later book or target.
 Contract reference: https://assets.kalshi.com/contract_terms/CRYPTO.pdf, page 1,
 sixty seconds before the reference time (last trading time).
 
+### Timed paper sessions and deployment boundaries
+
+The timed experiment remains five-second looks over four complete windows, with
+the same delayed one-contract simulated entries/exits, fees, depth haircut,
+thresholds, cooldown and loss stop. New sessions are `paper-session-v2`, explicitly
+pinned to model `brti-driftless-v4` and interval `[close-60s,close)`. Decisions,
+intents, attempts and trades retain that attribution; arrivals also record the
+arrival model/interval. Mismatched or unattributed snapshots cannot create fills.
+
+A saved v1 session is never silently upgraded. The first session clock tick
+stops further decisions, records a compatibility reason, cancels a queued
+simulation once, and leaves open positions pending their official outcome.
+Its original settings and observations remain unchanged; missing historical
+interval attribution stays missing. Status/export reads do not perform migration.
+Starting a new session first preserves any necessary transition in the old one.
+The release itself does not start a timed session or enable the legacy agent.
+
+Research capture/arrival runs in the alarm's fast path. Session REST and slower
+collector maintenance are independent single-flight `waitUntil` jobs. An atomic
+minimum-alarm scheduler preserves research wakes, including newly queued arrivals;
+busy background jobs cannot spin on their own overdue decision deadlines. These
+jobs do not change checkpoint cadence, the 750ms publication grace, receipt-time
+filters, maximum fill latency or retention. Slow research metadata itself still
+fails closed when the existing capture tolerance is exceeded. This is isolation
+from unrelated work, not a guarantee of network latency or executable fills.
+
 ## Chronological evaluation
 
 Fixed UTC test blocks contain 20 windows (five hours). For each checkpoint, choose
