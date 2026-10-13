@@ -9,6 +9,9 @@ for(const file of ['worker.js','public/index.html']) {
  if(a<0||b<a)throw Error('Missing model markers in '+file);
  let next=text.slice(0,a)+block+text.slice(b+end.length);
  if(file==='worker.js'){
+  const sa=next.indexOf('// BEGIN SHARED BTC15 SESSION'),sb=next.indexOf('// END SHARED BTC15 SESSION');
+  if(sa<0||sb<sa)throw Error('Missing session markers');
+  next=next.slice(0,sa)+'// BEGIN SHARED BTC15 SESSION\n'+fs.readFileSync(path.join(root,'shared-session.js'),'utf8').trimEnd()+'\n'+next.slice(sb);
   const ra=next.indexOf(researchStart),rb=next.indexOf(researchEnd);
   if(ra<0||rb<ra)throw Error('Missing research markers');
   next=next.slice(0,ra)+researchStart+'\n'+fs.readFileSync(path.join(root,'shared-research.js'),'utf8').trimEnd()+'\n'+next.slice(rb);
@@ -16,3 +19,5 @@ for(const file of ['worker.js','public/index.html']) {
  if(process.argv.includes('--check')) {if(next!==text)throw Error('Stale shared model in '+file);}else fs.writeFileSync(name,next);
 }
 if(!process.argv.includes('--check'))fs.copyFileSync(path.join(root,'public/index.html'),path.join(root,'index.html'));
+
+if(!process.argv.includes('--check'))fs.copyFileSync(path.join(root,'public/agent.html'),path.join(root,'agent.html'));

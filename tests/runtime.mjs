@@ -18,5 +18,8 @@ try {
  const exported=await (await mf.dispatchFetch('https://test/research/export?token=local-test-token')).json();assert.deepEqual(exported.rows,[]);assert.equal(exported.nextAfter,null);
  assert.equal((await mf.dispatchFetch('https://test/research/export?token=local-test-token',{method:'POST'})).status,405);
  assert.equal((await mf.dispatchFetch('https://test/research/inputs?token=local-test-token&close=1&check=60')).status,404);
+ assert.equal((await mf.dispatchFetch('https://test/paper-session/status')).status,403);
+ const session=await (await mf.dispatchFetch('https://test/paper-session/status?token=local-test-token')).json();assert.equal(session.session,null);
+ assert.equal((await mf.dispatchFetch('https://test/paper-session/start?token=local-test-token',{method:'POST'})).status,409);
  console.log('Worker runtime: auth, SQLite, default OFF, controls, research report/export/retention PASS');
 } finally { await mf.dispose(); }
