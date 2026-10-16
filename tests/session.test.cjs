@@ -20,6 +20,39 @@ test('invalid forecasts and loss stop prevent entry; skipped decisions remain au
 test('unit fixture covers all 720 five-second look slots across four windows without making synthetic performance claims',()=>{const {S,R,s,at}=setup();for(let t=at;t<s.endAt;t+=5000){const close=(Math.floor(t/900000)+1)*900;S.decide(s,quote(R,t,.5),'TEST'+close,close);}S.clock(s,s.endAt);assert.equal(s.looks.length,720);assert.equal(s.trades.length,0);assert.equal(s.status,'complete');});
 
 const copy=value=>JSON.parse(JSON.stringify(value));
+test('coverage separates empty slots from evaluated skips and ignores the unfinished slot',()=>{
+ const {S,R,s,at,close}=setup();
+ S.decide(s,quote(R,at,.5),'TEST',close);
+ S.decide(s,quote(R,at+30000,.5),'TEST',close);
+ const before=JSON.stringify(s),r=S.report(s,at+31000),c=r.coverage;
+ assert.equal(r.skippedDecisions,2);assert.equal(c.plannedSlots,720);
+ assert.equal(c.elapsedSlots,6);assert.equal(c.observedSlots,1);assert.equal(c.missedSlots,5);
+ assert.equal(c.maxEvaluationGapMs,30000);assert.equal(c.windows[0].missedSlots,5);
+ assert.equal(JSON.stringify(s),before);
+ S.stop(s,at+31000,'manual stop');const stopped=S.report(s,at+900000).coverage;
+ assert.equal(stopped.elapsedSlots,7);assert.equal(stopped.observedSlots,2);assert.equal(stopped.missedSlots,5);
+});
+test('complete-hour coverage counts all windows and caps late stop at the durable deadline',()=>{
+ const {S,R,s,at}=setup();
+ assert.equal(S.report(s,at-1).coverage.elapsedSlots,0);
+ for(let t=at;t<s.endAt;t+=5000)S.decide(s,quote(R,t,.5),'TEST'+t,(Math.floor(t/900000)+1)*900);
+ S.clock(s,s.endAt+30000);const c=S.report(s,s.endAt+60000).coverage;
+ assert.equal(c.elapsedSlots,720);assert.equal(c.observedSlots,720);assert.equal(c.missedSlots,0);assert.equal(c.fraction,1);
+ assert.deepEqual(copy(c.windows.map(w=>w.observedSlots)),[180,180,180,180]);
+});
+test('duplicate looks do not conceal missing coverage and pre-start stop creates no missed slots',()=>{
+ const {S,s,at}=setup();s.looks=[{at},{at:at+1000}];
+ const c=S.report(s,at+10000).coverage;assert.equal(c.observedSlots,1);assert.equal(c.missedSlots,1);assert.equal(c.extraLooksInSameSlot,1);
+ const other=setup();other.S.stop(other.s,other.at-1000,'manual stop');
+ assert.equal(other.S.report(other.s,other.at+900000).coverage.elapsedSlots,0);
+});
+test('decision evidence and filled arrival latency survive serialization without inventing old fields',()=>{
+ const {S,R,s,at,close}=setup(),k={...quote(R,at),p2:.85,target:101.23,targetAt:at-30,vols:{s:2,l:3},reads:{version:'session-reads-v1',startedAt:at-50,marketAt:at-30,exchangeAt:at-10}};
+ S.decide(s,k,'TEST',close);S.arrive(s,{...quote(R,at+1092),reads:{version:'session-reads-v1',startedAt:at+1000}});
+ const saved=copy(s),d=saved.attempts[0].decision;
+ assert.equal(d.target,101.23);assert.equal(d.targetAt,at-30);assert.deepEqual(d.vols,{s:2,l:3});assert.equal(d.p2,.85);assert.equal(d.status,'forecast');assert.equal(d.reads.marketAt,at-30);
+ assert.equal(saved.attempts[0].arrivalReads.startedAt,at+1000);assert.deepEqual(copy(S.report(saved,at+2000).fillDelayMs),{min:1092,mean:1092,max:1092});
+});
 function legacySession(){
  const {S,R,s,at,close}=setup();
  s.version='paper-session-v1';s.settings.model='brti-driftless-v3';delete s.settings.settlementConvention;
