@@ -378,7 +378,7 @@ test('slow session and maintenance reads cannot hold capture or newly queued res
  await h.obj.alarm();
  const k=h.data.get('r:'+close).checks[300];assert.equal(k.status,'forecast');assert.equal(k.at,at);
  // Ensure both background tasks entered their blocked I/O, but alarm returned.
- for(let i=0;i<20&&sessionReads===0;i++)await Promise.resolve();
+ for(let i=0;i<100&&(sessionReads===0||maintenanceReads===0);i++)await Promise.resolve();
  assert.equal(sessionReads,1);assert.equal(maintenanceReads,1);assert.ok(h.alarm()>at&&h.alarm()<=at+1000);
  assert.ok(h.obj.sessionTask);assert.ok(h.obj.collectorTask);assert.equal(h.obj.alarmBusy,false);
  h.setTime(at+1000);h.obj.books[mk]=book(h.now());await h.obj.alarm();

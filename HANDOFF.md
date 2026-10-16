@@ -282,3 +282,12 @@ Each browser script prints what it sees and ends with the page errors it caught 
 2. **Order-book depth** (microprice and imbalance) from the five venues, the usual next signal after trade flow.
 3. **Let the record decide** the √2 margin, the lean horizon and the gates, then simplify what loses.
 4. If automation returns: a Kalshi demo-environment client (`external-api.demo.kalshi.co`), signed requests, limit orders at the price the verdict was made at, cancel after a minute — the alert text the paper bot already produces is the spec.
+
+
+## Collector health follow-up — October 16, 2026
+
+A maintenance checkpoint or settlement exception previously aborted all remaining work and prevented lastOk from advancing. The fix isolates stages and forecast/paper settlement rows, prioritizes legacy decisions before historical retries, and shares an eight-second deadline across authenticated maintenance market reads. Stream reconnection, signing and storage are separate operations; this is not a hard wall-clock guarantee. Optional settlement notifications run outside the maintenance single-flight task.
+
+Status retains lastOk only for completely successful cycles and adds lastCycleAt, cycleDurationMs, cycleFailures, maintenanceStartedAt, maintenanceRunning and the current stage. Errors retain their stage in the existing bounded diagnostic log. The tape uses server time and distinguishes degraded, stalled, working and stale states rather than masking failures as active. A later successful cycle clears degraded status. Old stored collector records remain readable.
+
+Local verification: 176 tests and source/mirror checks pass. Three new regressions fail against pre-fix main. Live production diagnostics remain inaccessible from this workspace; the screenshot's exact failure is not established. No session/model/execution versions, credentials, trading settings or official-settlement rules change.

@@ -1647,9 +1647,19 @@ async function refreshCollector() {
       const labels={platform_limit:"Cloudflare request quota exhausted · retry in 5 min",collector_overloaded:"collector overloaded",collector_storage:"collector storage error",collector_timeout:"collector timed out",collector_restarting:"collector restarting",collector_exception:"collector exception"};
       throw Error(r.status===403?"token required":(labels[failure.error]||`HTTP ${r.status}`)+(failure.trace?" · ref "+failure.trace.slice(0,8):""));
     }
-    const c = await r.json(), age = c.lastOk ? Math.max(0, (Date.now() - c.lastOk) / 1000) : Infinity;
-    $("healthCollector").textContent = age < 120 ? `Collector active · ${Math.round(age)}s ago · ${c.forecasts || 0} forecasts` : `Collector stale · ${Number.isFinite(age) ? Math.round(age / 60) + "m ago" : "no successful run"}`;
-    $("healthCollector").className = age < 120 ? "good" : "bad";
+    const c = await r.json(), now=Number.isFinite(c.now)?c.now:Date.now();
+    const age=c.lastOk?Math.max(0,(now-c.lastOk)/1000):Infinity;
+    const cycleAge=c.lastCycleAt?Math.max(0,(now-c.lastCycleAt)/1000):Infinity;
+    const runAge=c.lastRun?Math.max(0,(now-c.lastRun)/1000):Infinity;
+    const ageText=Number.isFinite(age)?Math.round(age/60)+"m ago":"no successful run";
+    let text,healthy=false;
+    if(c.cycleFailures>0&&cycleAge<120)text=`Collector degraded · ${c.cycleFailures} failed tasks · last success ${ageText}`;
+    else if(c.maintenanceRunning&&now-c.maintenanceStartedAt>=15000)text="Collector stalled · maintenance overdue";
+    else if(age<120){text=`Collector active · ${Math.round(age)}s ago · ${c.forecasts || 0} forecasts`;healthy=true;}
+    else if(runAge<120)text=`Collector working · last success ${ageText}`;
+    else text=`Collector stale · ${ageText}`;
+    $("healthCollector").textContent=text;
+    $("healthCollector").className=healthy?"good":"bad";
   } catch (e) { $("healthCollector").textContent = "Collector unavailable · " + e.message; $("healthCollector").className = "bad"; }
 }
 setInterval(refreshCollector, 30000); setTimeout(refreshCollector, 1500);
