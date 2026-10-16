@@ -196,7 +196,7 @@ summary { display: list-item; padding-block: 10px; }
     <span><i style="background:var(--avg)"></i><span id="avgLegend">60-s average</span></span>
     <span><i style="background:var(--target)"></i>Target</span>
     <span><i style="background:var(--warn)"></i>Needed for Up (last minute)</span>
-    <span><i style="background:var(--dim)"></i>Projection, ±1 and ±2 scales</span>
+    <span><i style="background:var(--dim)"></i>Closing estimate · ±1/±2 model scales at close</span>
     <span id="leadLegend" hidden><i style="background:var(--lead)"></i>Perp (leads)</span>
   </div>
 </div>
@@ -261,7 +261,7 @@ summary { display: list-item; padding-block: 10px; }
     <div class="notes">
       <p><b>Target.</b> Exact when Kalshi can be reached (through a relay). Otherwise it is estimated from the page's own prices over the minute before the open, and the exchanges here sit a few dollars from the official index. Enter the exact target from Robinhood for this window. It can also estimate the exchange-to-index offset when the opening minute is complete. That offset can change; reconfirm the target each window. Buy signals wait for a retrieved or entered target.</p>
       <p><b>Sync.</b> Another way to measure the same difference: type Robinhood's big number while it is showing.</p>
-      <p><b>Closing average, projected.</b> The contract settles on the average of the last 60 seconds. Until that minute starts none of those seconds has happened, and a random walk's best forecast for every one of them is the price now, so the projection sits on spot (plus the lean) and only its uncertainty shrinks as the close nears. In the final minute, observed official BRTI readings contribute to the projection and future readings follow the current index. Missing elapsed BRTI readings pause the model. Only Kalshi confirms the winning outcome.</p>
+      <p><b>Closing average, projected.</b> The contract settles on the average of the last 60 seconds. Until that minute starts none of those seconds has happened, and a random walk's best forecast for every one of them is the price now, so the projection equals fresh BRTI spot. Its uncertainty depends on time remaining and measured volatility; it is not a predicted price trend. In the final minute, observed official BRTI readings contribute to the projection and future readings follow the current index. Missing elapsed BRTI readings pause the model. The chart shows the estimate and ±1/±2 model scales at the close, not a future price path or validated confidence interval. Only Kalshi confirms the winning outcome.</p>
       <p><b>Timing.</b> A trailing 60-second average smooths price changes. Its effective delay depends on the price path and is not a measured network delay or a guaranteed trading lead. Spot uses official BRTI when fresh and labels exchange estimates when unavailable. The blue average uses only official one-second BRTI observations, requires all 60 readings, and leaves gaps empty. This trailing window is different from the contract’s final settlement minute.</p>
       <p><b>Official history.</b> With the same key, any minute the page did not see itself (the one before the open, or after another app was in front) is rebuilt from the index's own tick history rather than from Coinbase trades.</p>
       <p><b>Kalshi's own stream.</b> With an API key set on the relay (two secrets on the Cloudflare Worker; the README says how), the page shows the official BRTI index itself, up to five times a second, Kalshi's official trailing average, and, in the final minute, the streamed final-minute aggregate as a separate diagnostic, plus the market's prices the moment they change. The spot and average tiles then say "official" with the reading's age. Without the key exchange prices remain context only; the BRTI average and model signals stay unavailable.</p>
@@ -271,7 +271,7 @@ summary { display: list-item; padding-block: 10px; }
       <p><b>Record.</b> At 10, 5, 2 and 1 minutes before each close the page notes its chance and Kalshi's price, and only after Kalshi confirms the outcome it scores both (a Brier score: the squared miss, so 0 is perfect and 0.25 is a coin flip). It also scores every buy call as one contract held to settlement. Until the model's score is below the market's over a few dozen windows, treat buy calls as a hypothesis, not an edge.</p>
       <p><b>Sharp moves.</b> Sudden jumps can invalidate the forecast. The model uses a fat-tailed curve, with displayed probabilities bounded to 1–99%; that does not prove calibration. The "Sharp move" note appears when spot moves several estimated standard deviations in ten seconds. The projection assumes its remaining price forecast holds.</p>
       <p><b>Order flow.</b> Every trade on the five index exchanges and the Hyperliquid perpetual is sorted by who crossed the spread: a market buy counts as buying, a market sell as selling. The bars are the difference, in dollars, and the line is the running total since the open. A move with heavy flow behind it tends to carry on; a move on balanced flow is more often a sweep that fades. Prints of $200k or more are listed under the chart.</p>
-      <p><b>Flow lean.</b> The page also measures, as it runs, how far spot has tended to move in the 30 seconds after a stretch of net buying or selling. Once that relation is clear (about ten minutes of data at the least, usually more) the projection leans the way the flow points, by that measured amount and never by more than two standard deviations of a 30-second move. The flow line says whether the lean is on. It is forgotten slowly, so what it learnt this evening still counts tomorrow morning. Liquidations come from Bybit, OKX, Deribit, BitMEX and Binance (Binance refuses US connections): longs being liquidated is forced selling, shorts being liquidated is forced buying, and a run of them is what makes a move overshoot.</p>
+      <p><b>Flow lean.</b> The page also measures, as it runs, how far spot has tended to move in the 30 seconds after a stretch of net buying or selling. Once that relation is clear (about ten minutes of data at the least, usually more) a separate research lean measures that relation, capped at two standard deviations of a 30-second move. The flow line says whether this experimental signal is measurable. It does not change the closing-average estimate or official probability. It is forgotten slowly, so what it learnt this evening still counts tomorrow morning. Liquidations come from Bybit, OKX, Deribit, BitMEX and Binance (Binance refuses US connections): longs being liquidated is forced selling, shorts being liquidated is forced buying, and a run of them is what makes a move overshoot.</p>
       <p><b>Sound.</b> Tap Sound once (browsers will not play anything until you do). Then: two rising notes for a sharp move up, two falling for down; three notes when Kalshi's own price leaves a 3¢ edge for Up or Down; one low note at one minute to go. On an iPhone the ring/silent switch must be on ring.</p>
       <p>The chance shown is a model: a random walk from spot with recently measured volatility and fat tails. The same frozen BRTI model runs on the page and collector. Flow, the experimental lean, and liquidations are research context and do not alter its official forecast. This probability is uncalibrated and is not the official contract outcome.</p>
     </div>
@@ -1283,7 +1283,7 @@ function drawMain(open, close, now, tgt, proj) {
   const ys = pts.map(p => p.p + basis).concat(avgPts.map(p => p[1]));
   if (tgt != null) ys.push(tgt);
   if(lastNeed!=null)ys.push(lastNeed);
-  if (proj && close<=t1) ys.push(proj.mean - proj.sd, proj.mean + proj.sd);
+  if (proj && close<=t1) ys.push(proj.mean - 2 * proj.sd, proj.mean + 2 * proj.sd);
   if (!ys.length) return;
   let lo = Math.min(...ys), hi = Math.max(...ys);
   if (hi - lo < 20) { const c = (hi + lo) / 2; lo = c - 10; hi = c + 10; }
@@ -1320,17 +1320,18 @@ function drawMain(open, close, now, tgt, proj) {
     g.strokeStyle = css("--warn"); g.setLineDash([2, 3]); g.lineWidth = 1.5;
     g.beginPath(); g.moveTo(X(close - SETTLE), Y(lastNeed)); g.lineTo(W - R, Y(lastNeed)); g.stroke(); g.setLineDash([]);
   }
-  // projection to the close: ±2 model scales faint, ±1 scale, centre
-  if (proj && avgPts.length && close<=t1) {
-    const [ls, la] = avgPts[avgPts.length - 1], xc = X(close) - 3;
+  // The model estimates one endpoint distribution, not a future average path.
+  // Keep the trailing average separate; the closing estimate needs no trailing line.
+  if (proj && close<=t1) {
+    const xc = X(close) - 6;
     g.save(); g.beginPath(); g.rect(L, T, W - L - R, H - T - B); g.clip();
-    g.fillStyle = "rgba(133,146,173,0.14)";
-    g.beginPath(); g.moveTo(X(ls), Y(la)); g.lineTo(xc, Y(proj.mean + 2 * proj.sd)); g.lineTo(xc, Y(proj.mean - 2 * proj.sd)); g.closePath(); g.fill();
-    g.fillStyle = "rgba(133,146,173,0.22)";
-    g.beginPath(); g.moveTo(X(ls), Y(la)); g.lineTo(xc, Y(proj.mean + proj.sd)); g.lineTo(xc, Y(proj.mean - proj.sd)); g.closePath(); g.fill();
+    g.fillStyle = "rgba(133,146,173,0.25)";
+    g.fillRect(xc-3,Y(proj.mean+2*proj.sd),6,Y(proj.mean-2*proj.sd)-Y(proj.mean+2*proj.sd));
+    g.fillStyle = "rgba(133,146,173,0.65)";
+    g.fillRect(xc-5,Y(proj.mean+proj.sd),10,Y(proj.mean-proj.sd)-Y(proj.mean+proj.sd));
     g.strokeStyle = css("--dim"); g.setLineDash([3, 3]);
-    g.beginPath(); g.moveTo(X(ls), Y(la)); g.lineTo(xc, Y(proj.mean)); g.stroke(); g.setLineDash([]);
-    g.fillStyle = proj.mean >= tgt ? css("--up") : css("--down");
+    g.beginPath(); g.moveTo(X(now), Y(proj.mean)); g.lineTo(xc, Y(proj.mean)); g.stroke(); g.setLineDash([]);
+    g.fillStyle = tgt==null ? css("--dim") : proj.mean >= tgt ? css("--up") : css("--down");
     g.beginPath(); g.arc(xc, Y(proj.mean), 4, 0, 7); g.fill();
     g.restore();
   }
@@ -1881,8 +1882,9 @@ function render() {
   // In the final minute: the average the remaining seconds must reach for Up to win.
   const need = proj && tgt != null && proj.observed && proj.m > 0 ? Math.ceil((((tgt - 0.005) * 60 - (proj.sum + (proj.official ? 0 : proj.observed * basis))) / proj.m) * 100 - 1e-7) / 100 : null;
   $("lvProj").textContent = proj ? money(proj.mean) : "–";
-  $("lvProjNote").textContent = proj ? (proj.observed ? (proj.official ? `${proj.observed}/60 pre-close BRTI readings` : `${proj.observed}/60 proxy samples, ${proj.reconstructed} reconstructed`) + (need != null ? ` · Up needs ≥ ${money(need)} over the last ${proj.m} s` : "") : (live ? "official index; forecast until the final minute" : "exchange-proxy forecast until the final minute")) + ` · ±${proj.sd.toFixed(0)} model scale · vol $${vols.s.toFixed(1)} now, $${vols.l.toFixed(1)}/√s over 15 min` + (lean ? ` · experimental lean ${signed(lean)} (not applied)` : "")
-    : projectionStatus && projectionStatus.missing ? `INCOMPLETE: ${projectionStatus.missing} elapsed BRTI readings missing` : vols == null ? "measuring volatility…" : "needs the target";
+  $("lvProjNote").textContent = proj ? (proj.observed ? (proj.official ? `${proj.observed}/60 pre-close BRTI readings` : `${proj.observed}/60 proxy samples, ${proj.reconstructed} reconstructed`) + (need != null ? ` · Up needs ≥ ${money(need)} over the last ${proj.m} s` : "") : (live ? "official index; forecast until the final minute" : "exchange-proxy forecast until the final minute")) + ` · ±${proj.sd.toFixed(proj.sd<1?2:0)} model scale · vol $${vols.s.toFixed(1)} now, $${vols.l.toFixed(1)}/√s over 15 min` + (lean ? ` · experimental lean ${signed(lean)} (not applied)` : "")
+    : !live ? "Waiting for fresh official BRTI; projection paused" : projectionStatus && projectionStatus.missing ? `INCOMPLETE: ${projectionStatus.missing} elapsed BRTI readings missing` : vols == null ? "measuring volatility…" : "needs the target";
+  if(view.pending)$("lvProjNote").textContent += ` · awaiting next BRTI; estimate ${(Math.max(0,nowMs-view.at)/1000).toFixed(1)}s old`;
   lastNeed = need;
   lastInputs = proj ? {x: +x.toFixed(2), src: live ? "stream" : "exchanges", sd: +proj.sd.toFixed(1), lean: +lean.toFixed(1), known: proj.official ? "official" : proj.observed + "/60", tgt, vol: +vols.s.toFixed(2)} : null;
   // the settlement minute, in one strip
