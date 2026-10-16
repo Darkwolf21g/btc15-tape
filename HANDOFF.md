@@ -291,3 +291,12 @@ A maintenance checkpoint or settlement exception previously aborted all remainin
 Status retains lastOk only for completely successful cycles and adds lastCycleAt, cycleDurationMs, cycleFailures, maintenanceStartedAt, maintenanceRunning and the current stage. Errors retain their stage in the existing bounded diagnostic log. The tape uses server time and distinguishes degraded, stalled, working and stale states rather than masking failures as active. A later successful cycle clears degraded status. Old stored collector records remain readable.
 
 Local verification: 176 tests and source/mirror checks pass. Three new regressions fail against pre-fix main. Live production diagnostics remain inaccessible from this workspace; the screenshot's exact failure is not established. No session/model/execution versions, credentials, trading settings or official-settlement rules change.
+
+
+## Closing-average projection review — October 16, 2026
+
+Reviewed the BRTI adapters, canonical projectFrom, render/hold behavior, chart, adverse bands and settlement tests on main 8188259. The model remains brti-driftless-v4 with the [close-60s,close) convention. Before the settlement minute its mean equals current fresh BRTI. During that minute the mean is (sum of observed contract readings + remaining count × current BRTI) / 60. Any missing elapsed second pauses the calculation; the close-time tick is excluded. All 60 known readings fix the local mean, but the frozen 30-cent residual model-scale floor remains and only official outcomes settle trades. The Student-t scales are not validated confidence intervals. No model thresholds, rules or attribution changed.
+
+Presentation fixes replace the fan anchored to the unrelated trailing average with closing-time ±1/±2 scale bars and a horizontal estimate reference. Both scales enter the axis range; the display works without a complete trailing line. Help text no longer claims experimental flow changes the official forecast. Stale BRTI is labeled as the reason for a paused projection. Sub-dollar scales retain decimals, and the projection tile identifies a held display awaiting its next BRTI reading.
+
+Local checks: 178 tests, source/mirror checks and diff whitespace checks pass. Added analytical official-input weighting / no-drift / future-exclusion assertions and a canvas test for endpoint bars without trailing history. Existing gap, boundary, covariance, publication-grace and official-only settlement tests remain passing. Live predictive calibration is not established by these checks.

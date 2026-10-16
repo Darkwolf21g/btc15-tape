@@ -33,7 +33,7 @@ function page(savedRecord = []) {
   });
   // Skip only startup: initialise all real declarations and event handlers.
   vm.runInContext(script.slice(0, script.indexOf('// ---------------------------------------------------------------- start')) + `
-    const realRenderChips=renderChips;
+    const realRenderChips=renderChips,realDrawMain=drawMain;
     drawMain = drawFlow = drawProb = renderChips = renderFlowText = () => {};
     globalThis.api = {
       avgAt, project, windowSamples, captureProxyClose, settleWindow, settleOfficial,
@@ -43,7 +43,7 @@ function page(savedRecord = []) {
       setMarketResponse(market) { kalshiGet = async () => ({market}); },
       seedVol() { volN = 60; for (const row of vol) { row[0] = 4; row[1] = 1; } },
       setTarget(mk, value) { typedTarget[mk] = value; },
-      refreshCollector,VENUES,connectFeed,renderChipsActual:realRenderChips,kalshiGet,pollExchange,onTrade,onLiq,flow,liqs,
+      drawMainActual:realDrawMain,refreshCollector,VENUES,connectFeed,renderChipsActual:realRenderChips,kalshiGet,pollExchange,onTrade,onLiq,flow,liqs,
     };
   `, context);
   const api = context.api;
@@ -395,6 +395,7 @@ test('brief newest-second publication delay keeps the display stable but disable
   assert.equal(node('pBig').textContent,prior);
   assert.equal(node('stIn').textContent,count);assert.equal(node('settle').hidden,false);
   assert.match(node('healthMode').textContent,/Awaiting next BRTI/);
+  assert.match(node('lvProjNote').textContent,/awaiting next BRTI; estimate/);
   assert.match(node('vUp').textContent,/WAIT/);assert.match(node('vDown').textContent,/WAIT/);
   assert.match(node('decision').textContent,/trade signals paused/);
   assert.equal(api.pHist.has(3561),false);
@@ -458,6 +459,7 @@ test('last pre-close reading completes the displayed contract count without clai
   assert.equal(node('stIn').textContent,'60 / 60');assert.equal(node('stNeed').textContent,'–');
   assert.match(node('stInNote').textContent,/pre-close BRTI/);
   assert.doesNotMatch(node('lvProjNote').textContent,/Kalshi's own average/);
+  assert.match(node('lvProjNote').textContent,/±0.30 model scale/);
   assert.equal(api.scoreRecord().settled,0);
 });
 test('current-version page scores exclude old model forecasts without rewriting them', () => {
@@ -491,4 +493,31 @@ test('collector health separates failed work, stalled maintenance and successful
  assert.match(n.textContent,/active.*1s ago/);assert.equal(n.className,'good');
  n=await show({lastOk:now-300000,lastRun:now-1000});assert.match(n.textContent,/working.*5m ago/);assert.equal(n.className,'bad');
  n=await show({lastOk:now-300000,lastRun:now-300000});assert.match(n.textContent,/stale/);
+});
+
+test('official closing projection uses spot before the final minute and weights remaining readings without flow lean',()=>{
+ const h=page(),a=h.api;a.feed.brti={v:160,t:90500};
+ const vols={s:2,l:2};
+ let p=a.project(59,120,160,vols,[[999,1]]);assert.equal(p.mean,160);assert.equal(p.observed,0);assert.equal(p.m,60);
+ for(let sec=60;sec<=90;sec++)a.officialSeconds.set(sec,100);
+ // Future stored ticks and experimental lean must not enter the forecast.
+ for(let sec=91;sec<=120;sec++)a.officialSeconds.set(sec,1000);
+ p=a.project(90.5,120,160,vols,[[999,1]]);
+ near(p.mean,(31*100+29*160)/60);assert.equal(p.observed,31);assert.equal(p.m,29);
+ a.officialSeconds.delete(80);assert.equal(a.project(90.5,120,160,vols,[]).mean,null);
+ a.officialSeconds.set(80,100);
+ for(let sec=91;sec<120;sec++)a.officialSeconds.set(sec,100);
+ p=a.project(119.5,120,99999,vols,[]);assert.equal(p.mean,100);assert.equal(p.m,0);near(p.sd,.3);
+});
+test('closing-estimate chart renders endpoint scales without requiring a trailing average',()=>{
+ const h=page(),rects=[],lines=[],arcs=[];let moves=[];
+ const g=new Proxy({beginPath(){moves=[];},moveTo(...v){moves.push(v);},lineTo(...v){moves.push(v);},stroke(){lines.push(moves);},fillRect(...v){rects.push(v);},arc(...v){arcs.push(v);}}, {get:(o,k)=>k in o?o[k]:(()=>{})});
+ h.context.chartContext=g;vm.runInContext('setupCanvas=()=>[chartContext,600,400]',h.context);
+ h.api.drawMainActual(0,900,300,105,{mean:110,sd:5});
+ // The 6px and 10px endpoint bars are present even without 60 historical readings.
+ const outer=rects.find(r=>r[2]===6),inner=rects.find(r=>r[2]===10);assert.ok(outer);assert.ok(inner);
+ near(outer[3],2*inner[3]);assert.ok(arcs.length);
+ const centre=lines.find(line=>line.length===2&&line[0][1]===arcs[0][1]&&line[1][1]===arcs[0][1]);assert.ok(centre);
+ // Both scales stay inside the chart's vertical plotting region.
+ assert.ok(outer[1]>=10&&outer[1]+outer[3]<=378);
 });
