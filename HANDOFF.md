@@ -1,5 +1,23 @@
 # BTC 15 Tape — handoff
 
+## Full application audit — October 16, 2026
+
+See APPLICATION_AUDIT.md for file coverage, reproduced findings, fixes and remaining
+limits. This audit is based on main dfd4092, preserving PR #16 and v4 settlement.
+Cold-start connections and paper control mutations are now serialized before I/O.
+Legacy Off is rechecked after network waits; legacy simulation requires integer
+contracts under execution version paper-delayed-depth-v3. No existing record is
+relabeled. Timed-session schema/model/thresholds are unchanged.
+
+Research metadata now uses parallel reads with a shared two-second deadline and
+records research-reads-v1 timing. This bounds research I/O in the alarm path but
+does not promise precise alarm cadence. Tape signals additionally require active
+contract status confirmed within 30 seconds. Browser requests are bounded, retired
+socket callbacks ignored, and relay/trade text is escaped before HTML insertion.
+The offline evaluator protects its input dataset, and source checks verify both
+page mirrors. New CI runs deterministic, local workerd and fixture browser checks
+without production credentials or deployment commands (only a dry-run build).
+
 ## Session reliability review — October 16, 2026
 
 Session reads now launch market metadata, exchange status and any due official

@@ -1,5 +1,12 @@
 # Settlement-aware research
 
+Audit update (October 16): checkpoint market/exchange reads now run concurrently
+with one two-second deadline, retaining actual market receipt time and
+`reads.version = research-reads-v1`. A timeout is an unavailable capture, not a
+successful forecast. Checkpoints, tolerance, model, hypotheses and simulated-fill
+rules are unchanged. Saved old captures are not rewritten; separate read-policy
+versions when comparing collection performance.
+
 This is a read-only experiment attached to the existing collector. Deployment
 starts new observations without enabling paper, demo or live trading. Older
 records cannot supply missing historical depth or receipt times.

@@ -1,5 +1,24 @@
 # BTC 15 Tape
 
+## Current application behavior
+
+The tape uses fresh official BRTI for its model and requires a recently confirmed
+active contract as well as an open exchange for trade signals. Missing data means
+WAIT. The blue average contains official BRTI readings only. Flow lean is displayed
+as research context and is not applied to the frozen model.
+
+Production order writes are disabled. The two autonomous experiments are legacy
+PAPER and an explicitly started one-hour paper session; they cannot run together.
+The separate demo panel submits only manually requested mock-fund demo orders.
+There is no enabled LIVE mode or automatic promotion.
+
+The full source audit and remaining work are in [APPLICATION_AUDIT.md](APPLICATION_AUDIT.md).
+Legacy paper execution `paper-delayed-depth-v3` requires integer contract counts;
+v2 records remain stored and are excluded from the current legacy execution report.
+Timed sessions remain `paper-session-v2` / `brti-driftless-v4` with unchanged rules.
+Older dated release notes below describe historical versions and are superseded
+by current behavior, the settlement correction, and the audit handoff.
+
 ## Settlement interval correction (v4)
 
 The KXBTC15M forecast now uses the 60 one-second BRTI readings strictly before
@@ -68,11 +87,11 @@ Live view of the BTC 15-minute event contract (Robinhood "BTC 15 min", settled o
 
 ## What is on the page
 
-- **Spot and the 60-second average.** Spot is a consensus of five exchanges (Coinbase, Kraken, Bitstamp, Gemini, Crypto.com), each one's usual distance from the others taken off. The blue line is a complete trailing average of this exchange proxy. It is **not the official BRTI stream or settlement value**. The perpetual future on Hyperliquid is drawn separately.
+- **Spot and the 60-second average.** Spot uses fresh official BRTI when available and labels the five-exchange consensus as context otherwise. The blue line requires a complete official BRTI trailing window; missing readings leave gaps. It is not the official final settlement label. The Hyperliquid perpetual is separate context.
 - **Chance of Up.** A random walk from spot to the closing average, against the target, with fat tails. Volatility is measured two ways, over the last two minutes and the last fifteen, and the quick one gives way to the slow one along the horizon. The level's uncertainty against the official index is measured from Kalshi's own average feed. The chance comes with a band: what it would be with volatility 30% lower or 50% higher, the lean off, and a one-sd adverse move while the order is placed.
 - **Buy, thin, no.** The Up/Down boxes compare the chance with Kalshi's prices after Robinhood's fees. *Buy* means 3¢ is left at the bad end of the band, and comes with a quarter-Kelly size capped at 2% of the bankroll (set in the calibration panel). *Thin* means an edge at the model's chance only. *No* means none.
 - **Record.** At 10, 5, 2 and 1 minutes before each close the page notes its chance and Kalshi's price. Brier scores and simulated buy-call P&L use **only confirmed Kalshi outcomes**. Proxy closing averages stay separate as diagnostics; old proxy outcomes are removed from scoring and await confirmation. Kept in the browser; the Record panel lists the last 25 windows.
-- **Order flow.** Every trade on the six venues, sorted by who crossed the spread. Bars are net buying or selling per 5 or 10 seconds, the line is the running total since the open, prints of $200k and up are listed. The page also fits, as it runs, how far spot moves in the next 30 seconds against the last 30 seconds of net flow and the perp's gap to spot; each enters the projection only once its own relation is clear (the flow line says when the lean is on).
+- **Order flow.** Trades from six venues are sorted by who crossed the spread. Bars show net buying or selling per 5 or 10 seconds and the line shows the total since open. Prints of $200k and up are listed. The fitted flow/perpetual lean is experimental context and does not alter official model probabilities.
 - **Liquidations** from Bybit, OKX, Deribit and BitMEX (Binance refuses US connections): longs liquidated is forced selling, shorts liquidated is forced buying.
 - **Sound.** Tap Sound once. Two rising or falling notes on a sharp move, three notes when Kalshi's price leaves a 3¢ edge, one low note at a minute to go.
 
@@ -82,13 +101,16 @@ With the key set, the relay wakes at 10, 5, 2 and 1 minutes before each close an
 
 ## The trading agent (off by default)
 
-The relay can also trade. From 10 minutes before each close to 15 seconds before it, every 5 seconds, it runs the page's model on the stream and, when a side clears 3¢ at the bad end of the band, sends one limit order at the ask, immediate-or-cancel, sized at a quarter Kelly and capped at $10 a window (hard ceiling $50). One trade a window, 12 a day, nothing after a $30 daily loss, nothing while Kalshi has trading paused. Modes: **off**, **paper** (decides and scores, no orders), **demo** (Kalshi's demo exchange; set `KALSHI_DEMO_KEY_ID` and `KALSHI_DEMO_PRIVATE_KEY` from a demo-environment key), **live**. `agent.html` (linked from the tape's *Trading agent* panel) is the agent's own page: mode, today's and all-time P&L, every trade with its edge and chance, recent looks without a trade, errors, the collector's state, and the controls (mode, cap per window, start minute, bankroll). Controls need `FEED_TOKEN` set on the Worker and saved in the page; Live asks you to type LIVE. Set `NTFY_TOPIC` (a private topic name) on the Worker and install the ntfy app subscribed to it to get a push on every trade and every settlement. `GET /trade/status`, `POST /trade/config`.
-
-Run it in paper until the Record shows the model ahead of the market over a few dozen windows, then demo, then live with the cap you can afford to lose.
+The legacy agent supports OFF and PAPER only. Between the configured start minute
+and 15 seconds before close, it evaluates simulated entries using the frozen model,
+fees, risk caps and delayed depth fills. The timed session is a separate four-window
+experiment with entries and exits. Open `agent.html` for controls, reports and the
+isolated manual demo panel. All controls require the configured `FEED_TOKEN`.
+No production exchange order is sent. Performance reports do not enable live trading.
 
 ## Exact Kalshi data
 
-Browsers are not allowed to read Kalshi directly, so on its own the page estimates the target. Deployed as a Cloudflare Worker (free), the same repo serves the page and relays two read-only Kalshi requests, and the page then shows the exact target, the official 60-second average and Kalshi's own prices.
+Browsers are not allowed to read Kalshi directly, so on its own the page estimates the target. Deployed as a Cloudflare Worker, the same repo serves the page and relays allowlisted read-only Kalshi requests. Continuous collection uses Cloudflare resources; check account usage.
 
 1. Sign up at cloudflare.com and connect your GitHub account.
 2. Workers & Pages → Create → **Import a repository** → choose `btc15-tape` → Deploy. The settings are in `wrangler.jsonc`.
@@ -104,7 +126,7 @@ With an API key the Worker also streams Kalshi's own data to the page: the offic
 2. On Cloudflare: the `btc15-tape` Worker → **Settings → Variables and Secrets** → add secrets `KALSHI_KEY_ID` (the key ID) and `KALSHI_PRIVATE_KEY` (the whole key file, including the BEGIN/END lines). Optionally `FEED_TOKEN`: any password; then enter it in the page under *Target and calibration → Stream token*.
 3. Reload the page. The Market chips show `BRTI official 0.3 s` when the stream is live, or why it is not (no key, Kalshi refused, connecting).
 
-The key is used to sign the WebSocket handshake and, through `/brti/history`, read-only requests for the index's tick history (used to rebuild minutes the page did not see); the Worker subscribes to the index and the two current market tickers and nothing else. Kalshi notes the CF Benchmarks data needs an entitlement on the account; if it is missing the chips say Kalshi refused. One Durable Object holds the single upstream connection and shares it with every open page; it closes a minute after the last page leaves. Never paste the key anywhere but the Cloudflare secret.
+The key signs the WebSocket handshake and read-only API requests. The Worker subscribes to BRTI and the current contract; depth is enabled for viewers, paper activity and research bursts. CF Benchmarks data needs the account entitlement. One Durable Object shares the upstream connection and keeps collecting without viewers when credentials are configured. Never paste the key anywhere but the Cloudflare secret.
 
 ## Settlement and data completeness
 
@@ -147,7 +169,7 @@ are not rewritten. Keep different read-policy versions separate when comparing
 execution performance. Raw one-Hz buffers are still retained only by checkpoint
 research, not by every session look.
 
-The page/model unit checks require Node.js 18 or newer and no npm dependencies:
+The page/model unit checks require Node.js 22 or newer and no npm dependencies:
 
 ```sh
 node --test tests/settlement.test.cjs

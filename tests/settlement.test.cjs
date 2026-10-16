@@ -23,7 +23,7 @@ function page(savedRecord = []) {
     return nodes.get(id);
   };
   const context = vm.createContext({
-    Date: Clock, console, Intl, URL, getComputedStyle() { return {getPropertyValue() { return "#888"; }}; }, setInterval() {}, clearTimeout() {},
+    Date: Clock, console, Intl, URL, AbortSignal, getComputedStyle() { return {getPropertyValue() { return "#888"; }}; }, setInterval() {}, clearTimeout() {},
     setTimeout(fn, ms) { timers.push({fn, ms}); return timers.length; },
     window: {addEventListener() {}}, navigator: {},
     document: {getElementById: node, addEventListener() {}},
@@ -33,6 +33,7 @@ function page(savedRecord = []) {
   });
   // Skip only startup: initialise all real declarations and event handlers.
   vm.runInContext(script.slice(0, script.indexOf('// ---------------------------------------------------------------- start')) + `
+    const realRenderChips=renderChips;
     drawMain = drawFlow = drawProb = renderChips = renderFlowText = () => {};
     globalThis.api = {
       avgAt, project, windowSamples, captureProxyClose, settleWindow, settleOfficial,
@@ -42,6 +43,7 @@ function page(savedRecord = []) {
       setMarketResponse(market) { kalshiGet = async () => ({market}); },
       seedVol() { volN = 60; for (const row of vol) { row[0] = 4; row[1] = 1; } },
       setTarget(mk, value) { typedTarget[mk] = value; },
+      VENUES,connectFeed,renderChipsActual:realRenderChips,kalshiGet,pollExchange,onTrade,onLiq,flow,liqs,
     };
   `, context);
   const api = context.api;
@@ -52,6 +54,59 @@ function page(savedRecord = []) {
 function fill(api, start, end, value = 100) {
   for (let s = start; s <= end; s++) api.samples.set(s, value);
 }
+test('invalid fast index values and trade amounts never poison the tape buffers',()=>{
+ const h=page();h.api.acceptIndex(Infinity,3560000);assert.equal(h.api.feed.brti,null);
+ h.api.onTrade('coinbase',{openedAt:0},100,Infinity,true,3560000);assert.equal(h.api.flow.size,0);
+ h.api.onLiq('bybit',{openedAt:0},100,Infinity,true,3560000);assert.equal(h.api.liqs.length,0);
+});
+test('an inactive individual market suppresses tape buy signals even when the exchange is open',()=>{
+ const h=readyPage(),{api,node}=h;api.acceptIndex(100,3560000);for(let t=3380;t<=3560;t++)api.officialSeconds.set(t,100);
+ const mk=api.tickers(3600)[1];api.kalshi.market={ticker:mk,target:90,status:'inactive',at:3560000,bid:.29,ask:.3};
+ vm.runInContext('exch.at=Date.now();exch.active=exch.trading=true;manualQuoteAt.Up=Date.now()',h.context);
+ api.render();assert.match(node('vUp').textContent,/WAIT.*market/);assert.doesNotMatch(node('decision').textContent,/^Buy/);
+});
+test('tape market requests have a timeout signal',async()=>{
+ const h=page(),requests=[];h.api.feed.token='fixture-secret';
+ h.context.fetch=async(url,options)=>{requests.push({url,options});return {ok:true,json:async()=>({exchange_active:true,trading_active:true})};};
+ await h.api.pollExchange();assert.ok(requests[0].options.signal);
+});
+test('relay error markup is displayed as text in source chips and their summary',()=>{
+ const h=page();h.api.feed.state='open';h.api.feed.relay={hasKey:true,state:'off',error:'<img src=x onerror=alert(1)>'};
+ h.api.renderChipsActual(3560000,h.api.tickers(3600)[1]);
+ for(const id of ['sources','srcSum']){assert.doesNotMatch(h.node(id).innerHTML,/<img/);assert.match(h.node(id).innerHTML,/&lt;img/);}
+});
+test('fresh active contract status permits a signal and stale status pauses it',()=>{
+ const h=readyPage(),{api,node}=h;api.acceptIndex(100,3560000);for(let t=3380;t<=3560;t++)api.officialSeconds.set(t,100);
+ api.kalshi.market={ticker:api.tickers(3600)[1],target:90,status:'active',statusAt:3560000,at:3560000,bid:.29,ask:.3};
+ vm.runInContext('exch.at=Date.now();exch.active=exch.trading=true;manualQuoteAt.Up=Date.now()',h.context);
+ api.render();assert.match(node('vUp').textContent,/· buy/);
+ api.kalshi.market.statusAt-=30000;api.render();assert.match(node('vUp').textContent,/WAIT.*market/);
+});
+test('retired relay sockets cannot inject ticks and ticker-only updates cannot assert active market status',()=>{
+ const h=page(),sockets=[];h.context.WebSocket=class{constructor(){this.readyState=1;sockets.push(this);}};
+ h.api.connectFeed();sockets[0].readyState=3;h.api.connectFeed();
+ const frame={type:'cfbenchmarks_value_5hz',msg:{index_id:'BRTI',value_usd:'100',source_ts_ms:3560000}};
+ sockets[0].onmessage({data:JSON.stringify(frame)});assert.equal(h.api.feed.brti,null);
+ sockets[1].onmessage({data:JSON.stringify(frame)});assert.equal(h.api.feed.brti.v,100);
+ sockets[1].onmessage({data:JSON.stringify({type:'ticker',msg:{market_ticker:h.api.tickers(3600)[1],yes_bid_dollars:'.3',yes_ask_dollars:'.4'}})});
+ assert.equal(h.api.kalshi.market.status,null);
+});
+test('all eleven venue parsers preserve quote, taker-side and liquidation conventions in fixtures',()=>{
+ const h=page(),V=h.api.VENUES,at=3560000;
+ const cases={coinbase:[{type:'ticker',best_bid:'99',best_ask:'101'},{type:'match',price:'100',size:'1',side:'sell',time:new Date(at).toISOString()}],
+  kraken:[{channel:'ticker',data:[{bid:99,ask:101}]},{channel:'trade',type:'update',data:[{price:100,qty:1,side:'buy',timestamp:new Date(at).toISOString()}]}],
+  bitstamp:[{event:'data',data:{bids:[[99,1]],asks:[[101,1]]}},{event:'trade',data:{price:100,amount:1,type:0,microtimestamp:at*1000}}],
+  gemini:[{type:'update',events:[{type:'change',side:'bid',price:99,remaining:1},{type:'change',side:'ask',price:101,remaining:1}]},{type:'update',timestampms:at,events:[{type:'trade',price:100,amount:1,makerSide:'ask'}]}],
+  cryptocom:[{result:{channel:'ticker',data:[{b:99,k:101}]}},{result:{channel:'trade',data:[{p:100,q:1,s:'BUY',t:at}]}}],
+  hyperliquid:[{channel:'bbo',data:{bbo:[{px:99},{px:101}]}},{channel:'trades',data:[{coin:'BTC',px:100,sz:1,side:'B',time:at}]}]};
+ for(const [key,frames]of Object.entries(cases)){
+  const quotes=[],trades=[],st={};for(const frame of frames)V[key].msg(frame,(...q)=>quotes.push(q),{},st,(...t)=>trades.push(t));
+  assert.deepEqual([...quotes[0]],[99,101],key);assert.deepEqual([...trades[0]],[100,1,true,at],key);
+ }
+ const liqs={bybit:{topic:'allLiquidation.BTCUSDT',data:[{p:100,v:1,S:'Buy',T:at}]},okx:{arg:{channel:'liquidation-orders'},data:[{instId:'BTC-USDT-SWAP',details:[{bkPx:100,sz:100,posSide:'long',ts:at}]}]},
+  deribit:{method:'subscription',params:{data:[{liquidation:'T',direction:'sell',price:100,amount:100,timestamp:at}]}},bitmex:{table:'liquidation',action:'insert',data:[{symbol:'XBTUSD',price:100,leavesQty:100,side:'Sell'}]},binance:{e:'forceOrder',o:{s:'BTCUSDT',p:100,q:1,S:'SELL',T:at}}};
+ for(const [key,frame]of Object.entries(liqs)){const rows=[];V[key].msg(frame,()=>{}, {},{},()=>{},(...row)=>rows.push(row));assert.deepEqual([...rows[0]].slice(0,3),[100,100,true],key);}
+});
 function near(actual, expected, tolerance = 1e-10) {
   assert.ok(Math.abs(actual - expected) < tolerance, `${actual} != ${expected}`);
 }

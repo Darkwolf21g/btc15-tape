@@ -196,7 +196,7 @@ const VERSION = "brti-driftless-v4";
 // KXBTC15M contract: sixty one-second readings strictly before its reference/close time.
 // The WebSocket final-minute aggregate is a different, close-inclusive statistic.
 const SETTLEMENT_CONVENTION = "[close-60s,close)";
-const EXECUTION_VERSION = "paper-delayed-depth-v2";
+const EXECUTION_VERSION = "paper-delayed-depth-v3";
 const SETTLE = 60, VOL_TAU = 180;
 const tailCdf = z => 0.5 + z * (z*z+6) / (2*Math.pow(z*z+4,1.5));
 const chance = (mean, sd, target) => tailCdf((mean - (target - .005)) / sd);
@@ -250,6 +250,7 @@ function asks(book,side) {
 function paperFill(intent,book,nowMs,cfg) {
  const empty=reason=>({filled:0,cost:0,feesCents:0,status:"paper-no-fill",reason,levels:[],filledAt:nowMs,latencyMs:nowMs-intent.at});
  if(nowMs<intent.readyAt)return null;
+ if(!Number.isInteger(intent.n)||intent.n<1)return empty('invalid whole-contract quantity');
  if(nowMs>=intent.close*1000)return empty("contract closed before simulated arrival");
  if(nowMs-intent.readyAt>10000)return empty("execution checkpoint missed");
  if(!book||nowMs-book.at>cfg.paperBookMaxAgeMs||book.at>nowMs)return empty("no fresh depth at simulated arrival");
@@ -701,14 +702,19 @@ export class KalshiFeed {
                                  keyLooksLikePem: typeof this.env.KALSHI_PRIVATE_KEY === "string" && /BEGIN .*PRIVATE KEY/.test(this.env.KALSHI_PRIVATE_KEY)}};
   }
   async fetch(request) {
-    const url = new URL(request.url);
-    if(url.pathname.startsWith('/paper-session/')){
-      if(request.method==='POST'){
-        if(this.sessionControlBusy)return new Response(JSON.stringify({error:'Session control busy; refresh status before retrying.'}),{status:409,headers:{...CORS,'Content-Type':'application/json'}});
-        this.sessionControlBusy=true;try{return await this.sessionRequest(request,url);}finally{this.sessionControlBusy=false;}
-      }
-      return this.sessionRequest(request,url);
+    const path=new URL(request.url).pathname;
+    // The two paper experiments share one control lock. Separate locks allow
+    // both starts to pass their exclusion checks across awaited storage reads.
+    if(request.method==='POST'&&(path==='/trade/config'||path.startsWith('/paper-session/'))){
+      if(this.paperControlBusy)return new Response(JSON.stringify({error:'Paper control busy; refresh status before retrying.'}),{status:409,headers:{...CORS,'Content-Type':'application/json'}});
+      this.paperControlBusy=true;
+      try{return await this.handleRequest(request);}finally{this.paperControlBusy=false;}
     }
+    return this.handleRequest(request);
+  }
+  async handleRequest(request) {
+    const url = new URL(request.url);
+    if(url.pathname.startsWith('/paper-session/'))return this.sessionRequest(request,url);
     if(url.pathname.startsWith('/research/'))return this.researchRequest(request,url);
     if(url.pathname==="/market-data")return this.marketData(url.searchParams.get("path")||"");
     if(url.pathname.startsWith("/demo/"))return this.demoRequest(request,url);
@@ -724,6 +730,7 @@ export class KalshiFeed {
       if (request.method !== "POST") return new Response("POST", {status: 405, headers: CORS});
       if (!this.env.FEED_TOKEN) return new Response("set FEED_TOKEN on the Worker before controlling the agent", {status: 403, headers: CORS});
       let body; try { body = await request.json(); } catch (e) { return new Response("json", {status: 400, headers: CORS}); }
+      if(!body||typeof body!=='object'||Array.isArray(body))return new Response('JSON object required',{status:400,headers:CORS});
       const cfg = await this.tradeConfig();
       if (body.mode != null) {
         if (!["off", "paper"].includes(body.mode)) return new Response("This research release supports off and paper only; exchange execution is not enabled", {status: 400, headers: CORS});
@@ -831,7 +838,7 @@ export class KalshiFeed {
     if(s&&(paperSession.active(s,Date.now())||s.trades.some(t=>t.pnlCents==null)))return reply({error:'A session is already scheduled, running or awaiting settlement.'},409);
     if(s)await this.state.storage.put('session.previous',await this.state.storage.get('session.current'));
     s=paperSession.create(Date.now(),crypto.randomUUID());
-    await this.saveSession(s);
+    if(!await this.saveSession(s))return reply({error:'Session changed while starting; refresh status and retry.'},409);
     this.agentActive=true;this.ensureUpstream();if(this.up)this.subscribeTickers();
     await this.scheduleAlarm(Date.now()+1000);
     return reply({session:s});
@@ -936,20 +943,23 @@ export class KalshiFeed {
         await this.state.storage.put(key,row);
         return;
       }
-      let market=null,exchange=null,error=null;
-      try{
-        market=(await signedGet(this.env,'/trade-api/v2/markets/'+mk))?.market;
-        exchange=await signedGet(this.env,'/trade-api/v2/exchange/status');
-      }catch(e){error='market or exchange read unavailable';}
+      const readStartedAt=Date.now(),signal=AbortSignal.timeout(SESSION_READ_BUDGET_MS);
+      const read=async path=>({data:await signedGet(this.env,path,undefined,{signal}),at:Date.now()});
+      const [marketRead,exchangeRead]=await Promise.allSettled([read('/trade-api/v2/markets/'+mk),read('/trade-api/v2/exchange/status')]);
+      const market=marketRead.status==='fulfilled'?marketRead.value.data?.market:null;
+      const exchange=exchangeRead.status==='fulfilled'?exchangeRead.value.data:null;
+      const targetAt=marketRead.status==='fulfilled'?marketRead.value.at:null;
+      const error=[marketRead,exchangeRead].some(r=>r.status==='rejected')?'market or exchange read unavailable':null;
       // Receipt precedes capture. Never label data fetched later with an earlier decision time.
       const at=Date.now(),target=market?.floor_strike!=null?Number(market.floor_strike):null;
       const input=[...this.researchTicks.values()].filter(t=>t[0]<=at&&t[2]<=at&&t[0]>=at-1200000).sort((a,b)=>a[0]-b[0]);
-      const k=research.snapshot({at,close,target,targetAt:at,ticks:input,book:this.books[mk],exchange,marketStatus:market?.status??null});
+      const k=research.snapshot({at,close,target,targetAt,ticks:input,book:this.books[mk],exchange,marketStatus:market?.status??null});
+      k.reads={version:'research-reads-v1',startedAt:readStartedAt,finishedAt:at,budgetMs:SESSION_READ_BUDGET_MS,marketAt:targetAt,exchangeAt:exchangeRead.status==='fulfilled'?exchangeRead.value.at:null};
       if(error||at-(close-c)*1000>research.SETTINGS.checkpointToleranceMs){k.status=error||'checkpoint missed during market read';k.p=null;k.p2=null;}
       row.checks[c]=k;row.target=target;row.rules={primary:market?.rules_primary??null,secondary:market?.rules_secondary??null,closeTime:market?.close_time??null};
       await this.state.storage.put(inputKey,{schema:research.VERSION,model:MODEL_VERSION,
         settlementConvention:globalThis.BTC15Model.SETTLEMENT_CONVENTION,mk,close,check:c,at,
-        columns:['source_ms','value_usd','first_received_ms'],source:'cfbenchmarks_value',ticks:input,target,targetAt:at});
+        columns:['source_ms','value_usd','first_received_ms'],source:'cfbenchmarks_value',ticks:input,target,targetAt});
       const pending=(await this.state.storage.get('research.pending'))||[];
       if(k.status==='forecast')pending.push({key,check:c,readyAt:at+research.SETTINGS.delayMs});
       await this.state.storage.put('research.pending',pending);
@@ -1052,6 +1062,7 @@ export class KalshiFeed {
         return reply({configured:true,environment:"demo",...this.demoOverview,api,ledger,limits:{contractsPerOrder:1,ordersPerDay:10},automaticTrading:false});
       }
       let body;try{body=await request.json();}catch{return reply({error:"Invalid JSON"},400);}
+      if(!body||typeof body!=='object'||Array.isArray(body))return reply({error:'JSON object required'},400);
       if(url.pathname==="/demo/order"){
         if(!/^btc15-demo-[a-f0-9-]{36}$/.test(body.clientId||""))return reply({error:"Invalid client order ID"},400);
         const previous=ledger.find(x=>x.clientId===body.clientId);
@@ -1136,13 +1147,14 @@ export class KalshiFeed {
   async ensureUpstream() {
     if (this.up || this.upState === "connecting" || this.retryTimer) return;
     if (!this.env.KALSHI_KEY_ID || !this.env.KALSHI_PRIVATE_KEY) { this.upState = "no key"; this.broadcast(JSON.stringify(this.status())); return; }
-    if (!this.indexSeconds.size) {
-      const saved = (await this.state.storage.get("index.seconds")) || [];
-      for (const [ms, v] of saved) if (Date.now() - ms < 1200000) this.indexSeconds.set(ms, v);
-      if (!this.ticks.length) this.ticks = [...this.indexSeconds];
-    }
+    // Reserve before the first await, including cold-start history loading.
     this.upState = "connecting"; this.broadcast(JSON.stringify(this.status()));
     try {
+      if (!this.indexSeconds.size) {
+        const saved = (await this.state.storage.get("index.seconds")) || [];
+        for (const [ms, v] of saved) if (Date.now() - ms < 1200000) this.indexSeconds.set(ms, v);
+        if (!this.ticks.length) this.ticks = [...this.indexSeconds];
+      }
       const ts = String(Date.now());
       const sig = await signHandshake(this.env.KALSHI_PRIVATE_KEY, ts + "GET" + "/trade-api/ws/v2");
       const resp = await upgradeFetch(WS_UPSTREAM, {headers: {"Upgrade": "websocket", "KALSHI-ACCESS-KEY": this.env.KALSHI_KEY_ID.trim(),
@@ -1380,7 +1392,7 @@ export class KalshiFeed {
         const fee = globalThis.BTC15Model.feesCents(off.price,1,cfg.paperVenue,cfg.paperExchangeFeeCents), edge = worst * 100 - off.price - fee;
         if (edge < cfg.minEdge) return {side, price: off.price, edge: +edge.toFixed(1), call: edge <= 0 ? "no" : "thin"};
         const c = (off.price + fee) / 100, f = (worst - c) / (1 - c), stake = Math.min(cfg.perWindowCents / 100, 0.02 * cfg.bankrollCents / 100, 0.25 * f * cfg.bankrollCents / 100);
-        const n = Math.min(Math.floor(stake / c), off.size);
+        const n = Math.min(Math.floor(stake / c), Math.floor(off.size));
         return {side, price: off.price, edge: +edge.toFixed(1), call: n >= 1 ? "buy" : "thin", n: Math.max(0, n), offered: off.size};
       };
       const dUp = decide("Up", lo, offer.Up), dDown = decide("Down", 1 - hi, offer.Down);
@@ -1397,6 +1409,7 @@ export class KalshiFeed {
       const exchange = await signedGet(this.env, "/trade-api/v2/exchange/status");
       const market = await signedGet(this.env, "/trade-api/v2/markets/" + mk);
       if (exchange.trading_active !== true || exchange.exchange_active !== true || market.market?.status !== "active" || Date.now() - nowMs > 3000) return;
+      if((await this.tradeConfig()).mode!=='paper')return; // Off may arrive during network reads.
       const trade = {at: nowMs, mk, left: Math.round(left), side: pick.side, price: pick.price, n: pick.n, offered: pick.offered, edge: pick.edge, p: +p.toFixed(3), lo: +lo.toFixed(3), hi: +hi.toFixed(3), x: +x.toFixed(2), sd: +base.sd.toFixed(2), official: !!base.official, mode: cfg.mode, filled: 0, cost: 0};
       trade.model=MODEL_VERSION;trade.executionModel=globalThis.BTC15Model.EXECUTION_VERSION;
       trade.feeVenue=cfg.paperVenue;trade.feeAssumption=cfg.paperVenue==="kalshi"?"general taker, whole-cent conservative rounding":"Robinhood cost scenario on Kalshi depth";
@@ -1419,9 +1432,13 @@ export class KalshiFeed {
         if(nowMs<intent.readyAt)continue;
         let active=false;
         try { const exchange=await signedGet(this.env,"/trade-api/v2/exchange/status");const market=await signedGet(this.env,"/trade-api/v2/markets/"+w.mk);active=exchange.exchange_active===true&&exchange.trading_active===true&&market.market?.status==="active"; }catch(e){}
+        const latest=await this.tradeConfig();
         nowMs=Date.now();
-        fill=globalThis.BTC15Model.paperFill(intent,active&&this.up?this.books[w.mk]:null,nowMs,intent.cfg);
-        if(fill&&!active)fill.reason="exchange or market not confirmed active at simulated arrival";
+        if(latest.mode!=='paper')fill={filled:0,cost:0,feesCents:0,status:'paper-canceled',reason:'paper mode stopped',filledAt:nowMs,latencyMs:nowMs-intent.at,levels:[]};
+        else {
+          fill=globalThis.BTC15Model.paperFill(intent,active&&this.up?this.books[w.mk]:null,nowMs,intent.cfg);
+          if(fill&&!active)fill.reason="exchange or market not confirmed active at simulated arrival";
+        }
       }
       if(!fill)continue;
       const {cfg:settings,readyAt,...trade}=intent;

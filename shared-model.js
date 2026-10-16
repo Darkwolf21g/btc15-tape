@@ -5,7 +5,7 @@ const VERSION = "brti-driftless-v4";
 // KXBTC15M contract: sixty one-second readings strictly before its reference/close time.
 // The WebSocket final-minute aggregate is a different, close-inclusive statistic.
 const SETTLEMENT_CONVENTION = "[close-60s,close)";
-const EXECUTION_VERSION = "paper-delayed-depth-v2";
+const EXECUTION_VERSION = "paper-delayed-depth-v3";
 const SETTLE = 60, VOL_TAU = 180;
 const tailCdf = z => 0.5 + z * (z*z+6) / (2*Math.pow(z*z+4,1.5));
 const chance = (mean, sd, target) => tailCdf((mean - (target - .005)) / sd);
@@ -59,6 +59,7 @@ function asks(book,side) {
 function paperFill(intent,book,nowMs,cfg) {
  const empty=reason=>({filled:0,cost:0,feesCents:0,status:"paper-no-fill",reason,levels:[],filledAt:nowMs,latencyMs:nowMs-intent.at});
  if(nowMs<intent.readyAt)return null;
+ if(!Number.isInteger(intent.n)||intent.n<1)return empty('invalid whole-contract quantity');
  if(nowMs>=intent.close*1000)return empty("contract closed before simulated arrival");
  if(nowMs-intent.readyAt>10000)return empty("execution checkpoint missed");
  if(!book||nowMs-book.at>cfg.paperBookMaxAgeMs||book.at>nowMs)return empty("no fresh depth at simulated arrival");

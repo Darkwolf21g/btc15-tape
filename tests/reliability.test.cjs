@@ -17,6 +17,50 @@ function worker() {
   return {api: context.api, context, obj, data, storage, tasks, now, setTime(t) { now = t; }, getAlarm: () => alarm};
 }
 const ticks = (start, end, value = 100) => Array.from({length: end - start + 1}, (_, i) => [(start + i) * 1000, value]);
+test('collector startup reserves its connection before awaiting saved index history',async()=>{
+ const h=worker();let release,loads=0,opens=0;const gate=new Promise(resolve=>release=resolve),get=h.storage.get;
+ h.storage.get=async key=>{if(key==='index.seconds'){loads++;await gate;}return get(key);};
+ h.context.open=async()=>{opens++;return {webSocket:{accept(){},addEventListener(){},send(){}}};};
+ vm.runInContext('signHandshake=async()=>"fixture";upgradeFetch=open',h.context);
+ const jobs=[h.obj.ensureUpstream(),h.obj.ensureUpstream()];release();await Promise.all(jobs);
+ assert.equal(loads,1);assert.equal(opens,1);assert.equal(h.obj.upState,'open');
+});
+test('legacy and timed paper controls cannot both activate across an awaited config read',async()=>{
+ const h=worker();h.obj.env.FEED_TOKEN='test';h.obj.ensureUpstream=async()=>{};
+ let release,entered;const gate=new Promise(resolve=>release=resolve),ready=new Promise(resolve=>entered=resolve),config=h.obj.tradeConfig.bind(h.obj);
+ h.obj.tradeConfig=async()=>{const cfg=await config();entered();await gate;return cfg;};
+ const start=h.obj.fetch(new Request('https://internal/paper-session/start?token=test',{method:'POST'}));await ready;
+ const competing=h.obj.fetch(new Request('https://internal/trade/config?token=test',{method:'POST',body:'{"mode":"paper"}'}));
+ release();const [a,b]=await Promise.all([start,competing]);assert.equal(a.status,200);assert.equal(b.status,409);assert.equal((await config()).mode,'off');
+});
+test('control requests reject non-object JSON instead of throwing or treating arrays as settings',async()=>{
+ const h=worker();h.obj.env.FEED_TOKEN='test';
+ for(const body of ['null','[]','"paper"','1']){
+  const r=await h.obj.fetch(new Request('https://internal/trade/config?token=test',{method:'POST',body}));assert.equal(r.status,400);assert.equal(h.data.has('trade.cfg'),false);
+ }
+});
+test('turning legacy paper off during arrival metadata reads prevents the delayed fill',async()=>{
+ const h=pendingFixture();h.data.set('trade.cfg',{mode:'paper'});
+ h.context.stopRead=async()=>{h.data.set('trade.cfg',{mode:'off'});return {exchange_active:true,trading_active:true,market:{status:'active'}};};
+ vm.runInContext('signedGet=stopRead',h.context);await h.obj.processPaper(h.now,{mode:'paper'});
+ const trade=h.data.get('t:TEST').trades[0];assert.equal(trade.filled,0);assert.equal(trade.status,'paper-canceled');
+});
+test('legacy paper will not queue a new intent after Off is saved during status reads',async()=>{
+ const h=worker(),now=Math.floor(h.now/900000)*900000+300000,close=Math.floor(now/900000)*900+900;
+ h.setTime(now);h.obj.up={};h.obj.subscribeTickers=()=>{};h.data.set('trade.cfg',{mode:'paper'});
+ const mk=vm.runInContext('marketTicker('+close+')',h.context);
+ h.obj.ticks=ticks(now/1000-300,now/1000);h.obj.indexSeconds=new Map(h.obj.ticks);
+ h.obj.books[mk]={at:now,yes:new Map([[.4,10]]),no:new Map([[.6,10]])};
+ h.data.set('t:'+mk,{mk,close,tgt:90,trades:[],holding:{side:'Up',since:now-6000},decided:0});
+ h.context.read=async()=>{h.data.set('trade.cfg',{mode:'off'});return {exchange_active:true,trading_active:true,market:{status:'active'}};};
+ vm.runInContext('signedGet=read',h.context);await h.obj.agentTick(now);
+ assert.equal(h.data.get('t:'+mk).pendingPaper,undefined);
+});
+test('paper execution never fills a fractional whole-contract intent',()=>{
+ const m=worker().api.model,at=1000,cfg={paperBookMaxAgeMs:1500,paperDepthFraction:.5,paperVenue:'kalshi'};
+ const fill=m.paperFill({at:0,readyAt:at,close:60,side:'Up',n:1.5,price:40},{at,yes:new Map(),no:new Map([[.6,20]])},at,cfg);
+ assert.equal(fill.filled,0);assert.match(fill.reason,/whole.contract/);
+});
 test('authenticated reads propagate caller cancellation through the fetch timeout wrapper',async()=>{
  const h=worker(),controller=new AbortController();let supplied;
  vm.runInContext('signHandshake=async()=>"fixture-signature"',h.context);
@@ -135,7 +179,7 @@ test('fee scenarios charge quantity-based commissions and separate exchange cost
  assert.equal(m.feesCents(90,100,'robinhood',1),190);
 });
 function pendingFixture() {
- const h=worker();h.obj.up={};h.data.set('t:TEST',{mk:'TEST',close:h.now/1000+60,trades:[],pendingPaper:{at:h.now-1000,readyAt:h.now,close:h.now/1000+60,side:'Up',price:40,n:10,mode:'paper',model:h.api.MODEL_VERSION,executionModel:h.api.model.EXECUTION_VERSION,cfg:{paperBookMaxAgeMs:1500,paperDepthFraction:.5,paperVenue:'kalshi'}}});
+ const h=worker();h.obj.up={};h.data.set('trade.cfg',{mode:'paper'});h.data.set('t:TEST',{mk:'TEST',close:h.now/1000+60,trades:[],pendingPaper:{at:h.now-1000,readyAt:h.now,close:h.now/1000+60,side:'Up',price:40,n:10,mode:'paper',model:h.api.MODEL_VERSION,executionModel:h.api.model.EXECUTION_VERSION,cfg:{paperBookMaxAgeMs:1500,paperDepthFraction:.5,paperVenue:'kalshi'}}});
  h.obj.books.TEST={at:h.now,no:new Map([[.6,8]]),yes:new Map()};
  vm.runInContext('signedCall=async()=>{throw Error("portfolio API must not be called")};signedGet=async(env,path)=>path.includes("exchange/status")?{exchange_active:true,trading_active:true}:{market:{status:"active",result:"yes"}};',h.context);return h;
 }

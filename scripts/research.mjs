@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import '../shared-model.js';
 import '../shared-research.js';
 
@@ -9,6 +10,8 @@ if(!['download','evaluate'].includes(command)||!input||!output){
 }else{
   try{
     if(command==='evaluate'){
+      const source=await fs.realpath(input),destination=await fs.realpath(output).catch(()=>path.resolve(output));
+      if(source===destination)throw Error('Use different input and output files; preserve the research export');
       const bundle=JSON.parse(await fs.readFile(input,'utf8'));
       if(bundle.schema!==globalThis.BTC15Research.VERSION||!Array.isArray(bundle.rows))throw Error('Unsupported research export');
       const result=globalThis.BTC15Research.report(bundle.rows);

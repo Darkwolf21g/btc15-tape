@@ -288,7 +288,7 @@ const VERSION = "brti-driftless-v4";
 // KXBTC15M contract: sixty one-second readings strictly before its reference/close time.
 // The WebSocket final-minute aggregate is a different, close-inclusive statistic.
 const SETTLEMENT_CONVENTION = "[close-60s,close)";
-const EXECUTION_VERSION = "paper-delayed-depth-v2";
+const EXECUTION_VERSION = "paper-delayed-depth-v3";
 const SETTLE = 60, VOL_TAU = 180;
 const tailCdf = z => 0.5 + z * (z*z+6) / (2*Math.pow(z*z+4,1.5));
 const chance = (mean, sd, target) => tailCdf((mean - (target - .005)) / sd);
@@ -342,6 +342,7 @@ function asks(book,side) {
 function paperFill(intent,book,nowMs,cfg) {
  const empty=reason=>({filled:0,cost:0,feesCents:0,status:"paper-no-fill",reason,levels:[],filledAt:nowMs,latencyMs:nowMs-intent.at});
  if(nowMs<intent.readyAt)return null;
+ if(!Number.isInteger(intent.n)||intent.n<1)return empty('invalid whole-contract quantity');
  if(nowMs>=intent.close*1000)return empty("contract closed before simulated arrival");
  if(nowMs-intent.readyAt>10000)return empty("execution checkpoint missed");
  if(!book||nowMs-book.at>cfg.paperBookMaxAgeMs||book.at>nowMs)return empty("no fresh depth at simulated arrival");
@@ -374,6 +375,7 @@ const FLOW_SPANS = [30, 60];    // seconds behind now for the flow readouts
 const $ = id => document.getElementById(id);
 const money = x => x == null || !isFinite(x) ? "–" : "$" + x.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
 const signed = x => (x >= 0 ? "+" : "−") + Math.abs(x).toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const escapeHtml = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const median = a => { const s = [...a].sort((x, y) => x - y), n = s.length; return n ? (n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2) : null; };
 const store = {
   get(k) { try { return JSON.parse(localStorage.getItem("btc15tape." + k)); } catch (e) { return null; } },
@@ -540,6 +542,7 @@ function connect(key) {
   let heard = false;
   ws.onopen = () => { v.state = "waiting"; v.at = v.openedAt = Date.now(); try { spec.open(ws); } catch (e) {} };
   ws.onmessage = ev => {
+    if(v.ws!==ws)return;
     const t = v.at = Date.now();
     if (!heard) { heard = true; v.fails = 0; }
     if (t - v.rawAt > 5000 && typeof ev.data === "string") { v.raw = ev.data.slice(0, 160); v.rawAt = t; }   // a sample, for the diagnostics
@@ -692,7 +695,7 @@ function stale(v, tMs) {
   return Date.now() - ms > 15000;
 }
 function onTrade(key, v, px, size, takerBuy, tMs) {
-  if (!(px > 0 && size > 0) || stale(v, tMs)) return;
+  if (![px,size,px*size].every(Number.isFinite) || !(px > 0 && size > 0) || stale(v, tMs)) return;
   const t = Date.now(), sec = Math.floor(t / 1000), usd = px * size;
   let f = flow.get(sec);
   if (!f) flow.set(sec, f = {b: 0, s: 0, pb: 0, ps: 0});
@@ -701,7 +704,7 @@ function onTrade(key, v, px, size, takerBuy, tMs) {
   if (usd >= WHALE_USD * (VENUES[key].lead ? 2.5 : 1)) { whales.push({t, key, buy: takerBuy, usd, px}); if (whales.length > 40) whales.shift(); }
 }
 function onLiq(key, v, px, usd, long, tMs) {
-  if (!(usd > 0 && px > 0) || stale(v, tMs)) return;
+  if (![px,usd].every(Number.isFinite) || !(usd > 0 && px > 0) || stale(v, tMs)) return;
   liqs.push({t: Date.now(), key, long, usd, px});
   if (liqs.length > 400) liqs.shift();
   counted(key);
@@ -805,7 +808,7 @@ async function fetchOfficialHistory(backTo, sec) {
   const hours = [...new Set([Math.floor(backTo / 3600) * 3600, Math.floor(sec / 3600) * 3600])];
   const bySec = new Map();
   for (const h of hours) {
-    const r = await fetch(base + "/brti/history?timespan=HOUR&timestamp=" + new Date(h * 1000).toISOString() + (feed.token ? "&token=" + encodeURIComponent(feed.token) : ""), {cache: "no-store"});
+    const r = await fetch(base + "/brti/history?timespan=HOUR&timestamp=" + new Date(h * 1000).toISOString() + (feed.token ? "&token=" + encodeURIComponent(feed.token) : ""), {cache: "no-store", signal:AbortSignal.timeout(10000)});
     if (!r.ok) { officialNote = "official history: " + r.status; return false; }
     const d = await r.json(), pl = d && d.data ? d.data.payload : d && d.payload;
     const rows = Array.isArray(pl) ? pl : pl && (pl.values || pl.data || pl.items);
@@ -841,7 +844,7 @@ async function fetchBackfill(force, backTo) {
     let cursor = null;
     for (let page = 0; page < 8; page++) {
       const r = await fetch("https://api.exchange.coinbase.com/products/BTC-USD/trades?limit=1000" + (cursor ? "&after=" + cursor : ""),
-                            {cache: "no-store"});
+                            {cache: "no-store", signal:AbortSignal.timeout(10000)});
       if (!r.ok) break;
       const part = await r.json();
       if (!Array.isArray(part) || !part.length) break;
@@ -907,6 +910,7 @@ const kalshi = {ok: null, base: null, via: null, market: null, feed: new Map(), 
 const SAME_SITE = location.protocol === "https:" && !/github\.io$/.test(location.hostname) ? location.origin : null;
 async function kalshiGet(path) {
   if(Date.now()<(kalshi.retryAt||0))return null;
+  const signal=AbortSignal.timeout(10000); // One deadline for the entire route probe.
   // Your own relay if you set one, else the site itself, else Kalshi directly (browsers are normally
   // refused), else a public relay. A slower route that happened to answer first is not kept for good:
   // the preferred one is tried again every half minute.
@@ -923,7 +927,7 @@ async function kalshiGet(path) {
   }
   for (const [via, url] of tries) {
     try {
-      const r = await fetch(url, {cache: "no-store"});
+      const r = await fetch(url, {cache: "no-store",signal});
       if (r.ok) {
         const d = await r.json();
         if (d && typeof d === "object") {
@@ -971,7 +975,7 @@ async function pollKalshi() {
   let tgt = m.floor_strike != null ? +m.floor_strike : null;
   if (!(tgt > 0)) { const t = /\$?([\d,]+\.\d\d)/.exec(m.yes_sub_title || m.subtitle || ""); tgt = t ? +t[1].replace(/,/g, "") : null; }
   const pushed = kalshi.pushAt && Date.now() - kalshi.pushAt < 5000 && kalshi.market && kalshi.market.ticker === mk ? kalshi.market : null;
-  kalshi.market = {ticker: mk, close, target: tgt > 0 ? tgt : null, status: m.status,
+  kalshi.market = {ticker: mk, close, target: tgt > 0 ? tgt : null, status: m.status, statusAt:Date.now(),
                    bid: pushed ? pushed.bid : +m.yes_bid_dollars || null, ask: pushed ? pushed.ask : +m.yes_ask_dollars || null, at: pushed ? pushed.at : Date.now()};
   if (kalshi.market.bid && kalshi.market.ask && !pushed) kalshi.hist.set(Math.floor(now), [kalshi.market.bid, kalshi.market.ask]);
   if (now - kalshi.checked > 20) {
@@ -1010,7 +1014,7 @@ const feedLive = () => feed.brti != null && Date.now() - feed.brti.t >= -1000 &&
 // A reading more than 0.5% from the last accepted one within a few seconds is a glitch, not a move;
 // two such readings in a row are a move. Counted in the diagnostics.
 function saneTick(v) {
-  if (!(v > 0)) return false;
+  if (!Number.isFinite(v) || !(v > 0)) return false;
   const last = feed.brti;
   if (!last || Date.now() - last.at > 10000 || Math.abs(v - last.v) <= 0.005 * last.v) { feed.odd = 0; return true; }
   feed.odd = (feed.odd || 0) + 1; feed.oddTotal = (feed.oddTotal || 0) + 1;
@@ -1102,6 +1106,7 @@ function connectFeed() {
   feed.ws = ws; feed.state = "connecting";
   ws.onopen = () => { feed.state = "open"; feed.at = feed.openedAt = Date.now(); feed.backoff = 1000; };
   ws.onmessage = ev => {
+    if(feed.ws!==ws)return;
     feed.at = Date.now();
     let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
     if (!d || !d.type) return;
@@ -1128,7 +1133,7 @@ function connectFeed() {
         feed.quote = {ticker: m.market_ticker, bid, ask, at: Date.now()};
         const now = Date.now() / 1000, mk = tickers(bounds(now)[1])[1];
         if (m.market_ticker === mk) {
-          if (!kalshi.market || kalshi.market.ticker !== mk) kalshi.market = {ticker: mk, close: bounds(now)[1], target: null, status: "active", bid, ask, at: Date.now()};
+          if (!kalshi.market || kalshi.market.ticker !== mk) kalshi.market = {ticker: mk, close: bounds(now)[1], target: null, status: null, bid, ask, at: Date.now()};
           else Object.assign(kalshi.market, {bid, ask, at: Date.now()});
           kalshi.pushAt = Date.now(); kalshi.ok = true; kalshi.lastOk = Date.now();
           kalshi.hist.set(Math.floor(now), [bid, ask]);
@@ -1177,7 +1182,7 @@ async function fetchCandle(open) {
   candle.busy = true;
   try {
     const iso = t => new Date(t * 1000).toISOString();
-    const r = await fetch(`https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=60&start=${iso(open - 60)}&end=${iso(open - 60)}`, {cache: "no-store"});
+    const r = await fetch(`https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=60&start=${iso(open - 60)}&end=${iso(open - 60)}`, {cache: "no-store", signal:AbortSignal.timeout(10000)});
     if (r.ok) {
       const rows = await r.json();            // [time, low, high, open, close, volume]
       const row = Array.isArray(rows) && rows.find(x => x[0] === open - 60);
@@ -1654,7 +1659,7 @@ async function mergeRelayRecord() {
   if (!base || relayRecordBusy || Date.now() - relayRecordAt < 55000) return;
   relayRecordBusy = true;
   try {
-    const r = await fetch(base + "/record" + (feed.token ? "?token=" + encodeURIComponent(feed.token) : ""), {cache: "no-store"});
+    const r = await fetch(base + "/record" + (feed.token ? "?token=" + encodeURIComponent(feed.token) : ""), {cache: "no-store", signal:AbortSignal.timeout(10000)});
     if (!r.ok) return;
     const rows = await r.json();
     if (!Array.isArray(rows)) return;
@@ -1729,7 +1734,7 @@ async function agentRefresh(force) {
   if (!base || (!force && Date.now() - agentAt < 30000)) return;
   agentAt = Date.now();
   try {
-    const r = await fetch(base + "/trade/status" + (feed.token ? "?token=" + encodeURIComponent(feed.token) : ""), {cache: "no-store"});
+    const r = await fetch(base + "/trade/status" + (feed.token ? "?token=" + encodeURIComponent(feed.token) : ""), {cache: "no-store", signal:AbortSignal.timeout(10000)});
     if (!r.ok) { $("agentOut").textContent = r.status === 403 ? "Needs the stream token (set it under Target and calibration)." : "Relay answered " + r.status; return; }
     const st = await r.json(), c = st.config, lines = [];
     $("agentMode").textContent = "· " + c.mode.toUpperCase();
@@ -1947,13 +1952,14 @@ function render() {
     : "Type what Robinhood's buttons say to see your edge";
   const typedUp = $("rhUp").value ? parseFloat($("rhUp").value) : null, typedDown = $("rhDown").value ? parseFloat($("rhDown").value) : null;
   const exchangeState=exchangeHealth(nowMs), paused=exchangeState==="paused";
-  const waitReason = view.pending ? "WAIT: next BRTI reading pending" : paused ? "WAIT: Kalshi has trading paused" + (exch.resume ? " (until about " + ET_CLOCK.format(new Date(exch.resume)) + ")" : "") : !exactTarget ? "WAIT: enter or retrieve the exact target" : exchangeState==="unknown" ? "WAIT: Kalshi exchange status unknown" : "WAIT: incomplete data or model unavailable";
-  const signalP = exactTarget && exchangeState==="open" && live ? p : null;
+  const marketActive=kalshi.market?.ticker===mk&&kalshi.market.status==='active'&&Number.isFinite(kalshi.market.statusAt)&&nowMs-kalshi.market.statusAt>=0&&nowMs-kalshi.market.statusAt<30000;
+  const waitReason = view.pending ? "WAIT: next BRTI reading pending" : paused ? "WAIT: Kalshi has trading paused" + (exch.resume ? " (until about " + ET_CLOCK.format(new Date(exch.resume)) + ")" : "") : !exactTarget ? "WAIT: enter or retrieve the exact target" : !marketActive ? "WAIT: contract market not confirmed active" : exchangeState==="unknown" ? "WAIT: Kalshi exchange status unknown" : "WAIT: incomplete data or model unavailable";
+  const signalP = exactTarget && marketActive && exchangeState==="open" && live ? p : null;
   const dep = depth(mk);
   const vUp = verdict($("vUp"), typedUp!=null&&nowMs-manualQuoteAt.Up>15000?null:signalP, band && band.lo, typedUp != null ? typedUp : upC, signalP!=null&&typedUp!=null&&nowMs-manualQuoteAt.Up>15000?"WAIT: refresh the entered quote (older than 15s)":waitReason, dep && dep.up);
   const vDown = verdict($("vDown"), typedDown!=null&&nowMs-manualQuoteAt.Down>15000?null:signalP == null ? null : 1 - signalP, band && 1 - band.hi, typedDown != null ? typedDown : downC, signalP!=null&&typedDown!=null&&nowMs-manualQuoteAt.Down>15000?"WAIT: refresh the entered quote (older than 15s)":waitReason, dep && dep.down);
   decisionLine(signalP, band, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, left);
-  if(exchangeState!=="open")$("decision").textContent=waitReason;
+  if(exchangeState!=="open"||!marketActive)$("decision").textContent=waitReason;
   if (view.pending) $("decision").textContent = "Waiting for the next BRTI reading. Last estimate shown; trade signals paused.";
   keepRecord(mk, close, left, tgt, p, proj && tgt != null ? chanceMatched(proj.mean, proj.sd, tgt) : null, km, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, typedUp != null || typedDown != null);
 
@@ -2031,7 +2037,7 @@ function renderFlowText(nowMs, now) {
 }
 let chipsAt = 0, chartsAt = 0, lastChips = "";
 function renderChips(nowMs, mk) {
-  const chip = (cls, txt) => `<span class="chip ${cls}">${txt}</span>`;
+  const chip = (cls, txt) => `<span class="chip ${cls}">${escapeHtml(txt)}</span>`;
   const price = [], liq = [];
   for (const [k, spec] of Object.entries(VENUES)) {
     const v = venue[k] || {}, open = v.ws && v.ws.readyState === 1, s = tstat[k];
@@ -2064,7 +2070,7 @@ function renderChips(nowMs, mk) {
   if (html !== lastChips) { lastChips = html; $("sources").innerHTML = html; }
   const nPrice = Object.entries(VENUES).filter(([k, v]) => !v.lead && !v.liq && venue[k] && isLive(venue[k], nowMs)).length;
   const nLiq = Object.entries(VENUES).filter(([k, v]) => v.liq && venue[k] && venue[k].ws && venue[k].ws.readyState === 1 && (v.quiet || nowMs - venue[k].at < ALIVE_MS * 1.5)).length;
-  const sum = `Feeds: <b>${nPrice}/${Object.values(VENUES).filter(v => !v.lead && !v.liq).length}</b> exchanges · <b>${nLiq}/${Object.values(VENUES).filter(v => v.liq).length}</b> liquidation · <b class="${fcls === "ok" ? "" : "bad"}">${ftxt}</b>` + (qtxt ? ` · ${qtxt}` : "") + (kalshi.ok === false ? ' · <b class="bad">Kalshi not reachable</b>' : "");
+  const sum = `Feeds: <b>${nPrice}/${Object.values(VENUES).filter(v => !v.lead && !v.liq).length}</b> exchanges · <b>${nLiq}/${Object.values(VENUES).filter(v => v.liq).length}</b> liquidation · <b class="${fcls === "ok" ? "" : "bad"}">${escapeHtml(ftxt)}</b>` + (qtxt ? ` · ${escapeHtml(qtxt)}` : "") + (kalshi.ok === false ? ' · <b class="bad">Kalshi not reachable</b>' : "");
   if (sum !== $("srcSum").dataset.html) { $("srcSum").dataset.html = sum; $("srcSum").innerHTML = sum; }
   $("mktLegend").hidden = !kalshi.ok;
 }
