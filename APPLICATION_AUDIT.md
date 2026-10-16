@@ -81,4 +81,8 @@ The fixed simulation settings still assume displayed depth, bounded delay and es
 
 ## Final evidence update
 
-Local result: 173 deterministic tests passed (156 baseline plus 17 regressions), with no failures or skips. npm run check, git diff --check, Python syntax checks, and package/lock engine consistency passed. Runtime/browser/advisory CI results will be appended after the audit branch is published; they are not yet verified.
+Local result: 173 deterministic tests passed (156 baseline plus 17 regressions), with no failures or skips. npm run check, git diff --check, Python syntax checks, and package/lock engine consistency passed.
+
+GitHub Actions [run 38837598453](https://github.com/Darkwolf21g/btc15-tape/actions/runs/38837598453), on audit code commit 014d5b5, passed npm ci, source checks, all 173 tests, Worker dry-run/SQLite endpoint tests, WebSocket upgrade and alarm runtime regressions, and Chromium fixture smoke tests. npm audit reported zero known vulnerabilities across all severity levels at scan time. These remote results resolve the local execution blockers for deterministic validation; they do not verify production integrations or a live paper session.
+
+The first run's artifact upload skipped the hidden .audit-artifacts directory despite successful browser assertions. The follow-up enables hidden-file upload and makes missing artifacts an error. Screenshots have not been manually inspected; automated browser assertions are the UI evidence so far.

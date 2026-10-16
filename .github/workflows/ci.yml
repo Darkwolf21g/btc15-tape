@@ -51,3 +51,5 @@ jobs:
         with:
           name: audit-artifacts
           path: .audit-artifacts/
+          include-hidden-files: true
+          if-no-files-found: error
