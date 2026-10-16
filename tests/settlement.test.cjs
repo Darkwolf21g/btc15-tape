@@ -43,7 +43,7 @@ function page(savedRecord = []) {
       setMarketResponse(market) { kalshiGet = async () => ({market}); },
       seedVol() { volN = 60; for (const row of vol) { row[0] = 4; row[1] = 1; } },
       setTarget(mk, value) { typedTarget[mk] = value; },
-      VENUES,connectFeed,renderChipsActual:realRenderChips,kalshiGet,pollExchange,onTrade,onLiq,flow,liqs,
+      refreshCollector,VENUES,connectFeed,renderChipsActual:realRenderChips,kalshiGet,pollExchange,onTrade,onLiq,flow,liqs,
     };
   `, context);
   const api = context.api;
@@ -478,4 +478,17 @@ test('first contract sample gets publication grace for display only, then resume
   assert.equal(api.pHist.has(3540),false);assert.match(node('healthMode').textContent,/Awaiting/);
   api.officialSeconds.set(3540,100);api.render();
   assert.equal(api.pHist.has(3540),true);assert.equal(node('stIn').textContent,'1 / 60');
+});
+
+test('collector health separates failed work, stalled maintenance and successful cycles using server time',async()=>{
+ const h=page(),now=9000000;
+ const show=async payload=>{h.context.fetch=async()=>({ok:true,json:async()=>({now,...payload})});await h.api.refreshCollector();return h.node('healthCollector');};
+ let n=await show({lastOk:now-1000,lastCycleAt:now-500,cycleFailures:1,lastRun:now-500});
+ assert.match(n.textContent,/degraded.*1 failed/);assert.equal(n.className,'bad');
+ n=await show({lastOk:now-1000,maintenanceRunning:true,maintenanceStartedAt:now-20000});
+ assert.match(n.textContent,/stalled/);assert.equal(n.className,'bad');
+ n=await show({lastOk:now-1000,lastCycleAt:now-500,cycleFailures:0});
+ assert.match(n.textContent,/active.*1s ago/);assert.equal(n.className,'good');
+ n=await show({lastOk:now-300000,lastRun:now-1000});assert.match(n.textContent,/working.*5m ago/);assert.equal(n.className,'bad');
+ n=await show({lastOk:now-300000,lastRun:now-300000});assert.match(n.textContent,/stale/);
 });

@@ -354,3 +354,30 @@ test('legacy checkpoint rejects later receipt timestamps for both depth and tick
   assert.equal(k.at,at);assert.equal(k.marketAt,null);assert.equal(k.bid,null);assert.equal(k.ask,null);
  }
 });
+
+test('failed checkpoint or historical settlement cannot starve remaining collector stages',async()=>{
+ const h=worker(),at=Math.floor(h.now/900000)*900000+300000;h.setTime(at);
+ h.obj.ensureAlarm=async()=>{};h.obj.processPaper=async()=>false;
+ h.data.set('collector',{runs:1,lastOk:at-300000});
+ h.data.set('w:OLD',{mk:'OLD',close:at/1000-100,checks:{}});
+ h.data.set('w:NEXT',{mk:'NEXT',close:at/1000-90,checks:{}});
+ h.obj.checkpoint=async()=>{throw Error('checkpoint 503');};
+ const seen=[];h.obj.settle=async mk=>{seen.push(mk);if(mk==='OLD')throw Error('settlement 503');};
+ h.obj.researchSettle=async()=>seen.push('research');
+ await h.obj.collectorMaintenance();
+ assert.deepEqual(seen,['OLD','NEXT','research']);
+ const log=h.data.get('collector');assert.equal(log.lastOk,at-300000);assert.equal(log.lastCycleAt,at);assert.equal(log.cycleFailures,2);assert.equal(log.stage,null);
+ assert.deepEqual(log.errors.map(x=>x.stage),['checkpoint','forecast settlement']);
+ h.obj.checkpoint=async()=>{};h.obj.settle=async()=>{};await h.obj.collectorMaintenance();
+ assert.equal(h.data.get('collector').lastOk,at);assert.equal(h.data.get('collector').cycleFailures,0);
+});
+test('maintenance shares an eight-second read budget and stops issuing work after cancellation',async()=>{
+ const h=worker(),controller=new AbortController();let budget,reads=0;
+ h.context.AbortSignal={timeout:ms=>{budget=ms;return controller.signal;}};
+ h.obj.ensureAlarm=async()=>{};h.obj.processPaper=async()=>false;
+ for(const mk of ['OLD','NEXT'])h.data.set('w:'+mk,{mk,close:h.now/1000-100,checks:{}});
+ h.context.read=async(_env,_path,_query,options)=>{reads++;assert.equal(options.signal,controller.signal);controller.abort(Error('maintenance deadline'));options.signal.throwIfAborted();};
+ vm.runInContext('signedGet=read',h.context);
+ await h.obj.collectorMaintenance();assert.equal(budget,8000);assert.equal(reads,1);
+ assert.ok(h.data.get('collector').cycleFailures>0);assert.equal(h.data.get('collector').lastOk,undefined);
+});

@@ -751,7 +751,9 @@ export class KalshiFeed {
       return new Response(JSON.stringify(cfg), {headers: {...CORS, "Content-Type": "application/json"}});
     }
     if (url.pathname === "/collector/status") { await this.ensureAlarm(); const c = (await this.state.storage.get("collector")) || {}; c.nextAlarm = await this.state.storage.getAlarm(); c.now = Date.now(); c.model = MODEL_VERSION;
-      c.healthy = !!c.lastOk && c.now - c.lastOk < 120000; c.stream = this.upState;
+      c.healthy = !!c.lastOk && c.now - c.lastOk < 120000 && !(c.cycleFailures>0);
+      c.maintenanceRunning=!!this.collectorTask; c.stage=this.collectorStage||null; c.stream = this.upState;
+      if(c.maintenanceRunning&&c.now-c.maintenanceStartedAt>=15000)c.healthy=false;
       c.indexAgeMs = this.ticks.length ? c.now - this.ticks[this.ticks.length - 1][0] : null;
       const rows = [...(await this.state.storage.list({prefix: "w:"})).values()];
       c.forecasts = rows.reduce((n, w) => n + Object.values(w.checks || {}).filter(k => k.model === MODEL_VERSION && Number.isFinite(k.p)).length, 0);
@@ -981,7 +983,7 @@ export class KalshiFeed {
     }
     if(pending.length)await this.state.storage.put('research.pending',keep);
   }
-  async researchSettle() {
+  async researchSettle(options = {}) {
     const now=Date.now(),rows=[...(await this.state.storage.list({prefix:'r:'})).values()].sort((a,b)=>a.close-b.close);
     for(const row of rows.filter(w=>w.close*1000<now-60000&&w.src!=='kalshi').slice(-4)){
       if(!row.closingCapture){
@@ -1003,7 +1005,7 @@ export class KalshiFeed {
       let m;
       const existing=await this.state.storage.get('w:'+row.mk);
       if(existing?.src==='kalshi')m={result:existing.result,expiration_value:existing.officialCloseAvg};
-      else m=(await signedGet(this.env,'/trade-api/v2/markets/'+row.mk))?.market;
+      else m=(await signedGet(this.env, '/trade-api/v2/markets/'+row.mk, undefined, options))?.market;
       if(m&&['yes','no'].includes(m.result)){
         // A delayed arrival may have landed while the official outcome was fetched.
         // Attach labels to the latest record without replacing that observation.
@@ -1227,9 +1229,9 @@ export class KalshiFeed {
       update(log);await tx.put('collector',log);
     });
   }
-  async collectorError(e) {
+  async collectorError(e,stage=null) {
     await this.updateCollector(log=>{
-      log.errors=(log.errors||[]).concat([{at:Date.now(),error:String(e.message||e).slice(0,200)}]).slice(-10);
+      log.errors=(log.errors||[]).concat([{at:Date.now(),stage,error:String(e.message||e).slice(0,200)}]).slice(-10);
     });
   }
   async scheduleAlarm(earlier=Infinity) {
@@ -1253,28 +1255,42 @@ export class KalshiFeed {
   startCollectorTask() {
     if(this.collectorTask)return;
     const task=this.collectorMaintenance().catch(e=>this.collectorError(e)).finally(async()=>{
-      this.collectorTask=null;
+      this.collectorTask=null;this.collectorStage=null;
       try { await this.scheduleAlarm(); } catch(e) { await this.collectorError(e); }
     });
     this.collectorTask=task;
     this.state.waitUntil(task);
   }
   async collectorMaintenance() {
-    await this.ensureAlarm();
+    // One deadline for maintenance market reads, rather than 12s per old row.
+    const startedAt=Date.now(),options={signal:AbortSignal.timeout(8000)};
+    let failures=0;
+    const run=async(stage,job)=>{
+      this.collectorStage=stage;
+      try { options.signal.throwIfAborted(); await job(); }
+      catch(e) { failures++; await this.collectorError(e,stage); }
+    };
+    await this.updateCollector(log=>{log.maintenanceStartedAt=startedAt;});
+    await run('upstream',()=>this.ensureAlarm());
     const cfg=await this.tradeConfig();
-    await this.processPaper(Date.now(),cfg);
+    await run('paper arrivals',()=>this.processPaper(Date.now(),cfg,options));
     const at=Date.now(),now=at/1000,close=(Math.floor(now/WINDOW)+1)*WINDOW,left=close-now;
     const check=CHECKS.find(k=>left<=k&&k-left<20);
-    if(check)await this.checkpoint(marketTicker(close),close,check,at);
+    if(check)await run('checkpoint',()=>this.checkpoint(marketTicker(close),close,check,at,options));
+    // Decisions precede historical settlement retries, which may exhaust the budget.
+    if(cfg.mode==='paper')await run('paper decision',()=>this.agentTick(Date.now(),options));
     const rows=await this.state.storage.list({prefix:'w:'});
-    for(const w of [...rows.values()].filter(w=>w.close<now-60&&w.src!=='kalshi').slice(-4))await this.settle(w.mk,w.close);
-    await this.researchSettle();
+    for(const w of [...rows.values()].filter(w=>w.close<now-60&&w.src!=='kalshi').slice(-4))
+      await run('forecast settlement',()=>this.settle(w.mk,w.close,options));
+    await run('research settlement',()=>this.researchSettle(options));
     const trades=await this.state.storage.list({prefix:'t:'});
-    for(const w of [...trades.values()].filter(w=>w.close<now-60&&!w.settled&&w.trades?.length).slice(-8))await this.settleTrades(w.mk,w.close);
-    if(cfg.mode==='paper')await this.agentTick(Date.now());
+    for(const w of [...trades.values()].filter(w=>w.close<now-60&&!w.settled&&w.trades?.length).slice(-8))
+      await run('paper settlement',()=>this.settleTrades(w.mk,w.close,options));
     if(rows.size>5000)for(const [key]of [...rows].slice(0,rows.size-5000))await this.state.storage.delete(key);
     await this.updateCollector(log=>{
-      log.lastOk=Date.now();
+      log.lastCycleAt=Date.now();log.cycleDurationMs=Date.now()-startedAt;
+      log.cycleFailures=failures;log.stage=null;
+      if(!failures)log.lastOk=Date.now(); // A live heartbeat must not hide failed work.
       log.indexAgeMs=this.ticks.length?Date.now()-this.ticks[this.ticks.length-1][0]:null;
     });
   }
@@ -1297,7 +1313,7 @@ export class KalshiFeed {
       finally { this.alarmBusy=false; }
     }
   }
-  async checkpoint(mk, close, check, nowMs) {
+  async checkpoint(mk, close, check, nowMs, options = {}) {
     const key = "w:" + mk, w = (await this.state.storage.get(key)) || {mk, close, tgt: null, checks: {}, result: null, src: null, relay: true};
     if (w.checks[check]) return;
     // Snapshot the live stream at the checkpoint before awaiting REST. Later ticks must
@@ -1307,7 +1323,7 @@ export class KalshiFeed {
     const offers=book&&nowMs-book.at>=0&&nowMs-book.at<1500?{ask:globalThis.BTC15Model.asks(book,"Up")[0]?.price/100,bid:1-globalThis.BTC15Model.asks(book,"Down")[0]?.price/100,at:book.at}:tick&&nowMs-tick.at>=0&&nowMs-tick.at<5000?{...tick}:null;
     let ticks = liveTicks;
     ticks = seconds; // Immutable one-Hz input snapshot; no retrospective forecast reconstruction.
-    const mkt = await signedGet(this.env, "/trade-api/v2/markets/" + mk);
+    const mkt = await signedGet(this.env, "/trade-api/v2/markets/" + mk, undefined, options);
     const m = mkt && mkt.market;
     if (m && +m.floor_strike > 0) w.tgt = +m.floor_strike;
     const ask=offers&&Number.isFinite(offers.ask)?offers.ask:null,bid=offers&&Number.isFinite(offers.bid)?offers.bid:null;
@@ -1324,10 +1340,10 @@ export class KalshiFeed {
     w.checks[check] = entry;
     await this.state.storage.put(key, w);
   }
-  async settle(mk, close) {
+  async settle(mk, close, options = {}) {
     const key = "w:" + mk, w = await this.state.storage.get(key);
     if (!w || w.src === "kalshi") return;
-    const d = await signedGet(this.env, "/trade-api/v2/markets/" + mk), m = d && d.market;
+    const d = await signedGet(this.env, "/trade-api/v2/markets/" + mk, undefined, options), m = d && d.market;
     if (m && (m.result === "yes" || m.result === "no")) {
       w.result = m.result; w.src = "kalshi";
       if (+m.floor_strike > 0) w.tgt = +m.floor_strike;
@@ -1355,14 +1371,14 @@ export class KalshiFeed {
     return cfg;
   }
   async tradeLog() { return (await this.state.storage.get("trade.log")) || {decisions: [], errors: []}; }
-  async agentTick(nowMs) {
+  async agentTick(nowMs, options = {}) {
     const cfg = await this.tradeConfig();
     if (cfg.mode !== "paper" || this.agentBusy) return; // Exchange execution is deferred until a separately reviewed release.
     this.agentBusy = true;
     let log={decisions:[],errors:[]};
     try {
       log = await this.tradeLog();
-      if(await this.processPaper(nowMs,cfg))return;
+      if(await this.processPaper(nowMs,cfg,options))return;
       const now = nowMs / 1000, close = (Math.floor(now / WINDOW) + 1) * WINDOW, left = close - now, mk = marketTicker(close);
       if (left > WINDOW - cfg.firstSeconds || left < cfg.lastSeconds) return;
       if (!this.up) { await this.ensureUpstream(); return; }                    // the stream feeds the model; try again next tick
@@ -1376,7 +1392,7 @@ export class KalshiFeed {
       const last = this.ticks[this.ticks.length - 1];
       if (!last || nowMs - last[0] > 3000 || this.ticks.length < 200) return;
       let tgt = w.tgt;
-      if (!tgt) { const d = await signedGet(this.env, "/trade-api/v2/markets/" + mk); tgt = d && d.market && +d.market.floor_strike > 0 ? +d.market.floor_strike : null; if (!tgt) return; w.tgt = tgt; }
+      if (!tgt) { const d = await signedGet(this.env, "/trade-api/v2/markets/" + mk, undefined, options); tgt = d && d.market && +d.market.floor_strike > 0 ? +d.market.floor_strike : null; if (!tgt) return; w.tgt = tgt; }
       const vols = volsFrom([...this.indexSeconds], nowMs); if (!vols) return;
       const x = last[1];
       const projectWith = (xx, vv) => projectFrom([...this.indexSeconds], nowMs, close, xx, vv);
@@ -1406,8 +1422,8 @@ export class KalshiFeed {
       // a call must hold across two ticks (about 5 s) before anything is sent: a blip must not trade
       if (!w.holding || w.holding.side !== pick.side) { w.holding = {side: pick.side, since: nowMs}; await this.state.storage.put(key, w); return; }
       if (nowMs - w.holding.since < 4000) { await this.state.storage.put(key, w); return; }
-      const exchange = await signedGet(this.env, "/trade-api/v2/exchange/status");
-      const market = await signedGet(this.env, "/trade-api/v2/markets/" + mk);
+      const exchange = await signedGet(this.env, "/trade-api/v2/exchange/status", undefined, options);
+      const market = await signedGet(this.env, "/trade-api/v2/markets/" + mk, undefined, options);
       if (exchange.trading_active !== true || exchange.exchange_active !== true || market.market?.status !== "active" || Date.now() - nowMs > 3000) return;
       if((await this.tradeConfig()).mode!=='paper')return; // Off may arrive during network reads.
       const trade = {at: nowMs, mk, left: Math.round(left), side: pick.side, price: pick.price, n: pick.n, offered: pick.offered, edge: pick.edge, p: +p.toFixed(3), lo: +lo.toFixed(3), hi: +hi.toFixed(3), x: +x.toFixed(2), sd: +base.sd.toFixed(2), official: !!base.official, mode: cfg.mode, filled: 0, cost: 0};
@@ -1420,9 +1436,10 @@ export class KalshiFeed {
     } catch (e) {
       log.errors = (log.errors || []).concat([{at: nowMs, error: String(e.message || e).slice(0, 200)}]).slice(-20);
       await this.state.storage.put("trade.log", log);
+      if(options.signal)throw e;
     } finally { this.agentBusy = false; }
   }
-  async processPaper(nowMs,cfg) {
+  async processPaper(nowMs,cfg, options = {}) {
     const rows=await this.state.storage.list({prefix:"t:"});let processed=false;
     for(const [key,w] of rows) {
       const intent=w.pendingPaper;if(!intent)continue;
@@ -1431,7 +1448,7 @@ export class KalshiFeed {
       else {
         if(nowMs<intent.readyAt)continue;
         let active=false;
-        try { const exchange=await signedGet(this.env,"/trade-api/v2/exchange/status");const market=await signedGet(this.env,"/trade-api/v2/markets/"+w.mk);active=exchange.exchange_active===true&&exchange.trading_active===true&&market.market?.status==="active"; }catch(e){}
+        try { const exchange=await signedGet(this.env, "/trade-api/v2/exchange/status", undefined, options);const market=await signedGet(this.env, "/trade-api/v2/markets/"+w.mk, undefined, options);active=exchange.exchange_active===true&&exchange.trading_active===true&&market.market?.status==="active"; }catch(e){}
         const latest=await this.tradeConfig();
         nowMs=Date.now();
         if(latest.mode!=='paper')fill={filled:0,cost:0,feesCents:0,status:'paper-canceled',reason:'paper mode stopped',filledAt:nowMs,latencyMs:nowMs-intent.at,levels:[]};
@@ -1454,10 +1471,10 @@ export class KalshiFeed {
     }
     return processed;
   }
-  async settleTrades(mk, close) {               // after the close: score the window's trade against the official result
+  async settleTrades(mk, close, options = {}) {               // after the close: score the window's trade against the official result
     const key = "t:" + mk, w = await this.state.storage.get(key);
     if (!w || !w.trades.length || w.settled) return;
-    const d = await signedGet(this.env, "/trade-api/v2/markets/" + mk), m = d && d.market;
+    const d = await signedGet(this.env, "/trade-api/v2/markets/" + mk, undefined, options), m = d && d.market;
     if (!(m && (m.result === "yes" || m.result === "no"))) return;
     const yes = m.result === "yes";
     let pnl = 0;
@@ -1470,7 +1487,7 @@ export class KalshiFeed {
     const today = (await this.state.storage.get("trade.day")) || {day: etDay(Date.now()), trades: 0, pnlCents: 0};
     if (today.day === etDay(close * 1000)) today.pnlCents += pnl;
     await this.state.storage.put(key, w); await this.state.storage.put("trade.day", today);
-    await notify(this.env, `BTC 15 settled: ${pnl >= 0 ? "+" : "−"}$${(Math.abs(pnl) / 100).toFixed(2)}`, `${mk} resolved ${m.result === "yes" ? "Up" : "Down"} · today ${today.pnlCents >= 0 ? "+" : "−"}$${(Math.abs(today.pnlCents) / 100).toFixed(2)} over ${today.trades} trade${today.trades === 1 ? "" : "s"}`);
+    this.state.waitUntil(notify(this.env, `BTC 15 settled: ${pnl >= 0 ? "+" : "−"}$${(Math.abs(pnl) / 100).toFixed(2)}`, `${mk} resolved ${m.result === "yes" ? "Up" : "Down"} · today ${today.pnlCents >= 0 ? "+" : "−"}$${(Math.abs(today.pnlCents) / 100).toFixed(2)} over ${today.trades} trade${today.trades === 1 ? "" : "s"}`));
   }
   snapshotOf(tk, b) {
     return {type: "orderbook_snapshot", msg: {market_ticker: tk, yes_dollars_fp: [...b.yes].map(([p, q]) => [p.toFixed(4), q.toFixed(2)]), no_dollars_fp: [...b.no].map(([p, q]) => [p.toFixed(4), q.toFixed(2)])}};
