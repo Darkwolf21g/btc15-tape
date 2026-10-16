@@ -133,6 +133,20 @@ cannot come from a later receipt timestamp. See RESEARCH.md for rollout limits.
 
 ## Checks
 
+Timed-session status and exports include observed five-second coverage per window,
+missed slots, evaluated decisions without an intent, largest evaluation gap and
+filled-arrival delay. Only finished slots count while running; manual stop closes
+the partial slot and the durable deadline caps coverage. These are observed bins,
+not reconstructed forecasts or a guarantee of five-second delivery.
+
+Session metadata and due official outcomes are fetched concurrently with a shared
+two-second HTTP deadline. Unavailable metadata blocks simulated fills. New looks
+retain target/receipt time, volatility, probability variants and read timing under
+`reads.version = session-reads-v1`; arrivals also retain read timing. Older records
+are not rewritten. Keep different read-policy versions separate when comparing
+execution performance. Raw one-Hz buffers are still retained only by checkpoint
+research, not by every session look.
+
 The page/model unit checks require Node.js 18 or newer and no npm dependencies:
 
 ```sh

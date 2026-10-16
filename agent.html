@@ -57,6 +57,7 @@ pre,.notes {overflow-wrap:anywhere;}
 <div class="row"><button id="sessionStart" type="button">Start one-hour paper test</button><button id="sessionStop" type="button" class="danger">Stop session</button><button id="sessionExport" type="button">Download session</button></div>
 <p id="sessionMessage" class="notes" role="status"></p>
 <pre id="sessionStatus" aria-live="polite">Checking session…</pre>
+<pre id="sessionCoverage"></pre>
 <div class="tiles"><div class="tile"><span class="label">Realized net</span><b id="sessionPnl">—</b></div><div class="tile"><span class="label">Entries / early exits</span><b id="sessionFills">—</b></div><div class="tile"><span class="label">Open / pending</span><b id="sessionOpen">—</b></div></div>
 <pre id="sessionReasons"></pre>
 <p class="notes">Frozen research rule: buy the side with the largest estimated edge of at least 3¢ after fees. Sell when the bid after fees beats estimated hold value by 3¢. One contract at a time; 1–4 second arrival, original limit, 50% depth, 3 entry attempts per window, 30-second entry cooldown, $3 realized loss stop. The uncalibrated model can be wrong. Zero fills is a valid result.</p>
@@ -148,13 +149,14 @@ const mmss = l => `${Math.floor((l || 0) / 60)}:${String((l || 0) % 60).padStart
 const pct = v => v == null ? "–" : Math.round(v * 100);
 const money = c => (c >= 0 ? "+" : "−") + "$" + (Math.abs(c) / 100).toFixed(2);
 const cents = v => (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + "¢";
-let sessionData=null,sessionSending=false;
+let sessionData=null,sessionSending=false,sessionRefreshing=false;
 async function sessionCall(action,post=false){
  const r=await fetch('./paper-session/'+action+q(),{method:post?'POST':'GET',cache:'no-store',signal:AbortSignal.timeout(15000)});
  const text=await r.text();let d;try{d=JSON.parse(text);}catch{d={error:r.status===403?'Save your stream token in Controls below.':'Session unavailable (HTTP '+r.status+').'};}
  if(!r.ok)throw Error(d.error||'Session request failed');return d;
 }
 async function refreshSession(){
+ if(sessionRefreshing)return;sessionRefreshing=true;
  try{sessionData=await sessionCall('status');const s=sessionData.session,r=sessionData.report;
  $('sessionStart').disabled=sessionSending||!!(s&&(!s.stoppedAt&&sessionData.now<s.endAt||r.open));
  $('sessionStop').disabled=sessionSending||!s||!!s.stoppedAt;
@@ -162,7 +164,10 @@ async function refreshSession(){
  $('sessionStatus').textContent=s?`${s.status.toUpperCase()} · ${s.version}\n${ET.format(new Date(s.startAt))} → ${ET.format(new Date(s.endAt))} ET\n${r.looks} looks · ${r.eligible} eligible · ${r.attempts} attempts · ${r.wins} profitable / ${r.losses} losing closed trades\nFees $${(r.feesCents/100).toFixed(2)} · realized drawdown $${(r.drawdownCents/100).toFixed(2)}${s.stopReason?'\nStopped: '+s.stopReason:''}`:'No timed session yet. Turn the legacy agent Off, then start here.';
  $('sessionPnl').textContent=r?money(r.pnlCents):'—';$('sessionFills').textContent=r?`${r.entryFills} / ${r.exitFills}`:'—';$('sessionOpen').textContent=r?`${r.open} / ${s.pending?1:0}`:'—';
  $('sessionReasons').textContent=r?Object.entries(r.reasons).map(([reason,n])=>`${n} · ${reason}`).join('\n'):'';
- }catch(e){$('sessionStatus').textContent=e.message;}
+ const c=r?.coverage,d=r?.fillDelayMs;
+ $('sessionCoverage').textContent=c?`${r.model} · ${r.settlementConvention}\nCoverage: ${c.observedSlots}/${c.elapsedSlots} finished 5s slots observed · ${c.missedSlots} missed · ${r.skippedDecisions} evaluated without intent\nLargest evaluation gap: ${c.maxEvaluationGapMs==null?'—':(c.maxEvaluationGapMs/1000).toFixed(2)+'s'} · fill delay: ${d?(d.mean/1000).toFixed(2)+'s mean / '+(d.max/1000).toFixed(2)+'s max':'no fills'}\n`+c.windows.map(w=>`${ET.format(new Date(w.startAt))} ET · ${w.observedSlots}/${w.elapsedSlots} slots observed · ${w.missedSlots} missed`).join('\n'):'';
+ }catch(e){$('sessionStatus').textContent='STALE · '+e.message;$('sessionCoverage').textContent='Session coverage unavailable.';for(const id of ['sessionPnl','sessionFills','sessionOpen'])$(id).textContent='—';$('sessionStart').disabled=true;}
+ finally{sessionRefreshing=false;}
 }
 for(const action of ['Start','Stop'])$('session'+action).onclick=async()=>{
  if(sessionSending)return;sessionSending=true;$('sessionStart').disabled=true;$('sessionStop').disabled=true;
@@ -186,7 +191,6 @@ async function refresh() {
     for (const [id, m] of [["bOff", "off"], ["bPaper", "paper"], ["bDemo", "demo"], ["bLive", "live"]]) $(id).classList.toggle("on", cfg.mode === m);
     $("line").textContent = (st.tokenSet ? "Controls unlocked." : "Controls locked: set FEED_TOKEN on the Worker (Settings → Runtime variables and secrets), then save the same token below.")
       + (cfg.mode === "demo" && !st.hasDemoKey ? " No demo key on the relay." : "");
-    await refreshSession();
     const pr=st.paperReport;
     $("paperReport").textContent=pr?`${pr.model} · ${pr.executionModel}\n${pr.attempts} attempts · ${pr.filled} filled · ${pr.noFill} no-fill · ${pr.settled} settled\nNet ${money(pr.pnlCents)} · fees $${(pr.feesCents/100).toFixed(2)} · maximum drawdown $${(pr.maxDrawdownCents/100).toFixed(2)}\nWin rate ${pr.winRate==null?"—":Math.round(pr.winRate*100)+"%"} · average simulated delay ${pr.meanLatencyMs==null?"—":(pr.meanLatencyMs/1000).toFixed(2)+"s"}\nSettings now: ${cfg.paperVenue} · ${(cfg.paperDelayMs/1000).toFixed(2)}s delay · ${Math.round(cfg.paperDepthFraction*100)}% of displayed depth\n${pr.reason}`+(pr.scenarios?.length?"\nScenarios (not pooled for validation):\n"+pr.scenarios.map(g=>`${g.settings.venue} · ${g.settings.delay}ms · ${g.settings.depth*100}% depth · ${g.settled} settled · ${money(g.pnlCents)}`).join("\n"):""):"No paper report available";
     const t = st.today;
@@ -331,10 +335,10 @@ $('researchExport').onclick=async()=>{
   const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='btc15-settlement-research-'+new Date().toISOString().slice(0,10)+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
  }catch(e){$('researchStatus').textContent=e.message;}finally{b.disabled=false;}
 };
-refreshSession();
+refreshSession(); setInterval(refreshSession, 5000);
 refreshResearch(); setInterval(refreshResearch, 60000);
 refresh(); setInterval(refresh, 10000);
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") {refresh();refreshResearch();} });
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") {refreshSession();refresh();refreshResearch();} });
 </script>
 </body>
 </html>

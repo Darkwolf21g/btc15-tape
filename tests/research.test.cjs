@@ -17,6 +17,50 @@ function harness(){
 }
 const book=at=>({at,sourceAt:at-20,sourceKind:'ts_ms',yes:new Map([[.4,10]]),no:new Map([[.5,10]])});
 const ticks=(from,to)=>Array.from({length:to-from+1},(_,i)=>[(from+i)*1000,100+Math.sin(i), (from+i)*1000+10]);
+test('session metadata reads start together and preserve actual target receipt and read duration',async()=>{
+ const h=harness(),S=h.context.BTC15Session,s=S.create(h.now(),'parallel-reads');h.setTime(s.startAt);await h.obj.saveSession(s);
+ const close=(Math.floor(s.startAt/900000)+1)*900,mk=h.api.marketTicker(close),calls=[];
+ h.obj.researchTicks=new Map(ticks(Math.floor(s.startAt/1000)-200,Math.floor(s.startAt/1000)).map(t=>[t[0],t]));
+ let release;const gate=new Promise(resolve=>release=resolve);
+ h.context.read=async(_env,path,_query,options)=>{
+  calls.push({path,signal:options.signal});
+  if(path.endsWith('/exchange/status')){await gate;return {exchange_active:true,trading_active:true};}
+  return {market:{floor_strike:100,status:'active'}};
+ };
+ vm.runInContext('signedGet=read',h.context);
+ const job=h.obj.sessionTick();for(let i=0;i<40&&calls.length<2;i++)await Promise.resolve();
+ assert.equal(calls.length,2);assert.equal(calls[0].signal,calls[1].signal);
+ for(let i=0;i<10;i++)await Promise.resolve(); // let the immediate market response record its receipt
+ h.setTime(s.startAt+200);h.obj.books[mk]=book(h.now());release();await job;
+ const final=await h.obj.loadSession(),look=final.looks[0];assert.equal(final.looks.length,1);
+ assert.equal(look.targetAt,s.startAt);assert.equal(look.at,s.startAt+200);assert.equal(look.reads.startedAt,s.startAt);assert.equal(look.reads.finishedAt,look.at);
+ assert.equal(look.reads.exchangeAt,look.at);assert.equal(look.reads.budgetMs,2000);assert.equal(look.target,100);assert.ok(look.vols);
+});
+test('session read budget abort records a skipped look and never fabricates an arrival fill',async()=>{
+ for(const pending of [false,true]){
+  const h=harness(),S=h.context.BTC15Session,s=S.create(h.now(),'read-timeout-'+pending);h.setTime(s.startAt);
+  if(pending){s.pending={sessionVersion:s.version,model:s.settings.model,settlementConvention:s.settings.settlementConvention,action:'buy',side:'Up',at:s.startAt-1000,readyAt:s.startAt,mk:'TEST',close:s.startAt/1000+300,limit:50,decision:{p:.8}};}
+  await h.obj.saveSession(s);
+  const controller=new AbortController(),budgets=[],calls=[];
+  h.context.AbortSignal={timeout:ms=>{budgets.push(ms);return controller.signal;}};
+  h.context.read=async(_env,path,_query,{signal})=>{calls.push(path);return new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));};
+  vm.runInContext('signedGet=read',h.context);
+  const job=h.obj.sessionTick();for(let i=0;i<40&&calls.length<2;i++)await Promise.resolve();
+  assert.equal(calls.length,2);assert.deepEqual(budgets,[2000]);h.setTime(s.startAt+2000);controller.abort();await job;
+  const final=await h.obj.loadSession();assert.equal(final.trades.length,0);assert.equal(final.pending,null);
+  if(pending){assert.equal(final.attempts[0].filled,0);assert.equal(final.attempts[0].arrivalReads.budgetMs,2000);}
+  else{assert.equal(final.looks[0].reason,'market or exchange read unavailable');assert.equal(final.looks[0].p,null);assert.equal(final.looks[0].reads.marketAt,null);}
+ }
+});
+test('session official outcome reads cannot defer launching the current market reads',async()=>{
+ const h=harness(),S=h.context.BTC15Session,s=S.create(h.now()-900000,'outcome-batch');h.setTime(s.startAt+900000);
+ s.trades=[{mk:'OLD',close:s.startAt/1000+900,side:'Up',entryCents:50,entryFeeCents:2,pnlCents:null}];await h.obj.saveSession(s);
+ let release;const gate=new Promise(resolve=>release=resolve),calls=[];
+ h.context.read=async(_env,path)=>{calls.push(path);if(path.endsWith('/OLD')){await gate;return {market:{result:'yes'}};}return path.includes('/markets/')?{market:{floor_strike:100,status:'active'}}:{exchange_active:true,trading_active:true};};
+ vm.runInContext('signedGet=read',h.context);
+ const job=h.obj.sessionTick();for(let i=0;i<40&&calls.length<3;i++)await Promise.resolve();assert.equal(calls.length,3);
+ release();await job;const final=await h.obj.loadSession();assert.equal(final.trades[0].resolution,'official settlement');assert.equal(final.trades[0].pnlCents,48);assert.equal(final.looks.length,1);
+});
 test('research uses only one-Hz observations available at capture and pauses on an elapsed gap',()=>{
  const h=harness(),close=1800000900,at=(close-30)*1000+20,input=ticks(close-1000,close-30);
  const base={at,close,target:100,targetAt:at-10,ticks:input,book:book(at),marketStatus:'active',exchange:{exchange_active:true,trading_active:true}};

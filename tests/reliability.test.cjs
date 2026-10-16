@@ -17,6 +17,14 @@ function worker() {
   return {api: context.api, context, obj, data, storage, tasks, now, setTime(t) { now = t; }, getAlarm: () => alarm};
 }
 const ticks = (start, end, value = 100) => Array.from({length: end - start + 1}, (_, i) => [(start + i) * 1000, value]);
+test('authenticated reads propagate caller cancellation through the fetch timeout wrapper',async()=>{
+ const h=worker(),controller=new AbortController();let supplied;
+ vm.runInContext('signHandshake=async()=>"fixture-signature"',h.context);
+ h.context.fetch=async(_url,options)=>{supplied=options.signal;return new Promise((_resolve,reject)=>options.signal.addEventListener('abort',()=>reject(options.signal.reason),{once:true}));};
+ const job=h.api.signedCall(h.obj.env,'live','GET','/trade-api/v2/exchange/status',undefined,{signal:controller.signal});
+ for(let i=0;i<20&&!supplied;i++)await Promise.resolve();assert.ok(supplied);
+ controller.abort(new Error('caller deadline'));await assert.rejects(job,/caller deadline/);assert.equal(supplied.aborted,true);
+});
 test('backend rejects any missing elapsed settlement reading', () => {
   const {api} = worker(); const p = api.projectFrom(ticks(60, 89), 90500, 120, 999, {s: 2, l: 2});
   assert.equal(p.mean, null); assert.equal(p.missing, 1);

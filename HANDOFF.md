@@ -1,5 +1,25 @@
 # BTC 15 Tape — handoff
 
+## Session reliability review — October 16, 2026
+
+Session reads now launch market metadata, exchange status and any due official
+outcomes together under one two-second HTTP deadline, rather than awaiting
+sequential twelve-second calls. A failed read produces a recorded skip/no-fill;
+there is no cached-success or unsigned fallback. Stops and version transitions
+still persist before network work, and state is reloaded before decisions/fills.
+This reduces network-induced stalls; it does not promise precise alarm delivery.
+
+Exports preserve target/receipt time, volatility, p2, forecast status and read
+timing on new decisions, plus read timing on arrivals. `session-reads-v1` labels
+the new read policy; old observations keep missing fields missing. Model/session
+versions and strategy settings are unchanged. Reports add per-window observed
+five-second bins, missed slots, evaluated skips and filled-arrival delay. The
+unfinished bin is excluded while running; stop closes its partial bin. No missing
+decision is synthesized. Agent session polling is independent of legacy status,
+does not overlap, and clears result tiles after failed refreshes.
+
+See ENGINEERING_REVIEW.md for validation, code references and remaining limits.
+
 ## Settlement correction — October 13, 2026 (v4)
 
 This section supersedes older close-inclusive settlement and streamed-aggregate
