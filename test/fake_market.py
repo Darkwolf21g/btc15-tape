@@ -11,6 +11,7 @@ quotes every 250 ms, as they do while price moves), __kalshi/__kTarget/__kBid/__
 next 30 s), __lag (seconds the spot venues quote behind the perp).
 """
 import datetime as _d
+import os
 from pathlib import Path
 
 PAGE = Path(__file__).resolve().parent.parent / "public" / "index.html"
@@ -177,7 +178,7 @@ FAKE = r"""
 
 def new_page(playwright, seconds_into_window=300, width=400, height=1500):
     """A page with the fake market installed and the clock set; returns (browser, page, errors)."""
-    browser = playwright.chromium.launch()
+    browser = playwright.chromium.launch(executable_path=os.environ.get("BTC15_TEST_CHROMIUM"))
     page = browser.new_page(viewport={"width": width, "height": height}, device_scale_factor=2)
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))

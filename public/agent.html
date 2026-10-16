@@ -111,7 +111,7 @@ pre,.notes {overflow-wrap:anywhere;}
 <section><h2>Paper research · current model only</h2><pre id="paperReport">Waiting for status…</pre><p class="notes">Forward simulation, not actual fills. No automatic promotion to real trading. Results from older models are excluded below.</p></section>
 <section>
   <h2>Trades</h2>
-  <table id="trades"><thead><tr><th>When</th><th>Mode</th><th>Side · price</th><th>Filled</th><th>Edge · chance</th><th>Result</th></tr></thead><tbody></tbody></table>
+  <div class="table-scroll"><table id="trades"><thead><tr><th>When</th><th>Mode</th><th>Side · price</th><th>Filled</th><th>Edge · chance</th><th>Result</th></tr></thead><tbody></tbody></table></div>
   <div class="notes" id="tradesNote"></div>
 </section>
 
@@ -149,6 +149,7 @@ const mmss = l => `${Math.floor((l || 0) / 60)}:${String((l || 0) % 60).padStart
 const pct = v => v == null ? "–" : Math.round(v * 100);
 const money = c => (c >= 0 ? "+" : "−") + "$" + (Math.abs(c) / 100).toFixed(2);
 const cents = v => (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + "¢";
+const escapeHtml = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let sessionData=null,sessionSending=false,sessionRefreshing=false;
 async function sessionCall(action,post=false){
  const r=await fetch('./paper-session/'+action+q(),{method:post?'POST':'GET',cache:'no-store',signal:AbortSignal.timeout(15000)});
@@ -207,8 +208,8 @@ async function refresh() {
     const tb = $("trades").querySelector("tbody"); tb.innerHTML = "";
     for (const x of all.slice(-40).reverse()) {
       const tr = document.createElement("tr");
-      const res = x.pnlCents != null ? `<span class="${x.pnlCents > 0 ? "good" : x.pnlCents < 0 ? "bad" : "meh"}">${money(x.pnlCents)}</span>` : x.result ? x.result : (x.reason || x.status || "open");
-      tr.innerHTML = `<td>${ET.format(new Date(x.at))}<br><span class="notes">${mmss(x.left)} left</span></td><td>${x.mode}</td><td>${x.side} ${x.price}¢<br><span class="notes">${x.offered} offered</span></td><td>${x.filled}/${x.n}${x.cost ? `<br><span class="notes">$${(x.cost / 100).toFixed(2)}</span>` : ""}</td><td>${cents(x.edge)}<br><span class="notes">${pct(x.p)}% (${pct(x.lo)}–${pct(x.hi)})${x.official ? " · official avg" : ""}</span></td><td>${res}</td>`;
+      const res = x.pnlCents != null ? `<span class="${x.pnlCents > 0 ? "good" : x.pnlCents < 0 ? "bad" : "meh"}">${money(x.pnlCents)}</span>` : escapeHtml(x.result || x.reason || x.status || "open");
+      tr.innerHTML = `<td>${ET.format(new Date(x.at))}<br><span class="notes">${mmss(x.left)} left</span></td><td>${escapeHtml(x.mode)}</td><td>${escapeHtml(x.side)} ${escapeHtml(x.price)}¢<br><span class="notes">${escapeHtml(x.offered)} offered</span></td><td>${escapeHtml(x.filled)}/${escapeHtml(x.n)}${x.cost ? `<br><span class="notes">$${(x.cost / 100).toFixed(2)}</span>` : ""}</td><td>${cents(x.edge)}<br><span class="notes">${pct(x.p)}% (${pct(x.lo)}–${pct(x.hi)})${x.official ? " · official avg" : ""}</span></td><td>${res}</td>`;
       tb.appendChild(tr);
     }
     $("tradesNote").textContent = all.length ? "" : "No trades yet. In paper mode the agent still logs every look below.";
@@ -226,7 +227,7 @@ async function refresh() {
 async function set(body) {
   if (!token) { $("ctlNote").textContent = "Save the stream token first."; return; }
   try {
-    const r = await fetch("./trade/config" + q(), {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    const r = await fetch("./trade/config" + q(), {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),signal:AbortSignal.timeout(15000)});
     $("ctlNote").textContent = r.ok ? "Applied." : "Refused: " + (await r.text());
     refresh();
   } catch (e) { $("ctlNote").textContent = "Relay not reachable."; }

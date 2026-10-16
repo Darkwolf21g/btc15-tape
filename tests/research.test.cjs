@@ -17,6 +17,17 @@ function harness(){
 }
 const book=at=>({at,sourceAt:at-20,sourceKind:'ts_ms',yes:new Map([[.4,10]]),no:new Map([[.5,10]])});
 const ticks=(from,to)=>Array.from({length:to-from+1},(_,i)=>[(from+i)*1000,100+Math.sin(i), (from+i)*1000+10]);
+test('research metadata shares a two-second deadline and a timeout leaves no simulated arrival',async()=>{
+ const h=harness(),close=1800000900,at=(close-60)*1000+750;h.setTime(at);
+ const controller=new AbortController(),budgets=[],calls=[];
+ h.context.AbortSignal={timeout:ms=>{budgets.push(ms);return controller.signal;}};
+ h.context.read=async(_env,path,_query,{signal})=>{calls.push(path);return new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));};
+ vm.runInContext('signedGet=read',h.context);
+ const job=h.obj.researchCapture();for(let i=0;i<40&&calls.length<2;i++)await Promise.resolve();
+ assert.equal(calls.length,2);assert.deepEqual(budgets,[2000]);h.setTime(at+2000);controller.abort();await job;
+ const k=h.data.get('r:'+close).checks[60];assert.equal(k.status,'market or exchange read unavailable');assert.equal(k.p,null);assert.equal(k.reads.version,'research-reads-v1');
+ assert.equal(k.reads.startedAt,at);assert.equal(k.reads.finishedAt,at+2000);assert.equal(k.targetAt,null);assert.equal(h.data.get('research.pending').length,0);
+});
 test('session metadata reads start together and preserve actual target receipt and read duration',async()=>{
  const h=harness(),S=h.context.BTC15Session,s=S.create(h.now(),'parallel-reads');h.setTime(s.startAt);await h.obj.saveSession(s);
  const close=(Math.floor(s.startAt/900000)+1)*900,mk=h.api.marketTicker(close),calls=[];

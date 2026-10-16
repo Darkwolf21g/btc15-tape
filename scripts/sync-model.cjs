@@ -21,3 +21,6 @@ for(const file of ['worker.js','public/index.html']) {
 if(!process.argv.includes('--check'))fs.copyFileSync(path.join(root,'public/index.html'),path.join(root,'index.html'));
 
 if(!process.argv.includes('--check'))fs.copyFileSync(path.join(root,'public/agent.html'),path.join(root,'agent.html'));
+if(process.argv.includes('--check'))for(const file of ['index.html','agent.html']){
+ if(fs.readFileSync(path.join(root,'public',file),'utf8')!==fs.readFileSync(path.join(root,file),'utf8'))throw Error('Stale page mirror: '+file);
+}
