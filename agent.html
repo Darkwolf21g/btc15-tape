@@ -342,7 +342,7 @@ function renderBias(){
  for(const n of [0,25,50,75,100]){const x=105+n*4.65;el('line',{x1:x,x2:x,y1:26,y2:height-8,stroke:'#22304d'});el('text',{x,y:17,fill:'#8592ad','font-size':12,'text-anchor':'middle'},n+'%');}
  bands.forEach((r,i)=>{const y=40+i*34;el('text',{x:0,y:y+10,fill:'#e6ebf5','font-size':13},r.band);el('rect',{x:105,y,width:Math.min(100,r.meanAllInCents)*4.65,height:7,fill:'#ffb020'});el('rect',{x:105,y:y+10,width:r.winRate*465,height:7,fill:'#2fd17c'});});
  if(!bands.length)el('text',{x:105,y:65,fill:'#8592ad','font-size':13},'No settled observations yet');
- const v=data.coverage;$('biasCoverage').textContent=`Coverage: ${v.pending} pending · ${v.invalid} excluded · ${v.legacy} untagged checkpoints excluded · ${v.missingArrival} missing arrival snapshots. Captures are not independent windows. Last capture: ${data.lastAt?new Date(data.lastAt).toLocaleString():'waiting'}.`;
+ const v=data.coverage;$('biasCoverage').textContent=`Coverage: ${v.pending} pending · ${v.unlisted||0} never listed by Kalshi · ${v.invalid} excluded · ${v.legacy} untagged checkpoints excluded · ${v.missingArrival} missing arrival snapshots. Captures are not independent windows. Last capture: ${data.lastAt?new Date(data.lastAt).toLocaleString():'waiting'}.`;
 }
 $('biasCheckpoint').onchange=renderBias;$('biasSide').onchange=renderBias;
 async function researchGet(path,params={}){

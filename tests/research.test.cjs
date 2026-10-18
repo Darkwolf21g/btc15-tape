@@ -459,3 +459,42 @@ test('starting v2 reconciles and archives a pending legacy session before replac
  assert.equal(previous.attemptsCount,1);assert.match(h.data.get('se:old-pending:attempts:0')[0].reason,/incompatible session cohort/);
  assert.equal(h.data.get('session.current').version,'paper-session-v2');assert.equal(h.data.get('session.current').status,'scheduled');
 });
+test('a market Kalshi never listed is recorded once as unlisted and stops failing every cycle',async()=>{
+ const h=harness(),gone=1800000900,next=gone+900;h.setTime((next+700)*1000);
+ for(const close of [gone,next])h.data.set('r:'+close,{mk:'MK'+close,close,schema:h.r.VERSION,model:h.context.BTC15Model.VERSION,checks:{},src:null});
+ const calls=[];
+ h.context.read=async(_env,path)=>{calls.push(path);if(path.endsWith('MK'+gone)){const e=Error('GET '+path+' HTTP 404');e.status=404;throw e;}return {market:{result:'yes',expiration_value:'101'}};};
+ vm.runInContext('signedGet=read',h.context);
+ await h.obj.researchSettle();
+ assert.equal(h.data.get('r:'+gone).src,'unlisted');assert.equal(h.data.get('r:'+gone).unlistedObservedAt,h.now());
+ assert.equal(h.data.get('r:'+next).src,'kalshi');
+ calls.length=0;await h.obj.researchSettle();assert.deepEqual(calls,[],'neither window is fetched again');
+});
+test('a recent 404 or any other failure is still reported, without blocking later windows',async()=>{
+ const h=harness(),first=1800000900,second=first+900;h.setTime((second+120)*1000);
+ for(const close of [first,second])h.data.set('r:'+close,{mk:'MK'+close,close,schema:h.r.VERSION,model:h.context.BTC15Model.VERSION,checks:{},src:null});
+ h.context.read=async(_env,path)=>{if(path.endsWith('MK'+first)){const e=Error('GET '+path+' HTTP 503');e.status=503;throw e;}return {market:{result:'no'}};};
+ vm.runInContext('signedGet=read',h.context);
+ await assert.rejects(h.obj.researchSettle(),/HTTP 503/);
+ assert.equal(h.data.get('r:'+first).src,null);assert.equal(h.data.get('r:'+second).src,'kalshi');
+ h.context.read=async(_env,path)=>{const e=Error('GET '+path+' HTTP 404');e.status=404;throw e;};vm.runInContext('signedGet=read',h.context);
+ h.data.set('r:'+second,{mk:'MK'+second,close:second,schema:h.r.VERSION,model:h.context.BTC15Model.VERSION,checks:{},src:null});
+ await assert.rejects(h.obj.researchSettle(),/HTTP 404/,'a 404 two minutes after close is not treated as permanent');
+ assert.equal(h.data.get('r:'+second).src,null);
+ assert.equal(h.data.get('r:'+first).src,'unlisted','the older window, 17 minutes past close, is unlisted');
+});
+test('forecast and paper settlement treat a long-past 404 as unlisted, but never a recorded fill',async()=>{
+ const h=harness(),close=1800000900;h.setTime((close+700)*1000);
+ h.context.read=async(_env,path)=>{const e=Error('GET '+path+' HTTP 404');e.status=404;throw e;};
+ vm.runInContext('signedGet=read',h.context);
+ h.data.set('w:MK',{mk:'MK',close,src:null});await h.obj.settle('MK',close);
+ assert.equal(h.data.get('w:MK').src,'unlisted');
+ h.data.set('t:MK',{mk:'MK',close,trades:[{filled:0,price:40}]});await h.obj.settleTrades('MK',close);
+ assert.equal(h.data.get('t:MK').settled,true);assert.equal(h.data.get('t:MK').unlisted,true);assert.equal(h.data.get('t:MK').trades[0].pnlCents,0);
+ h.data.set('t:MK2',{mk:'MK2',close,trades:[{filled:1,price:40,cost:40}]});
+ await assert.rejects(h.obj.settleTrades('MK2',close),/HTTP 404/);assert.equal(h.data.get('t:MK2').settled,undefined);
+});
+test('bias coverage counts never-listed windows separately from pending labels',()=>{
+ const h=harness(),rows=tagged(h,3);rows[0].src='unlisted';rows[0].result=null;rows[1].src=null;
+ const r=h.r.biasReport(rows);assert.equal(r.coverage.unlisted,1);assert.equal(r.coverage.pending,1);assert.equal(r.captured,3);
+});

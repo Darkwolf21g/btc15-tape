@@ -1,5 +1,18 @@
 # BTC 15 Tape — handoff
 
+## Unlisted markets — October 18, 2026
+
+Kalshi listed no KXBTC15M markets from 03:15 to 05:00 ET on Thursday 15 October
+(its weekly maintenance window). The collector had recorded a research window for
+04:45 and retried `GET /markets/KXBTC15M-26OCT150445-45` every cycle, receiving 404
+and marking the collector degraded. A 404 for a market that closed more than ten
+minutes ago is now treated as permanent: research rows and forecast windows are
+labelled `src: "unlisted"` once and never fetched again; paper windows with no fills
+are closed as unlisted with zero P&L, while any recorded fill against such a market
+still fails loudly for manual review. Research settlement now continues past one
+failing window and reports the first error afterwards. Bias coverage counts
+unlisted windows separately from pending labels. Unlisted windows never enter scores.
+
 ## Full application audit — October 16, 2026
 
 See APPLICATION_AUDIT.md for file coverage, reproduced findings, fixes and remaining

@@ -145,7 +145,7 @@ function report(all) {
 // Price bands, checkpoint and side are never pooled to manufacture an independent sample.
 function biasReport(recorded) {
   const groups=new Map(), seen=new Set();let captured=0,settled=0,firstAt=null,lastAt=null;
-  const coverage={pending:0,invalid:0,legacy:0,missingMove:0,missingArrival:0};
+  const coverage={pending:0,unlisted:0,invalid:0,legacy:0,missingMove:0,missingArrival:0};
   const add=(hypothesis,checkpoint,side,band,w,k)=>{
     const key=[hypothesis,checkpoint,side,band??'all'].join(':');
     if(!groups.has(key))groups.set(key,{hypothesis,checkpoint,side,band,n:0,wins:0,askSum:0,costSum:0,
@@ -177,6 +177,7 @@ function biasReport(recorded) {
       const k=w.checks?.[c];if(!k)continue;
       if(k.bias?.version!==BIAS_VERSION){coverage.legacy++;continue;}
       captured++;firstAt=firstAt==null?k.at:Math.min(firstAt,k.at);lastAt=lastAt==null?k.at:Math.max(lastAt,k.at);
+      if(w.src==='unlisted'){coverage.unlisted++;continue;}
       if(w.src!=='kalshi'||!['yes','no'].includes(w.result)||!finite(w.resultObservedAt)||w.resultObservedAt<w.close*1000){coverage.pending++;continue;}
       if(k.status!=='forecast'||!finite(k.p)||k.p<0||k.p>1||!k.depth?.valid||k.marketStatus!=='active'||
         k.exchange?.exchange_active!==true||k.exchange?.trading_active!==true||
