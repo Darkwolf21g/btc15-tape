@@ -139,7 +139,7 @@ function pageHarness() {
     localStorage: {getItem: () => null, setItem() {}}, fetch: async () => { throw Error('No network in tests'); },
   });
   vm.runInContext(script.slice(0, script.indexOf('// ---------------------------------------------------------------- start')) + `
-    globalThis.api = {DEPTH_VENUES, depthBooks, depthOps, replica, replicaTick, replicaText, renderReplica, acceptIndex, feed};
+    globalThis.api = {DEPTH_VENUES, depthBooks, depthOps, replica, replicaTick, replicaText, renderReplica, acceptIndex, feed, krakenChecksum, crc32, truncateBook};
   `, ctx);
   return {api: ctx.api, node, setTime: t => { clock = t; }};
 }
@@ -173,4 +173,81 @@ test('page replica uses only ready, fresh books and tracks official ticks', () =
   const text = api.replicaText(3571000);
   assert.match(text.sum, /1 of 7 books/);
   assert.match(text.out, /LMAX Digital/);
+});
+
+// Feed one adapter real message shapes; returns the held book as sorted arrays.
+function drive(api, key, messages) {
+  const sent = [], ws = {readyState: 1, send: m => sent.push(m), close() { this.closed = true; }};
+  const b = {bids: new Map(), asks: new Map(), at: 0, ready: false, state: 'waiting', note: ''};
+  const ops = api.depthOps(b, ws), st = {};
+  for (const m of messages) api.DEPTH_VENUES[key].msg(JSON.parse(JSON.stringify(m)), ops, ws, st, b);
+  const sorted = (m, desc) => [...m].sort((x, y) => desc ? y[0] - x[0] : x[0] - y[0]);
+  return {b, ws, sent, bids: sorted(b.bids, true), asks: sorted(b.asks, false)};
+}
+
+test('Kraken checksum reproduces the documented worked example', () => {
+  const {api} = pageHarness();
+  const bids = [[45283.5, .1], [45283.4, 1.54582015], [45282.1, .1], [45281.0, .1], [45280.3, 1.54592586], [45279.0, .0799], [45277.6, .03310103], [45277.5, .3], [45277.3, 1.54602737], [45276.6, .15445238]];
+  const asks = [[45285.2, .001], [45286.4, 1.54571953], [45286.6, 1.54571109], [45289.6, 1.54560911], [45290.2, .1589066], [45291.8, 1.54553491], [45294.7, .04454749], [45296.1, .3538], [45297.5, .09945542], [45299.5, .18772827]];
+  assert.equal(api.krakenChecksum({bids: new Map(bids), asks: new Map(asks)}), 3310070434);
+  assert.equal(api.crc32('123456789'), 0xCBF43926);
+});
+
+test('Kraken adapter applies snapshot and updates, truncates, and resyncs on a bad checksum', () => {
+  const {api} = pageHarness();
+  const snap = {channel: 'book', type: 'snapshot', data: [{symbol: 'BTC/USD', bids: [{price: 100, qty: 1}, {price: 99, qty: 2}], asks: [{price: 101, qty: 1}, {price: 102, qty: 3}]}]};
+  const sum = book => api.krakenChecksum({bids: new Map(book.bids), asks: new Map(book.asks)});
+  snap.data[0].checksum = sum({bids: [[100, 1], [99, 2]], asks: [[101, 1], [102, 3]]});
+  const upd = {channel: 'book', type: 'update', data: [{symbol: 'BTC/USD', bids: [{price: 100, qty: 0}, {price: 99.5, qty: 4}], asks: []}]};
+  upd.data[0].checksum = sum({bids: [[99.5, 4], [99, 2]], asks: [[101, 1], [102, 3]]});
+  let r = drive(api, 'kraken', [snap, upd]);
+  assert.deepEqual(r.bids, [[99.5, 4], [99, 2]]);
+  assert.equal(r.b.ready, true);
+  const bad = JSON.parse(JSON.stringify(upd)); bad.data[0].checksum = 1;
+  r = drive(api, 'kraken', [snap, upd, bad]);
+  assert.equal(r.b.ready, false); assert.equal(r.ws.closed, true); assert.match(r.b.note, /checksum/);
+  const m = {bids: new Map([[1, 1], [2, 1], [3, 1]]), asks: new Map([[5, 1], [4, 1]])};
+  api.truncateBook(m, 2);
+  assert.deepEqual([...m.bids.keys()].sort(), [2, 3]); assert.deepEqual([...m.asks.keys()].sort(), [4, 5]);
+});
+
+test('Coinbase level2_batch adapter: snapshot, absolute changes, heartbeats', () => {
+  const {api} = pageHarness();
+  const r = drive(api, 'coinbase', [
+    {type: 'l2update', product_id: 'BTC-USD', changes: [['buy', '1', '1']]},          // before the snapshot: ignored
+    {type: 'snapshot', product_id: 'BTC-USD', bids: [['100.00', '1.5'], ['99.00', '2']], asks: [['101.00', '1']]},
+    {type: 'l2update', product_id: 'BTC-USD', time: 'x', changes: [['buy', '100.00', '0'], ['sell', '101.50', '0.25'], ['buy', '99.00', '3']]},
+    {type: 'heartbeat', sequence: 1},
+  ]);
+  assert.deepEqual(r.bids, [[99, 3]]); assert.deepEqual(r.asks, [[101, 1], [101.5, 0.25]]);
+  assert.match(api.DEPTH_VENUES.coinbase.url, /ws-feed\.exchange\.coinbase\.com/);
+});
+
+test('Bitstamp, Crypto.com and Bullish adapters replace the book with each snapshot', () => {
+  const {api} = pageHarness();
+  let r = drive(api, 'bitstamp', [{event: 'data', channel: 'order_book_btcusd', data: {bids: [['100', '1'], ['99', '1']], asks: [['101', '2']]}},
+                                   {event: 'data', channel: 'order_book_btcusd', data: {bids: [['98', '1']], asks: [['102', '2']]}}]);
+  assert.deepEqual(r.bids, [[98, 1]]); assert.deepEqual(r.asks, [[102, 2]]);
+  r = drive(api, 'cryptocom', [{id: 7, method: 'public/heartbeat'},
+    {method: 'subscribe', result: {channel: 'book', subscription: 'book.BTC_USD.50', instrument_name: 'BTC_USD', data: [{bids: [['100', '1', '3']], asks: [['101', '0.5', '1']], t: 1}]}}]);
+  assert.deepEqual(r.bids, [[100, 1]]); assert.deepEqual(r.asks, [[101, 0.5]]);
+  assert.deepEqual(JSON.parse(r.sent[0]), {id: 7, method: 'public/respond-heartbeat'});
+  r = drive(api, 'bullish', [{type: 'snapshot', dataType: 'V1TALevel2', data: {symbol: 'BTCUSD', bids: ['100.0', '1.0', '99.0', '2.0'], asks: ['101.0', '3.0']}},
+                              {type: 'update', data: {symbol: 'BTCUSD', bids: ['100.0', '0'], asks: []}}]);
+  assert.deepEqual(r.bids, [[100, 1], [99, 2]], 'undocumented updates are not applied');
+  assert.match(r.b.note, /undocumented/);
+});
+
+test('Gemini adapter builds from initial events, applies changes, and resyncs on a sequence gap', () => {
+  const {api} = pageHarness();
+  const init = {type: 'update', socket_sequence: 0, events: [
+    {type: 'change', reason: 'initial', side: 'bid', price: '100.00', remaining: '1'},
+    {type: 'change', reason: 'initial', side: 'ask', price: '101.00', remaining: '2'}]};
+  const chg = {type: 'update', socket_sequence: 1, events: [{type: 'change', reason: 'place', side: 'bid', price: '100.50', remaining: '0.5'},
+                                                            {type: 'change', reason: 'cancel', side: 'ask', price: '101.00', remaining: '0'},
+                                                            {type: 'change', reason: 'place', side: 'ask', price: '101.20', remaining: '1'}]};
+  let r = drive(api, 'gemini', [init, chg, {type: 'heartbeat', socket_sequence: 2}]);
+  assert.deepEqual(r.bids, [[100.5, 0.5], [100, 1]]); assert.deepEqual(r.asks, [[101.2, 1]]);
+  r = drive(api, 'gemini', [init, {...chg, socket_sequence: 3}]);
+  assert.equal(r.b.ready, false); assert.match(r.b.note, /sequence gap/);
 });

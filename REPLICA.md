@@ -38,6 +38,28 @@ Implemented from CF Benchmarks' *CME CF Real Time Indices Methodology* v17.0
 9. Index = Σ midPV(v)·w(v) over v ∈ {s, …, v_T}, w ∝ λe^(−λv), weights normalized
    to one, λ = 1 / (**0.3**·v_T). Published precision is $0.01.
 
+## Order-book feeds
+
+Separate browser sockets from the quote/trade feeds, so a depth problem never
+affects spot, the official index or the model. Message formats were checked
+against the exchanges' documentation where it could be read; nothing here was
+exercised against the live venues from this environment, so open the panel and
+check each book's status after deploying.
+
+| Exchange | Feed | Depth | Integrity | Format source |
+| --- | --- | --- | --- | --- |
+| Coinbase | Exchange `level2_batch` + `heartbeat` | full book | none on this channel; heartbeats keep it fresh | Coinbase Exchange docs (public without auth) |
+| Kraken | WS v2 `book`, depth 1000 | 1000 | CRC32 of top 10 (verified against Kraken's worked example); mismatch forces a resync | Kraken v2 docs |
+| Bitstamp | `order_book_btcusd` | top 100, full replace per message | none needed | already used by the tape; official page unreadable here |
+| Gemini | v1 market data, bids/offers | full book | `socket_sequence` gap forces a resync | the v1 feed the tape already uses (v2 is archived) |
+| Crypto.com | `book.BTC_USD.50`, `SNAPSHOT` mode | top 50 every 500 ms | none needed | Crypto.com changelog; message shape partly unverified |
+| Bullish | `l2Orderbook` | top 100 | snapshots only; updates are undocumented and ignored | Bullish docs; may be unavailable in the US |
+| LMAX Digital | — | — | — | no public feed found |
+
+A book is used only after a snapshot, is refreshed by every message or
+heartbeat, and ages out after 10 s of silence (the methodology's lag threshold).
+A socket silent for 30 s is reconnected.
+
 ## Where the replica can differ from the official index
 
 - **Missing constituents.** The official BRTI uses seven exchanges (Bitstamp,

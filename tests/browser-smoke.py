@@ -28,6 +28,15 @@ with sync_playwright() as p:
     run_seconds(page, 75)
     assert "%" in page.locator("#pBig").inner_text(), "official model did not warm up"
     assert "60/60" in page.locator("#lvAvgNote").inner_text()
+    import re
+    replica_sum = page.locator("#replicaSum").inner_text()
+    m = re.search(r"(\d) of 7 books", replica_sum)
+    assert m and int(m.group(1)) >= 4 and "$" in replica_sum, replica_sum
+    page.locator("#replicaBox summary").click()
+    run_seconds(page, 1)
+    replica_out = page.locator("#replicaOut").inner_text()
+    assert "Error at the same source time" in replica_out, replica_out
+    assert "LMAX Digital" in replica_out and "not visible" in replica_out
     page.evaluate("""payload => {
       const prior=window.fetch;
       window.fetch=(url,options)=>String(url).includes('/collector/status')
@@ -101,4 +110,4 @@ with sync_playwright() as p:
     assert not errors, errors
     browser.close()
 
-print("Browser fixtures PASS: tape warm-up, contract gate, mobile overflow, independent session, collector failure/recovery/authentication details and stale-state controls")
+print("Browser fixtures PASS: tape warm-up, BRTI replica and tracking, contract gate, mobile overflow, independent session, collector failure/recovery/authentication details and stale-state controls")

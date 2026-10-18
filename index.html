@@ -2423,8 +2423,105 @@ if ("IntersectionObserver" in window) new IntersectionObserver(([e]) => { const 
 // the canonical BTC15Replica calculation runs over all fresh books. Research context only.
 const REPLICA_MS = 200, REPLICA_KEEP_MS = 10 * 60 * 1000, REPLICA_BAND = 0.15;
 const DEPTH_VENUES = {
-//@@DEPTH_ADAPTERS@@
+  // Coinbase Exchange: level2_batch is the full book without authentication (50 ms batches).
+  // No sequence numbers on this channel; the heartbeat channel proves the connection is current.
+  coinbase: {name: "Coinbase", url: "wss://ws-feed.exchange.coinbase.com",
+    open: ws => ws.send(JSON.stringify({type: "subscribe", product_ids: ["BTC-USD"], channels: ["level2_batch", "heartbeat"]})),
+    msg: (d, book) => {
+      if (d.type === "snapshot" && d.product_id === "BTC-USD") book.snapshot(d.bids || [], d.asks || []);
+      else if (d.type === "l2update" && d.product_id === "BTC-USD") for (const [side, p, sz] of d.changes || []) book.set(side === "buy", p, sz);
+      else if (d.type === "heartbeat") book.touch();
+    }},
+  // Kraken v2 book, 1000 levels. Sizes are absolute; apply in order; levels pushed past the
+  // subscribed depth are not deleted by Kraken, so the book is truncated after each message.
+  // A CRC32 of the top ten levels guards the book; a mismatch forces a fresh snapshot.
+  kraken: {name: "Kraken", url: "wss://ws.kraken.com/v2", depth: 1000,
+    open: ws => ws.send(JSON.stringify({method: "subscribe", params: {channel: "book", symbol: ["BTC/USD"], depth: 1000}})),
+    msg: (d, book, ws, st, b) => {
+      if (d.channel === "heartbeat") return book.touch();
+      if (d.channel !== "book" || !Array.isArray(d.data)) return;
+      for (const x of d.data) {
+        if (x.symbol !== "BTC/USD") continue;
+        const lv = a => (a || []).map(l => [l.price, l.qty]);
+        if (d.type === "snapshot") book.snapshot(lv(x.bids), lv(x.asks));
+        else if (d.type === "update") { for (const [p, q] of lv(x.bids)) book.set(true, p, q); for (const [p, q] of lv(x.asks)) book.set(false, p, q); }
+        else continue;
+        truncateBook(b, 1000);
+        if (Number.isFinite(x.checksum) && b.ready) {
+          if (krakenChecksum(b) === x.checksum >>> 0) st.checked = true;
+          else if (st.checked) return book.reset("checksum mismatch, resyncing");
+          else b.note = "checksum format unconfirmed";
+        }
+      }
+    }},
+  // Bitstamp: every message is the full top 100 bids and asks.
+  bitstamp: {name: "Bitstamp", url: "wss://ws.bitstamp.net", depth: 100,
+    open: ws => ws.send(JSON.stringify({event: "bts:subscribe", data: {channel: "order_book_btcusd"}})),
+    ping: ws => ws.send(JSON.stringify({event: "bts:heartbeat"})),
+    msg: (d, book, ws) => {
+      if (d.event === "bts:request_reconnect") book.reset("exchange asked to reconnect");
+      else if (d.event === "data" && d.channel === "order_book_btcusd" && d.data && Array.isArray(d.data.bids)) book.snapshot(d.data.bids, d.data.asks || []);
+      else if (d.event === "bts:heartbeat") book.touch();
+    }},
+  // Gemini v1 market data, full book: the first update carries every level ("initial");
+  // later changes give the absolute remaining size. socket_sequence must rise by one.
+  gemini: {name: "Gemini", url: "wss://api.gemini.com/v1/marketdata/BTCUSD?bids=true&offers=true&trades=false&auctions=false&heartbeat=true",
+    open: () => {},
+    msg: (d, book, ws, st) => {
+      if (Number.isFinite(d.socket_sequence)) {
+        if (st.seq != null && d.socket_sequence !== st.seq + 1) return book.reset("sequence gap, resyncing");
+        st.seq = d.socket_sequence;
+      }
+      if (d.type === "heartbeat") return book.touch();
+      if (d.type !== "update" || !Array.isArray(d.events)) return;
+      const changes = d.events.filter(e => e.type === "change");
+      if (changes.length && changes.every(e => e.reason === "initial")) {
+        book.snapshot(changes.filter(e => e.side === "bid").map(e => [e.price, e.remaining]), changes.filter(e => e.side === "ask").map(e => [e.price, e.remaining]));
+      } else for (const e of changes) book.set(e.side === "bid", e.price, e.remaining);
+      book.touch();
+    }},
+  // Crypto.com: SNAPSHOT mode sends the full top 50 every 500 ms; heartbeats must be answered.
+  cryptocom: {name: "Crypto.com", url: "wss://stream.crypto.com/exchange/v1/market", depth: 50,
+    open: ws => setTimeout(() => { if (ws.readyState === 1) ws.send(JSON.stringify({id: 1, method: "subscribe", params: {channels: ["book.BTC_USD.50"], book_subscription_type: "SNAPSHOT"}, nonce: Date.now()})); }, 1000),
+    msg: (d, book, ws) => {
+      if (d.method === "public/heartbeat") { ws.send(JSON.stringify({id: d.id, method: "public/respond-heartbeat"})); return book.touch(); }
+      const r = d.result;
+      if (!r || r.channel !== "book" || r.instrument_name !== "BTC_USD" || !Array.isArray(r.data)) return;
+      for (const x of r.data) if (Array.isArray(x.bids) && Array.isArray(x.asks)) book.snapshot(x.bids, x.asks);
+    }},
+  // Bullish: documented snapshots of 100 levels as flat [price, qty, price, qty, ...] arrays.
+  // The incremental format is undocumented, so only snapshots are applied; a book that stops
+  // receiving them ages out after 10 s like any delayed book.
+  bullish: {name: "Bullish", url: "wss://api.exchange.bullish.com/trading-api/v1/market-data/orderbook", depth: 100,
+    open: ws => ws.send(JSON.stringify({jsonrpc: "2.0", type: "command", method: "subscribe", id: "1", params: {topic: "l2Orderbook", symbol: "BTCUSD"}})),
+    msg: (d, book, ws, st, b) => {
+      const x = d.data;
+      if (!x || !Array.isArray(x.bids) || !Array.isArray(x.asks) || x.symbol !== "BTCUSD") return;
+      const pairs = a => { const out = []; for (let i = 0; i + 1 < a.length; i += 2) out.push([a[i], a[i + 1]]); return out; };
+      if (d.type === "snapshot") book.snapshot(pairs(x.bids), pairs(x.asks));
+      else b.note = "ignoring undocumented " + String(d.type).slice(0, 20) + " messages";
+    }},
 };
+function truncateBook(b, n) {            // keep only the n best levels a side, as the exchange does
+  for (const [m, isBid] of [[b.bids, true], [b.asks, false]]) {
+    if (m.size <= n) continue;
+    const keep = [...m.keys()].sort(isBid ? (x, y) => y - x : (x, y) => x - y).slice(0, n);
+    const set = new Set(keep);
+    for (const p of [...m.keys()]) if (!set.has(p)) m.delete(p);
+  }
+}
+const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(str) { let c = 0xFFFFFFFF; for (let i = 0; i < str.length; i++) c = CRC_TABLE[(c ^ str.charCodeAt(i)) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+// Kraken's book checksum: top ten asks then bids; price (1 dp) and quantity (8 dp) with the
+// decimal point and leading zeros removed, concatenated. BTC/USD precisions are assumed here.
+function krakenChecksum(b) {
+  const part = (p, q) => p.toFixed(1).replace(".", "").replace(/^0+/, "") + q.toFixed(8).replace(".", "").replace(/^0+/, "");
+  const asks = [...b.asks].sort((x, y) => x[0] - y[0]).slice(0, 10), bids = [...b.bids].sort((x, y) => y[0] - x[0]).slice(0, 10);
+  let str = "";
+  for (const [p, q] of asks) str += part(p, q);
+  for (const [p, q] of bids) str += part(p, q);
+  return crc32(str);
+}
 const CONSTITUENTS = ["Bitstamp", "Coinbase", "Kraken", "Gemini", "Bullish", "Crypto.com", "LMAX Digital"];
 const depthBooks = {};   // key -> {bids, asks (Map price -> size), at, ready, state, ws, backoff, timer, fails, note, seq}
 const replica = {last: null, state: {excluded: {}}, hist: [], official: [], tracking: null, trackedAt: 0};
@@ -2456,6 +2553,16 @@ function connectDepth(key) {
   };
   ws.onerror = () => {};
   ws.onclose = () => { if (b.ws === ws) { b.ready = false; if (b.state !== "resync") b.state = "off"; b.fails++; retryDepth(key); } };
+}
+function depthWatchdog(nowMs = Date.now()) {   // pings, and a book socket silent for 30 s is a dead one
+  for (const [key, spec] of Object.entries(DEPTH_VENUES)) {
+    const b = depthBooks[key];
+    if (!b || !b.ws) continue;
+    if (b.ws.readyState === 1) {
+      if (b.at && nowMs - b.at > 30000 || !b.at && b.openedAt && nowMs - b.openedAt > 30000) { b.note = "silent for 30 s, reconnecting"; try { b.ws.close(); } catch (e) {} }
+      else if (spec.ping) { try { spec.ping(b.ws); } catch (e) {} }
+    } else if (b.ws.readyState === 3 && !b.timer) retryDepth(key);
+  }
 }
 function retryDepth(key) {
   const b = depthBooks[key];
@@ -2508,15 +2615,15 @@ function replicaText(nowMs = Date.now()) {
   lines.push(`${r.version} · ${globalThis.BTC15Replica.METHODOLOGY} · computed ${age} s ago`);
   if (Number.isFinite(r.value)) lines.push(`Value ${r.value.toFixed(4)} (published precision ${money(r.rounded)}) · size cap ${r.cap.toFixed(4)} BTC · spacing ${r.spacing.toFixed(4)} BTC · utilized depth ${r.vT.toFixed(2)} BTC over ${r.points} points${r.depthLimited ? " · visible books ran out before the 5% band (depth-limited)" : ""}`);
   lines.push("");
-  lines.push("Books:");
+  lines.push("Books (bid/ask levels held):");
   for (const [key, spec] of Object.entries(DEPTH_VENUES)) {
     const b = depthBooks[key];
     const why = r.excluded[spec.name];
     const levels = b ? `${b.bids.size}/${b.asks.size} levels` : "";
-    const fresh = b && b.at ? `${((nowMs - b.at) / 1000).toFixed(1)} s` : "–";
-    lines.push(`  ${spec.name.padEnd(12)} ${(r.used.includes(spec.name) ? "used" : why || (b ? b.state : "off")).padEnd(22)} ${levels.padEnd(18)} updated ${fresh} ago${b && b.note ? " · " + b.note : ""}`);
+    const fresh = b && b.at ? `${((nowMs - b.at) / 1000).toFixed(1)} s old` : "never updated";
+    lines.push(`  ${spec.name}: ${r.used.includes(spec.name) ? "used" : why || (b ? b.state : "off")} · ${levels || "no book"} · ${fresh}${b && b.note ? " · " + b.note : ""}`);
   }
-  for (const name of CONSTITUENTS) if (!Object.values(DEPTH_VENUES).some(s => s.name === name)) lines.push(`  ${name.padEnd(12)} not visible from a browser`);
+  for (const name of CONSTITUENTS) if (!Object.values(DEPTH_VENUES).some(s => s.name === name)) lines.push(`  ${name}: not visible from a browser`);
   lines.push("");
   if (!tr || !tr.accuracy) lines.push("Tracking: needs the official stream (Kalshi key) and a minute of overlap.");
   else {
@@ -2538,6 +2645,7 @@ function renderReplica() {
 for (const k of Object.keys(VENUES)) connect(k);
 for (const k of Object.keys(DEPTH_VENUES)) connectDepth(k);
 setInterval(() => { replicaTick(); renderReplica(); }, REPLICA_MS);
+setInterval(depthWatchdog, 5000);
 connectFeed();
 (function second() {            // one sample at each whole second
   const t = Date.now();
