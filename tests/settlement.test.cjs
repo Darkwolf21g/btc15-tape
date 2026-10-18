@@ -494,6 +494,17 @@ test('collector health separates failed work, stalled maintenance and successful
  n=await show({lastOk:now-300000,lastRun:now-1000});assert.match(n.textContent,/working.*5m ago/);assert.equal(n.className,'bad');
  n=await show({lastOk:now-300000,lastRun:now-300000});assert.match(n.textContent,/stale/);
 });
+test('tape exposes task errors as text, labels history after recovery and clears details when status is unavailable',async()=>{
+ const h=page(),now=9000000,error={at:now-500,stage:'research settlement',error:'upstream 503 <img src=x onerror=alert(1)>'};
+ let payload={now,lastOk:now-60000,lastCycleAt:now-500,lastRun:now-500,cycleFailures:1,cycleErrors:[error],errors:[error]};
+ h.context.fetch=async()=>({ok:true,json:async()=>payload});await h.api.refreshCollector();
+ assert.equal(h.node('collectorDetails').hidden,false);assert.match(h.node('healthCollector').textContent,/1 failed task ·/);
+ assert.match(h.node('collectorErrorDetails').textContent,/research settlement: upstream 503 <img/);
+ payload={...payload,lastOk:now,cycleFailures:0,cycleErrors:[]};await h.api.refreshCollector();
+ assert.equal(h.node('healthCollector').className,'good');assert.match(h.node('collectorErrorDetails').textContent,/history \(latest run succeeded\)/);
+ h.context.fetch=async()=>({ok:false,status:403,json:async()=>({})});await h.api.refreshCollector();
+ assert.match(h.node('healthCollector').textContent,/token required/);assert.equal(h.node('collectorDetails').hidden,true);assert.equal(h.node('collectorErrorDetails').textContent,'');
+});
 
 test('official closing projection uses spot before the final minute and weights remaining readings without flow lean',()=>{
  const h=page(),a=h.api;a.feed.brti={v:160,t:90500};

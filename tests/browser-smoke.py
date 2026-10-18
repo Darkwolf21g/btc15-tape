@@ -12,6 +12,10 @@ from fake_market import new_page, run_seconds
 
 OUT = ROOT / ".audit-artifacts"
 OUT.mkdir(exist_ok=True)
+now = 1800000900000
+failure = {"at": now-500, "stage": "research settlement", "error": "fixture read deadline exceeded"}
+collector = {"now": now, "lastOk": now-60000, "lastRun": now-500, "lastCycleAt": now-500,
+             "cycleFailures": 1, "cycleErrors": [failure], "errors": [failure]}
 
 with sync_playwright() as p:
     # Exercise the actual tape with deterministic exchange/BRTI fixtures.
@@ -24,6 +28,15 @@ with sync_playwright() as p:
     run_seconds(page, 75)
     assert "%" in page.locator("#pBig").inner_text(), "official model did not warm up"
     assert "60/60" in page.locator("#lvAvgNote").inner_text()
+    page.evaluate("""payload => {
+      const prior=window.fetch;
+      window.fetch=(url,options)=>String(url).includes('/collector/status')
+        ? Promise.resolve(new Response(JSON.stringify(payload))) : prior(url,options);
+      return refreshCollector();
+    }""", collector)
+    assert "Collector degraded" in page.locator("#healthCollector").inner_text()
+    page.locator("#collectorDetails summary").click()
+    assert "research settlement: fixture read deadline exceeded" in page.locator("#collectorErrorDetails").inner_text()
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), "tape overflow"
     page.screenshot(path=str(OUT / "tape-mobile.png"), full_page=True)
     page.evaluate("""() => {
@@ -38,7 +51,6 @@ with sync_playwright() as p:
     page = browser.new_page(viewport={"width":390,"height":844})
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))
-    now = 1800000900000
     coverage = {"observedSlots":1,"elapsedSlots":6,"missedSlots":5,"maxEvaluationGapMs":None,
                 "windows":[{"startAt":now,"observedSlots":1,"elapsedSlots":6,"missedSlots":5}]}
     report = {"looks":1,"eligible":0,"attempts":0,"wins":0,"losses":0,"feesCents":0,
@@ -49,6 +61,7 @@ with sync_playwright() as p:
                "startAt":now,"endAt":now+3600000,"stoppedAt":None,"pending":None}
     status = {"session":session,"report":report,"now":now+30000}
     fail_session = False
+    collector_http_status = 200
 
     def route(r):
         path = urlparse(r.request.url).path
@@ -57,6 +70,8 @@ with sync_playwright() as p:
         elif path == "/paper-session/status":
             r.fulfill(status=503 if fail_session else 200, content_type="application/json",
                       body=json.dumps({"error":"fixture outage"} if fail_session else status))
+        elif path == "/collector/status":
+            r.fulfill(status=collector_http_status, content_type="application/json", body=json.dumps(collector))
         else:
             # Deliberately unavailable legacy/research services: session still refreshes.
             r.abort()
@@ -66,8 +81,17 @@ with sync_playwright() as p:
     page.wait_for_function("document.getElementById('sessionCoverage').textContent.includes('5 missed')")
     assert page.locator("#sessionPnl").inner_text() == "+$0.00"
     assert page.locator("#sessionStop").is_enabled()
+    assert "Collector degraded" in page.locator("#collector").inner_text()
+    assert "research settlement: fixture read deadline exceeded" in page.locator("#collector").inner_text()
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), "agent overflow"
     page.screenshot(path=str(OUT / "agent-mobile.png"), full_page=True)
+    collector.update({"lastOk": now, "cycleFailures": 0, "cycleErrors": []})
+    page.evaluate("refresh()")
+    assert "Collector active" in page.locator("#collector").inner_text()
+    assert "history (latest run succeeded)" in page.locator("#collector").inner_text()
+    collector_http_status = 403
+    page.evaluate("refresh()")
+    assert page.locator("#collector").inner_text() == "Collector unavailable · token required"
     fail_session = True
     page.evaluate("refreshSession()")
     assert "STALE" in page.locator("#sessionStatus").inner_text()
@@ -77,4 +101,4 @@ with sync_playwright() as p:
     assert not errors, errors
     browser.close()
 
-print("Browser fixtures PASS: tape warm-up, contract gate, mobile overflow, independent session and stale-state controls")
+print("Browser fixtures PASS: tape warm-up, contract gate, mobile overflow, independent session, collector failure/recovery/authentication details and stale-state controls")
