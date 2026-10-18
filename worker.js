@@ -417,7 +417,7 @@ function report(all) {
 // Price bands, checkpoint and side are never pooled to manufacture an independent sample.
 function biasReport(recorded) {
   const groups=new Map(), seen=new Set();let captured=0,settled=0,firstAt=null,lastAt=null;
-  const coverage={pending:0,invalid:0,legacy:0,missingMove:0,missingArrival:0};
+  const coverage={pending:0,unlisted:0,invalid:0,legacy:0,missingMove:0,missingArrival:0};
   const add=(hypothesis,checkpoint,side,band,w,k)=>{
     const key=[hypothesis,checkpoint,side,band??'all'].join(':');
     if(!groups.has(key))groups.set(key,{hypothesis,checkpoint,side,band,n:0,wins:0,askSum:0,costSum:0,
@@ -449,6 +449,7 @@ function biasReport(recorded) {
       const k=w.checks?.[c];if(!k)continue;
       if(k.bias?.version!==BIAS_VERSION){coverage.legacy++;continue;}
       captured++;firstAt=firstAt==null?k.at:Math.min(firstAt,k.at);lastAt=lastAt==null?k.at:Math.max(lastAt,k.at);
+      if(w.src==='unlisted'){coverage.unlisted++;continue;}
       if(w.src!=='kalshi'||!['yes','no'].includes(w.result)||!finite(w.resultObservedAt)||w.resultObservedAt<w.close*1000){coverage.pending++;continue;}
       if(k.status!=='forecast'||!finite(k.p)||k.p<0||k.p>1||!k.depth?.valid||k.marketStatus!=='active'||
         k.exchange?.exchange_active!==true||k.exchange?.trading_active!==true||
@@ -598,6 +599,11 @@ const paperSession = globalThis.BTC15Session;
 const {tailCdf,volsFrom,projectFrom} = globalThis.BTC15Model;
 function feeCents(p) { return globalThis.BTC15Model.feesCents(p*100); }
 async function signedGet(env, apiPath, query, options) { return signedCall(env,"live","GET",apiPath+(query||""),undefined,options); }
+// Kalshi lists no market for some windows (for example its weekly Thursday-morning maintenance).
+// A 404 for a market whose window closed more than ten minutes ago is permanent: settlement
+// records the window as unlisted once instead of retrying it every cycle.
+const UNLISTED_AFTER_S = 600;
+const unlistedMarket = (e, close) => !!e && e.status === 404 && Date.now() / 1000 - close > UNLISTED_AFTER_S;
 const HOSTS = {live:"https://external-api.kalshi.com",demo:"https://external-api.demo.kalshi.co"};
 function keysFor(env, mode) {
   if(!["live","demo"].includes(mode))throw Error("Unknown API environment");
@@ -985,7 +991,8 @@ export class KalshiFeed {
   }
   async researchSettle(options = {}) {
     const now=Date.now(),rows=[...(await this.state.storage.list({prefix:'r:'})).values()].sort((a,b)=>a.close-b.close);
-    for(const row of rows.filter(w=>w.close*1000<now-60000&&w.src!=='kalshi').slice(-4)){
+    let firstError=null;   // one failing window must not block the others in this pass
+    for(const row of rows.filter(w=>w.close*1000<now-60000&&w.src!=='kalshi'&&w.src!=='unlisted').slice(-4)){
       if(!row.closingCapture){
         const inputKey=`ri:${row.close}:0`,saved=await this.state.storage.get(inputKey);
         // Existing raw buffers may outlive an interrupted summary write. Reuse, never overwrite them.
@@ -1005,7 +1012,15 @@ export class KalshiFeed {
       let m;
       const existing=await this.state.storage.get('w:'+row.mk);
       if(existing?.src==='kalshi')m={result:existing.result,expiration_value:existing.officialCloseAvg};
-      else m=(await signedGet(this.env, '/trade-api/v2/markets/'+row.mk, undefined, options))?.market;
+      else try{m=(await signedGet(this.env, '/trade-api/v2/markets/'+row.mk, undefined, options))?.market;}
+      catch(e){
+        if(!unlistedMarket(e,row.close)){firstError??=e;continue;}
+        await this.state.storage.transaction(async tx=>{
+          const latest=await tx.get('r:'+row.close);if(!latest||latest.src==='kalshi')return;
+          latest.src='unlisted';latest.unlistedObservedAt=Date.now();await tx.put('r:'+row.close,latest);
+        });
+        continue;
+      }
       if(m&&['yes','no'].includes(m.result)){
         // A delayed arrival may have landed while the official outcome was fetched.
         // Attach labels to the latest record without replacing that observation.
@@ -1023,6 +1038,7 @@ export class KalshiFeed {
       for(const [key] of inputs)if(Number(key.split(':')[1])*1000<now-86400000)await this.state.storage.delete(key);
       this.researchPrunedAt=now;
     }
+    if(firstError)throw firstError;
   }
   async marketData(path) {
     const reply=(d)=>new Response(d.body,{status:d.status,headers:{...CORS,"Content-Type":"application/json",...(d.retry?{"Retry-After":String(d.retry)}:{})}});
@@ -1230,9 +1246,11 @@ export class KalshiFeed {
     });
   }
   async collectorError(e,stage=null) {
+    const entry={at:Date.now(),stage,error:String(e.message||e).slice(0,200)};
     await this.updateCollector(log=>{
-      log.errors=(log.errors||[]).concat([{at:Date.now(),stage,error:String(e.message||e).slice(0,200)}]).slice(-10);
+      log.errors=(log.errors||[]).concat([entry]).slice(-10);
     });
+    return entry;
   }
   async scheduleAlarm(earlier=Infinity) {
     // Background session/maintenance completions can race the fast alarm. Compute
@@ -1264,11 +1282,11 @@ export class KalshiFeed {
   async collectorMaintenance() {
     // One deadline for maintenance market reads, rather than 12s per old row.
     const startedAt=Date.now(),options={signal:AbortSignal.timeout(8000)};
-    let failures=0;
+    const cycleErrors=[];
     const run=async(stage,job)=>{
       this.collectorStage=stage;
       try { options.signal.throwIfAborted(); await job(); }
-      catch(e) { failures++; await this.collectorError(e,stage); }
+      catch(e) { cycleErrors.push(await this.collectorError(e,stage)); }
     };
     await this.updateCollector(log=>{log.maintenanceStartedAt=startedAt;});
     await run('upstream',()=>this.ensureAlarm());
@@ -1280,7 +1298,7 @@ export class KalshiFeed {
     // Decisions precede historical settlement retries, which may exhaust the budget.
     if(cfg.mode==='paper')await run('paper decision',()=>this.agentTick(Date.now(),options));
     const rows=await this.state.storage.list({prefix:'w:'});
-    for(const w of [...rows.values()].filter(w=>w.close<now-60&&w.src!=='kalshi').slice(-4))
+    for(const w of [...rows.values()].filter(w=>w.close<now-60&&w.src!=='kalshi'&&w.src!=='unlisted').slice(-4))
       await run('forecast settlement',()=>this.settle(w.mk,w.close,options));
     await run('research settlement',()=>this.researchSettle(options));
     const trades=await this.state.storage.list({prefix:'t:'});
@@ -1289,8 +1307,8 @@ export class KalshiFeed {
     if(rows.size>5000)for(const [key]of [...rows].slice(0,rows.size-5000))await this.state.storage.delete(key);
     await this.updateCollector(log=>{
       log.lastCycleAt=Date.now();log.cycleDurationMs=Date.now()-startedAt;
-      log.cycleFailures=failures;log.stage=null;
-      if(!failures)log.lastOk=Date.now(); // A live heartbeat must not hide failed work.
+      log.cycleFailures=cycleErrors.length;log.cycleErrors=cycleErrors;log.stage=null;
+      if(!cycleErrors.length)log.lastOk=Date.now(); // A live heartbeat must not hide failed work.
       log.indexAgeMs=this.ticks.length?Date.now()-this.ticks[this.ticks.length-1][0]:null;
     });
   }
@@ -1342,8 +1360,11 @@ export class KalshiFeed {
   }
   async settle(mk, close, options = {}) {
     const key = "w:" + mk, w = await this.state.storage.get(key);
-    if (!w || w.src === "kalshi") return;
-    const d = await signedGet(this.env, "/trade-api/v2/markets/" + mk, undefined, options), m = d && d.market;
+    if (!w || w.src === "kalshi" || w.src === "unlisted") return;
+    let d;
+    try { d = await signedGet(this.env, "/trade-api/v2/markets/" + mk, undefined, options); }
+    catch (e) { if (!unlistedMarket(e, close)) throw e; w.src = "unlisted"; w.unlistedObservedAt = Date.now(); await this.state.storage.put(key, w); return; }
+    const m = d && d.market;
     if (m && (m.result === "yes" || m.result === "no")) {
       w.result = m.result; w.src = "kalshi";
       if (+m.floor_strike > 0) w.tgt = +m.floor_strike;
@@ -1474,7 +1495,15 @@ export class KalshiFeed {
   async settleTrades(mk, close, options = {}) {               // after the close: score the window's trade against the official result
     const key = "t:" + mk, w = await this.state.storage.get(key);
     if (!w || !w.trades.length || w.settled) return;
-    const d = await signedGet(this.env, "/trade-api/v2/markets/" + mk, undefined, options), m = d && d.market;
+    let d;
+    try { d = await signedGet(this.env, "/trade-api/v2/markets/" + mk, undefined, options); }
+    catch (e) {
+      // No market means nothing could have filled. A recorded fill against it needs a person, not a guess.
+      if (!unlistedMarket(e, close) || w.trades.some(t => t.filled)) throw e;
+      for (const t of w.trades) t.pnlCents = 0;
+      w.settled = true; w.unlisted = true; w.result = null; await this.state.storage.put(key, w); return;
+    }
+    const m = d && d.market;
     if (!(m && (m.result === "yes" || m.result === "no"))) return;
     const yes = m.result === "yes";
     let pnl = 0;

@@ -19,6 +19,16 @@ Timed sessions remain `paper-session-v2` / `brti-driftless-v4` with unchanged ru
 Older dated release notes below describe historical versions and are superseded
 by current behavior, the settlement correction, and the audit handoff.
 
+## BRTI replica (research)
+
+The tape now recomputes BRTI every 200 ms from the constituent exchanges' public
+order books using CF Benchmarks' published calculation (methodology v17.0), and
+measures it against Kalshi's official stream: dollar error at the same source time,
+and whether it shows a move before the official tick reaches the page. Open
+**BRTI replica** under the levels. It is research context only and is not used by
+the frozen model, signals, paper trading or settlement. See [REPLICA.md](REPLICA.md)
+for the calculation, feeds, known differences and how to read the tracking lines.
+
 ## Settlement interval correction (v4)
 
 The KXBTC15M forecast now uses the 60 one-second BRTI readings strictly before
@@ -147,6 +157,13 @@ and settlement interval `[close-60s,close)`. Existing v1 sessions stop new decis
 and cancel pending simulations on upgrade while keeping their original history;
 open positions still await official settlement. A fresh session requires an explicit
 start. Five-second looks, four-window duration and strategy thresholds are unchanged.
+
+The tape and agent dashboard share collector health rules. A recent successful
+run does not mask failures in the latest completed run. Expand **Collector details**
+on the tape, or read **Collector and record** on `/agent`, to see failed task names,
+timestamps, and errors. After recovery, retained errors are labelled as history.
+These diagnostics require the existing stream token. A live BRTI feed alone does
+not establish complete recording or paper-session coverage.
 
 Slow session and collector maintenance requests run outside the research alarm's
 critical path. Single-flight jobs and atomic earliest-wake scheduling allow the next

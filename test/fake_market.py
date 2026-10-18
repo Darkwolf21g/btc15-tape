@@ -73,7 +73,7 @@ FAKE = r"""
         return;
       }
       if (k === "binance") { setTimeout(() => { this.readyState = 3; this.onerror && this.onerror({}); this.onclose && this.onclose({}); }, 30); return; }
-      setTimeout(() => { this.readyState = 1; this.onopen && this.onopen(); }, 50);
+      setTimeout(() => { this.readyState = 1; this.onopen && this.onopen(); if (k === "gemini" && url.includes("bids=true")) this.depth("gemini"); }, 50);
       const emit = msg => { if (this.readyState !== 1) return; window.__frames[k] = (window.__frames[k] || 0) + 1; this.onmessage && this.onmessage({data: typeof msg === "string" ? msg : JSON.stringify(msg)}); };
       this.emit = emit;
       const quote = () => {
@@ -120,17 +120,36 @@ FAKE = r"""
         if (msg) emit(msg);
       }, k in lgap ? 12000 : 1000);
     }
+    depth(kind) {                                   // order-book sockets for the BRTI replica, in each venue's shape
+      if (this.dtimer) return;
+      const k = this.k, levels = side => { const m = price + off[k], out = [];
+        for (let i = 0; i < 40; i++) out.push([(side === "bid" ? m - 0.5 - i * 0.5 : m + 0.5 + i * 0.5).toFixed(2), (0.2 + ((i * 37) % 9) / 10).toFixed(4)]); return out; };
+      window.__depth = window.__depth || {};
+      const send = () => {
+        window.__depth[k] = (window.__depth[k] || 0) + 1;
+        const b = levels("bid"), a = levels("ask");
+        if (kind === "coinbase") this.emit({type: "snapshot", product_id: "BTC-USD", bids: b, asks: a});
+        if (kind === "kraken") this.emit({channel: "book", type: "snapshot", data: [{symbol: "BTC/USD", bids: b.map(([p, q]) => ({price: +p, qty: +q})), asks: a.map(([p, q]) => ({price: +p, qty: +q}))}]});
+        if (kind === "cryptocom") this.emit({method: "subscribe", result: {channel: "book", subscription: "book.BTC_USD.50", instrument_name: "BTC_USD", data: [{bids: b.map(l => l.concat(["1"])), asks: a.map(l => l.concat(["1"])), t: Date.now()}]}});
+        if (kind === "gemini") { this.seq = (this.seq == null ? -1 : this.seq) + 1;
+          this.emit({type: "update", socket_sequence: this.seq, events: b.map(([p, q]) => ({type: "change", reason: "initial", side: "bid", price: p, remaining: q})).concat(a.map(([p, q]) => ({type: "change", reason: "initial", side: "ask", price: p, remaining: q})))}); }
+      };
+      setTimeout(send, 60); this.dtimer = setInterval(send, 500);
+    }
     send(s) {
       window.__sent[this.k] = (window.__sent[this.k] || []).concat([s]).slice(-6);
       if (this.k === "feed") { if (s === "ping") this.emit && this.emit({type: "pong"}); return; }
       let d; try { d = JSON.parse(s); } catch (e) { return; }
+      if (this.k === "coinbase" && Array.isArray(d.channels) && d.channels.includes("level2_batch")) this.depth("coinbase");
+      if (this.k === "kraken" && d.params && d.params.channel === "book") this.depth("kraken");
+      if (this.k === "cryptocom" && d.params && Array.isArray(d.params.channels) && d.params.channels.some(c => c.startsWith("book."))) { this.sub = true; this.depth("cryptocom"); return; }
       if (d.method === "subscribe" && this.k === "cryptocom") {
         this.sub = true;
         // Crypto.com replays recent trades on subscribing: these are old and must not be counted
         setTimeout(() => this.emit({method: "subscribe", result: {channel: "trade", instrument_name: "BTC_USD", data: [{d: "0", t: Date.now() - 40000, p: "82900", q: "5", s: "BUY", i: "BTC_USD"}]}}), 100);
       }
     }
-    close() { this.readyState = 3; clearInterval(this.btimer); clearInterval(this.timer); clearInterval(this.ftimer); clearInterval(this.ttimer); clearInterval(this.ltimer); clearInterval(this.hb); this.onclose && this.onclose(); }
+    close() { this.readyState = 3; clearInterval(this.dtimer); clearInterval(this.btimer); clearInterval(this.timer); clearInterval(this.ftimer); clearInterval(this.ttimer); clearInterval(this.ltimer); clearInterval(this.hb); this.onclose && this.onclose(); }
   }
   window.WebSocket = FakeWS;
   window.__trades = true;
@@ -186,8 +205,10 @@ def new_page(playwright, seconds_into_window=300, width=400, height=1500):
     page.clock.install(time=at(seconds_into_window))
     page.clock.pause_at(at(seconds_into_window))
     page.add_init_script(FAKE)
-    page.route("**/fonts.googleapis.com/**", lambda r: r.abort())
-    page.route(PAGE_URL, lambda route: route.fulfill(content_type="text/html", body=PAGE.read_text()))
+    # Serve only the local fixture document; this also works in browsers that
+    # prohibit file:// navigation. Every other real HTTP request is blocked.
+    page.route("**/*", lambda r: r.fulfill(content_type="text/html", body=PAGE.read_text())
+               if r.request.url == PAGE_URL else r.abort())
     page.goto(PAGE_URL)
     return browser, page, errors
 
