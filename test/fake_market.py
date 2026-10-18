@@ -198,11 +198,12 @@ FAKE = r"""
 def new_page(playwright, seconds_into_window=300, width=400, height=1500):
     """A page with the fake market installed and the clock set; returns (browser, page, errors)."""
     browser = playwright.chromium.launch(executable_path=os.environ.get("BTC15_TEST_CHROMIUM"))
-    page = browser.new_page(viewport={"width": width, "height": height}, device_scale_factor=2)
+    page = browser.new_page(viewport={"width": width, "height": height}, device_scale_factor=2, has_touch=width < 600)
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))
     page.on("console", lambda m: m.type == "error" and "ERR_FAILED" not in m.text and errors.append(m.text))
     page.clock.install(time=at(seconds_into_window))
+    page.clock.pause_at(at(seconds_into_window))
     page.add_init_script(FAKE)
     # Serve only the local fixture document; this also works in browsers that
     # prohibit file:// navigation. Every other real HTTP request is blocked.

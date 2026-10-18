@@ -79,7 +79,7 @@ test('fresh active contract status permits a signal and stale status pauses it',
  const h=readyPage(),{api,node}=h;api.acceptIndex(100,3560000);for(let t=3380;t<=3560;t++)api.officialSeconds.set(t,100);
  api.kalshi.market={ticker:api.tickers(3600)[1],target:90,status:'active',statusAt:3560000,at:3560000,bid:.29,ask:.3};
  vm.runInContext('exch.at=Date.now();exch.active=exch.trading=true;manualQuoteAt.Up=Date.now()',h.context);
- api.render();assert.match(node('vUp').textContent,/· buy/);
+ api.render();assert.match(node('vUp').textContent,/^Qualifies/);
  api.kalshi.market.statusAt-=30000;api.render();assert.match(node('vUp').textContent,/WAIT.*market/);
 });
 test('retired relay sockets cannot inject ticks and ticker-only updates cannot assert active market status',()=>{

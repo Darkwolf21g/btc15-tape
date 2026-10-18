@@ -27,7 +27,7 @@ with sync_playwright() as p:
     }""")
     run_seconds(page, 75)
     assert "%" in page.locator("#pBig").inner_text(), "official model did not warm up"
-    assert "60/60" in page.locator("#lvAvgNote").inner_text()
+    assert "60/60" in page.locator("#lvAvgNote").text_content()
     import re
     replica_sum = page.locator("#replicaSum").inner_text()
     m = re.search(r"(\d) of 7 books", replica_sum)
