@@ -23,7 +23,7 @@ with sync_playwright() as p:
     }""")
     run_seconds(page, 75)
     assert "%" in page.locator("#pBig").inner_text(), "official model did not warm up"
-    assert "60/60" in page.locator("#lvAvgNote").inner_text()
+    assert "60/60" in page.locator("#lvAvgNote").text_content()
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), "tape overflow"
     page.screenshot(path=str(OUT / "tape-mobile.png"), full_page=True)
     page.evaluate("""() => {

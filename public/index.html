@@ -4,8 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>BTC 15 Tape</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <style>
 /* Layout: one column for a phone on a dash mount; countdown and P(Up) first, the tape below, sources last.
    Deliberately dark only: it is read at night, next to Robinhood's dark screen. */
@@ -24,7 +22,7 @@
   --warn: #ffb020;
   --lead: #c792ea;      /* the perpetual future: often moves first */
   --display: "Barlow Condensed", "Arial Narrow", system-ui, sans-serif;
-  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -132,6 +130,44 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
 button, summary { min-height: 44px; }
 summary { display: list-item; padding-block: 10px; }
 @media (max-width: 420px) { .hero { gap: 8px; } .p { font-size: 68px; } .fair { font-size: 11px; flex-wrap: wrap; gap: 4px; } .settle { padding: 8px; gap: 6px; } .settle b { font-size: 14px; } #main { height: 250px; } }
+
+/* Market dashboard: compact overview, clear provenance, progressive disclosure. */
+:root { --ground:#0b1018; --panel:#131c28; --line:#293547; --ink:#edf2f8; --dim:#a2afc2; --display:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+body { max-width:1200px; font:14px/1.5 var(--display); padding-left:max(16px,env(safe-area-inset-left)); padding-right:max(16px,env(safe-area-inset-right)); padding-block:calc(20px + env(safe-area-inset-top)) calc(32px + env(safe-area-inset-bottom)); }
+html { scroll-padding-top:74px; } a { color:#a8c2ff; } p { margin-block:8px; }
+header { align-items:center; padding-bottom:16px; border-bottom:1px solid var(--line); }
+.win { gap:5px; } .win b { font-size:19px; line-height:1.3; } .win small { font:11px var(--mono); } .brand { color:var(--ink); font-size:12px; letter-spacing:.08em; }
+.clock-wrap { text-align:right; } .clock { font-size:32px; line-height:1.2; min-width:5ch; } .clock-wrap .label { display:block; margin-bottom:4px; }
+.label { font:600 11px/1.35 var(--display); letter-spacing:.06em; } h2 { margin:0; font-size:16px; font-weight:600; } .section-title { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+.top-nav { display:flex; gap:6px; margin:12px 0 16px; } .top-nav a { display:flex; align-items:center; min-height:44px; padding:8px 12px; border-radius:8px; text-decoration:none; color:var(--dim); font-size:13px; } .top-nav a:first-child { background:var(--panel); color:var(--ink); } .top-nav a:hover { color:var(--ink); }
+.levels { gap:10px; margin-bottom:14px; } .lv { background:var(--panel); border:1px solid var(--line); border-top:2px solid var(--line); padding:12px; border-radius:10px; gap:6px; } .lv b { font:600 22px/1.25 var(--display); } .lv small { min-height:0; font:11px/1.5 var(--display); } .lv.tgt { border-top-color:var(--target); } .lv.spot { border-top-color:var(--spot); } .lv.distance { border-top-color:var(--avg); } .lv.proj { border-top-color:var(--dim); }
+.status-panel { border:1px solid var(--line); border-left:3px solid var(--warn); border-radius:10px; background:var(--panel); padding:14px 16px; margin-bottom:14px; } .status-heading { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:6px; } #tradeStatus { font-size:18px; font-weight:650; } .badge { font-size:10px; font-weight:650; letter-spacing:.07em; border:1px solid var(--line); border-radius:5px; padding:3px 6px; color:var(--dim); } #statusReason { margin:0; color:var(--dim); font-size:13px; } #decision { min-height:0; max-width:none; margin-top:8px; font-size:12px; } .status-panel[data-state="signal"] { border-left-color:var(--up); }
+.dashboard-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:14px; align-items:start; } .chart-panel,.analysis-panel { min-width:0; border:1px solid var(--line); border-radius:12px; background:var(--panel); padding:16px; } .chart { margin-top:8px; min-width:0; } #main { height:300px; touch-action:pan-y; } .chart-controls { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0; } .chart-controls button { font-size:11px; padding:8px; flex:1; } #chartReadout { min-height:42px; display:block; font-size:12px; color:var(--ink); padding:9px 0; border-top:1px solid var(--line); } .chart-note { color:var(--dim); font-size:11px; margin-top:8px; }
+.hero { margin:0 0 16px; gap:8px 14px; } .p { font:650 36px/1.1 var(--display); min-width:3ch; } .p.up,.p.down { color:var(--ink); } .bar { height:6px; } .fair { font-size:11px; gap:6px; flex-wrap:wrap; } .fair .u,.fair .d { color:var(--dim); } .why { font-size:12px; line-height:1.5; } .why .sub { display:none; } .model-note { font:11px/1.5 var(--display); }
+.edge { margin:0; } .edge label { padding:12px; gap:8px; background:var(--ground); } .edge input { font:600 18px var(--display); background:var(--panel); border:1px solid var(--line); padding:10px; border-radius:6px; min-height:44px; } .edge input::placeholder { color:var(--dim); font-weight:400; font-size:14px; } .edge .verdict { font-size:11px; min-height:100px; } .quote-market { font-size:13px; font-weight:600; } .quote-source { font-size:11px; color:var(--dim); min-height:34px; } .input-label { color:var(--dim); font-size:11px; } #edgeHead { font:11px/1.5 var(--display); color:var(--dim); } .fees { font-size:11px; color:var(--dim); margin-top:12px; } .fees .row { margin-bottom:8px; } .fees select { font-size:12px; }
+.health { margin:14px 0; display:grid; grid-template-columns:1fr 1fr; gap:10px; font-size:11px; padding:12px; } #healthMode { min-height:0; } .health-intro { margin:0; font-size:11px; color:var(--dim); }
+.details-heading { margin:24px 0 10px; } details { border:1px solid var(--line); border-radius:10px; margin-top:10px; padding:0 14px; background:var(--panel); } details[open] { padding-bottom:14px; } summary,.srcbox summary { color:var(--ink); font:600 14px/1.5 var(--display); text-transform:none; letter-spacing:0; padding-block:14px; } .srcbox { border:1px solid var(--line); margin-top:10px; padding-top:0; } .notes { font:12px/1.6 var(--display); max-width:none; } pre.notes { font-family:var(--mono); overflow-wrap:anywhere; } button { font:600 12px/1.4 var(--display); text-transform:none; letter-spacing:0; min-height:44px; } button.mini { min-height:44px; } .legend { font-size:10px; gap:6px 12px; line-height:1.6; } .legend i { width:10px; } #flow { height:170px; } #prob { height:220px; } .bar2 { width:min(100%,1200px); padding-block:10px; } .bar2 .c,.bar2 .p2 { font:600 20px var(--display); } .bar2 .p2::before { content:"Est. "; font-size:10px; color:var(--dim); }
+.settle { padding:10px; } .settle b { font:600 15px var(--display); } .settle small { font-size:10px; } .ask { flex-wrap:wrap; } .ask input { flex-basis:180px; } .row a { min-height:44px; display:inline-flex; align-items:center; } .footer-note { margin-top:20px; color:var(--dim); font-size:11px; }
+@media(min-width:900px) { .dashboard-grid { grid-template-columns:minmax(0,1.8fr) minmax(320px,1fr); } #main { height:372px; } .health { grid-template-columns:repeat(4,minmax(0,1fr)); } .levels { grid-template-columns:repeat(4,minmax(0,1fr)); } .lv small { min-height:34px; } }
+@media(max-width:560px) { .lv b { font-size:20px; } .lv { padding:10px; } .chart-panel,.analysis-panel { padding:12px; } #main { height:280px; } .p { font-size:34px; } .health { grid-template-columns:1fr; gap:6px; } .top-nav { margin-bottom:12px; } .top-nav a { padding-inline:10px; } }
+
+
+.edge label { align-content:start; grid-template-rows:auto; }
+.edge .quote-source { min-height:0; }
+.edge .verdict { white-space:pre-line; min-height:104px; line-height:1.7; }
+.edge input { margin-top:2px; }
+#quoteUpSource,#quoteDownSource { min-height:34px; }
+.status-panel { min-height:116px; }
+#lvSpotNote,#lvTgtNote,#lvDistanceNote,#lvProjNote { min-height:34px; }
+#modelFreshness { margin:0; min-height:32px; }
+#why { min-height:38px; }
+#chartReadout { min-height:56px; }
+input,summary,[tabindex],button { scroll-margin-block:80px; }
+.row input { font-size:16px; }
+.quote-market { min-height:36px; }
+.lv.spot,.lv.tgt { border-color:var(--line); }
+.lv.spot { border-top-color:var(--spot); } .lv.tgt { border-top-color:var(--target); }
+@media(max-width:560px) { .section-title { gap:6px; } .badge { font-size:9px; } .quote-market { font-size:12px; } }
 </style>
 </head>
 <body>
@@ -139,68 +175,74 @@ summary { display: list-item; padding-block: 10px; }
 <div class="bar2" id="bar2" aria-hidden="true"><span class="c" id="bar2Clock">–:––</span><span class="m" id="bar2Mid"></span><span class="p2" id="bar2P">–</span></div>
 <header>
   <div class="win">
-    <span class="label">BTC 15 min · window</span>
+    <h1 class="label" style="margin:0">Bitcoin <span style="color:var(--dim)">/ 15-minute market</span></h1>
     <b id="winLabel">–</b>
     <small id="ticker">–</small>
     <button id="snd" type="button" class="mini" title="Beeps on a sharp move, a 3¢ edge, and one minute to go">Sound off</button>
   </div>
-  <div class="clock" id="clock" aria-live="off">–:––</div>
+  <div class="clock-wrap"><span class="label">Time remaining</span><div class="clock" id="clock" aria-live="off">–:––</div></div>
 </header>
 
-<div class="health" aria-label="Data health"><span id="healthFeed">Index: connecting</span><span id="healthCollector">Collector: checking</span><span id="healthExchange">Kalshi: checking status</span><span id="healthMode">Model: warming up</span></div>
-<p class="model-note">Up / YES: final-minute BRTI average ≥ target. Down / NO: below target. Probabilities are model estimates, not validated win rates.</p>
-<section class="hero" aria-label="Chance of Up">
+<nav class="top-nav" aria-label="Dashboard navigation"><a href="#overview">Overview</a><a href="#analytics">Analytics</a><a href="agent.html">Trading agent ↗</a></nav>
+<main><div id="overview"><section class="levels">
+  <div class="lv spot"><span class="label">Current BTC price</span><b id="lvSpot">–</b><small id="lvSpotNote">exchange consensus; BRTI estimate</small></div>
+  <div class="lv distance"><span class="label">Distance to target</span><b id="lvDistance">—</b><small id="lvDistanceNote">Waiting for price and target</small></div>
+  <div class="lv tgt" role="button" tabindex="0"><span class="label">Target · tap to edit</span><b id="lvTgt">–</b><small id="lvTgtNote">–</small></div>
+  <div class="lv proj"><span class="label">Projected settlement avg</span><b id="lvProj">–</b><small id="lvProjNote">–</small></div>
+</section>
+
+</div>
+<section class="status-panel" id="statusPanel" aria-label="Trading status"><div class="status-heading"><span id="tradeStatus">Connecting</span><span class="badge">SIGNAL ONLY · NO EXECUTION</span></div><p id="statusReason">Waiting for market and index data.</p><div class="notes" id="decision" hidden></div><p class="notes" id="settlementState" hidden></p></section>
+<div class="dashboard-grid"><section class="chart-panel" aria-label="Market price chart"><div class="section-title"><h2>Price vs target</h2><span class="label">USD · ET</span></div><div class="chart-controls"><button id="chartFocus" type="button">View: full window</button><button id="chartDelta" type="button">Axis: distance from target</button></div>
+<div class="chart"><canvas tabindex="0" role="img" aria-describedby="chartReadout" id="main" aria-label="Price this window"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--spot)"></i>Spot</span>
+    <span><i style="background:var(--avg)"></i><span id="avgLegend">60-s average</span></span>
+    <span><i style="background:var(--target)"></i>Target</span>
+    <span><i style="background:var(--warn)"></i>Needed for Up (last minute)</span>
+    <span><i style="background:var(--dim)"></i>Closing estimate · ±1 / ±2 scales at close</span>
+    <span id="leadLegend" hidden><i style="background:var(--lead)"></i>Perpetual futures</span>
+  </div>
+</div>
+<output id="chartReadout">Touch or point at the chart to inspect observed prices.</output><p class="chart-note">Solid lines: observations. At close, vertical bars show ±1 / ±2 model scales. The dashed closing estimate is not a predicted path or guaranteed range. Missing readings stay empty.</p></section>
+<section class="analysis-panel"><div class="section-title"><h2>Estimate &amp; quotes</h2><span class="badge">UNCALIBRATED</span></div><section class="hero" aria-label="Model probability estimate">
   <div class="p none" id="pBig">–</div>
   <div class="split">
-    <span class="label">Estimated YES / Up chance</span>
+    <span class="label">Model estimate · Up probability</span>
     <div class="bar waiting" id="probBar"><i id="pBar"></i></div>
     <div class="fair"><span class="u" id="fairUp">Up –</span><span class="d" id="fairDown">Down –</span></div>
   </div>
-  <div class="why" id="why">Connecting to exchanges…</div>
+  <div class="model-note" id="modelFreshness" style="grid-column:1/-1">BRTI model · waiting for readings</div><div class="why" id="why">Connecting to exchanges…</div>
   <div class="settle" id="settle" hidden>
     <div><span class="label">Seconds in</span><b id="stIn">–</b><small class="notes" id="stInNote"></small></div>
     <div><span class="label">Average so far</span><b id="stAvg">–</b><small class="notes" id="stAvgNote"></small></div>
     <div><span class="label">Up needs ≥</span><b id="stNeed">–</b><small class="notes" id="stNeedNote"></small></div>
   </div>
   <div class="ask" id="ask" hidden>
-    <input id="askIn" inputmode="decimal" placeholder="Target from Robinhood, e.g. 82913.71" autocomplete="off">
+    <input aria-label="Exact market target in USD" id="askIn" inputmode="decimal" placeholder="Target from Robinhood, e.g. 82913.71" autocomplete="off">
     <button id="askSet" type="button">Set target</button>
   </div>
 </section>
 
-<section class="edge" aria-label="Compare with Robinhood">
+<p class="model-note">Up settles when the final-minute BRTI average ≥ target. Model probabilities are estimates, not contract prices or validated win rates.</p><section class="edge" aria-label="Quote comparison, not order execution">
   <div class="label head" style="grid-column:1/-1" id="edgeHead">Type what Robinhood's buttons say to see your edge</div>
-  <label for="rhUp"><span class="label">Up button ¢</span>
-    <input id="rhUp" inputmode="numeric" placeholder="type" autocomplete="off">
+  <label for="rhUp"><span class="label">↑ Up / YES</span>
+    <span class="quote-market" id="marketUp">Bid — · Ask —</span><span class="quote-source" id="marketUpAt">Kalshi · waiting</span><span class="quote-source" id="quoteUpSource">Kalshi · waiting for quotes</span><span class="input-label">Manual quote override (¢)</span><input aria-label="Manual Up quote in cents" id="rhUp" inputmode="decimal" placeholder="type" autocomplete="off">
     <span class="verdict" id="vUp"></span></label>
-  <label for="rhDown"><span class="label">Down button ¢</span>
-    <input id="rhDown" inputmode="numeric" placeholder="type" autocomplete="off">
+  <label for="rhDown"><span class="label">↓ Down / NO</span>
+    <span class="quote-market" id="marketDown">Bid — · Ask —</span><span class="quote-source" id="marketDownAt">Kalshi · waiting</span><span class="quote-source" id="quoteDownSource">Kalshi · waiting for quotes</span><span class="input-label">Manual quote override (¢)</span><input aria-label="Manual Down quote in cents" id="rhDown" inputmode="decimal" placeholder="type" autocomplete="off">
     <span class="verdict" id="vDown"></span></label>
-  <div class="notes recline" id="decision" style="color:var(--ink)"></div>
-  <div class="notes recline" id="recLine">Record: no official results yet. Scores wait for confirmed Kalshi outcomes.</div>
+
+
 </section>
 
-<div class="row" style="margin:12px 0"><label for="feeVenue">Cost estimate </label><select id="feeVenue" aria-label="Cost estimate venue"><option value="robinhood">Robinhood</option><option value="robinhood-gold">Robinhood Gold</option><option value="kalshi">Direct Kalshi</option></select></div>
-<p class="notes">Quotes below come from Kalshi unless entered. Robinhood costs assume a 1¢ exchange fee; confirm your order preview. One-contract fees are rounded conservatively.</p>
-<section class="levels">
-  <div class="lv spot"><span class="label">Spot now</span><b id="lvSpot">–</b><small id="lvSpotNote">exchange consensus; BRTI estimate</small></div>
-  <div class="lv avg"><span class="label">60-s BRTI average</span><b id="lvAvg">–</b><small id="lvAvgNote">Waiting for official one-second BRTI readings · 0/60</small></div>
-  <div class="lv tgt" role="button" tabindex="0"><span class="label">Target · tap to edit</span><b id="lvTgt">–</b><small id="lvTgtNote">–</small></div>
-  <div class="lv proj"><span class="label">Closing avg, projected</span><b id="lvProj">–</b><small id="lvProjNote">–</small></div>
-</section>
-
-<div class="row" style="margin:12px 0"><button id="chartFocus" type="button">View: full window</button><button id="chartDelta" type="button">Axis: distance from target</button></div>
-<div class="chart"><canvas id="main" aria-label="Price this window"></canvas>
-  <div class="legend">
-    <span><i style="background:var(--spot)"></i>Spot</span>
-    <span><i style="background:var(--avg)"></i><span id="avgLegend">60-s average</span></span>
-    <span><i style="background:var(--target)"></i>Target</span>
-    <span><i style="background:var(--warn)"></i>Needed for Up (last minute)</span>
-    <span><i style="background:var(--dim)"></i>Closing estimate · ±1/±2 model scales at close</span>
-    <span id="leadLegend" hidden><i style="background:var(--lead)"></i>Perp (leads)</span>
-  </div>
-</div>
-<div class="chart"><canvas id="flow" aria-label="Order flow this window"></canvas>
+<div class="fees"><div class="row" style="margin:12px 0"><label for="feeVenue">Cost estimate </label><select id="feeVenue" aria-label="Cost estimate venue"><option value="robinhood">Robinhood</option><option value="robinhood-gold">Robinhood Gold</option><option value="kalshi">Direct Kalshi</option></select></div>
+<p class="notes">Robinhood assumes a 1¢ exchange fee. Fees are rounded up per contract; confirm the order preview.</p>
+Manual quotes expire after 15 seconds. Editing does not place an order.</div></section></div>
+<div class="health" aria-label="Data health"><span id="healthFeed">Index: connecting</span><span id="healthCollector">Collector: checking</span><span id="healthExchange">Kalshi: checking status</span><span id="healthMode">Model: warming up</span></div>
+<p class="health-intro">Index loss pauses forecasts and signals. Collector health affects recorded research; exchange availability controls trade eligibility. Calibration remains unvalidated.</p>
+<h2 class="details-heading" id="analytics">Detailed analytics</h2>
+<details id="flowBox"><summary>Order flow &amp; liquidations</summary><div class="chart"><canvas id="flow" aria-label="Order flow this window"></canvas>
   <div class="flowline" id="flowLine">Order flow: waiting for trades…</div>
   <div class="flowline" id="flowLine2"></div>
   <div class="legend">
@@ -211,10 +253,14 @@ summary { display: list-item; padding-block: 10px; }
   </div>
   <div class="whales" id="whales" hidden></div>
 </div>
-<div class="chart"><canvas id="prob" aria-label="Chance of Up through the window"></canvas>
+</details>
+<details id="probBox"><summary>Probability history &amp; market pricing</summary><p class="notes">Model probability (%) and Kalshi contract prices (¢) use separate units. These observations are not a performance validation.</p><div class="chart"><canvas id="prob" aria-label="Chance of Up through the window"></canvas>
   <div class="legend"><span><i style="background:var(--up)"></i>Chance of Up (green: Up favoured, orange: Down)</span><span id="mktLegend" hidden><i style="background:var(--ink)"></i>Kalshi's Up price, with its bid-ask band</span></div>
 </div>
 
+</details>
+<details id="settlementBox"><summary>Settlement data &amp; trailing average</summary><p class="notes" id="projectionDetail"></p>  <div class="lv avg"><span class="label">60-s BRTI average</span><b id="lvAvg">–</b><small id="lvAvgNote">Waiting for official one-second BRTI readings · 0/60</small></div>
+<p class="notes">The projected average above is a forecast. Actual settlement requires Kalshi confirmation; confirmed outcomes appear in Historical performance.</p></details>
 <details class="srcbox" id="srcbox"><summary id="srcSum">Feeds…</summary><div class="sources" id="sources"></div></details>
 
 <details id="agentBox">
@@ -224,37 +270,37 @@ summary { display: list-item; padding-block: 10px; }
 </details>
 
 <details id="recordBox">
-  <summary>Record</summary>
+  <summary>Historical performance &amp; confirmed results</summary><p class="notes" id="recLine">Record: no official results yet. Scores wait for confirmed Kalshi outcomes.</p><p class="notes">Small samples are exploratory evidence, not validated performance.</p>
   <pre id="recOut" class="notes" style="white-space:pre-wrap;margin:10px 0 0"></pre>
   <div class="row" style="margin-top:10px"><button id="recClear" type="button">Clear record</button><span class="notes">Kept in this browser only.</span></div>
 </details>
 
 <details id="diag">
-  <summary>Diagnostics</summary>
+  <summary>Model diagnostics</summary><p class="notes" id="modelExplanation"></p>
   <pre id="diagOut" class="notes" style="white-space:pre-wrap;margin:10px 0 0"></pre>
 </details>
 
 <details id="setup">
-  <summary>Target and calibration</summary>
+  <summary>Settings · target &amp; calibration</summary>
   <div class="set">
     <div class="row">
-      <input id="tgtIn" inputmode="decimal" placeholder="Target from Robinhood, e.g. 82913.71" autocomplete="off">
+      <input aria-label="Market target in USD" id="tgtIn" inputmode="decimal" placeholder="Target from Robinhood, e.g. 82913.71" autocomplete="off">
       <button id="tgtSet" type="button">Set target</button>
     </div>
     <div class="row">
-      <input id="syncIn" inputmode="decimal" placeholder="Robinhood's big number right now" autocomplete="off">
+      <input aria-label="Current Robinhood index price in USD" id="syncIn" inputmode="decimal" placeholder="Robinhood's big number right now" autocomplete="off">
       <button id="syncSet" type="button">Sync</button>
     </div>
     <div class="row">
-      <input id="relayIn" inputmode="url" placeholder="Kalshi relay address (optional, see README)" autocomplete="off">
+      <input aria-label="Kalshi relay URL" id="relayIn" inputmode="url" placeholder="Kalshi relay address (optional, see README)" autocomplete="off">
       <button id="relaySet" type="button">Use relay</button>
     </div>
     <div class="row">
-      <input id="feedTokIn" inputmode="text" placeholder="Stream token (only if your relay sets FEED_TOKEN)" autocomplete="off">
+      <input aria-label="Stream token" id="feedTokIn" inputmode="text" placeholder="Stream token (only if your relay sets FEED_TOKEN)" autocomplete="off">
       <button id="feedTokSet" type="button">Set token</button>
     </div>
     <div class="row">
-      <input id="bankIn" inputmode="decimal" placeholder="Bankroll for sizing, $ (now 500)" autocomplete="off">
+      <input aria-label="Bankroll for sizing in USD" id="bankIn" inputmode="decimal" placeholder="Bankroll for sizing, $ (now 500)" autocomplete="off">
       <button id="bankSet" type="button">Set bankroll</button>
     </div>
     <div class="row"><button id="wake" type="button">Keep screen on</button><span class="notes" id="wakeNote"></span></div>
@@ -278,6 +324,7 @@ summary { display: list-item; padding-block: 10px; }
   </div>
 </details>
 
+</main>
 <script>
 "use strict";
 // BEGIN SHARED BTC15 MODEL
@@ -1270,9 +1317,22 @@ $("feeVenue").value=feeVenue;
 $("feeVenue").addEventListener("change",()=>{feeVenue=$("feeVenue").value;store.set("feeVenue",feeVenue);});
 const manualQuoteAt={Up:0,Down:0};
 for(const [id,side] of [["rhUp","Up"],["rhDown","Down"]])$(id).addEventListener("input",()=>{manualQuoteAt[side]=Date.now();});
+let chartInspect = null;
+const inspectChart = event => {
+  const rect = $("main").getBoundingClientRect();
+  chartInspect = Math.max(0,Math.min(1,(event.clientX-rect.left-8)/(rect.width-82)));
+  chartsAt=0; render();
+};
+$("main").addEventListener("pointerdown", inspectChart);
+$("main").addEventListener("pointermove", event => { if(event.pointerType==="mouse" || event.buttons) inspectChart(event); });
+$("main").addEventListener("keydown", event => {
+  if(["ArrowLeft","ArrowRight","Escape"].includes(event.key)) {
+    event.preventDefault(); chartInspect=event.key==="Escape"?null:Math.max(0,Math.min(1,(chartInspect??.5)+(event.key==="ArrowLeft"?-.02:.02))); chartsAt=0; render();
+  }
+});
 function drawMain(open, close, now, tgt, proj) {
   const [g, W, H] = setupCanvas($("main"));
-  const L = 8, R = 74, T = 10, B = 22;
+  const L = 8, R = 74, T = 14, B = 28;
   g.clearRect(0, 0, W, H);
   const t0 = chartFocus?Math.max(open-60,now-90):open-60, t1 = chartFocus?Math.min(close,now+30):close;
   const priceLabel=v=>chartDelta&&tgt!=null?(Math.abs(v-tgt)<.005?"TARGET":signed(v-tgt)):Math.round(v).toLocaleString("en-US");
@@ -1280,11 +1340,18 @@ function drawMain(open, close, now, tgt, proj) {
   const pts = tape.filter(p => p.t / 1000 >= t0).map(p=>({...p,p:(p.brti??(p.p+basis))-basis}));
   const avgPts = [];
   for (let s = Math.ceil(t0); s <= Math.floor(now); s++) { const a = officialTrailing(s)?.v; if (a != null) avgPts.push([s, a]); }
-  const ys = pts.map(p => p.p + basis).concat(avgPts.map(p => p[1]));
+  const historical=[];
+  for(let t=Math.ceil(t0);t<=(pts.length?pts[0].t/1000:now);t++){const v=sampleAt(t);if(v!=null)historical.push(v+basis);}
+  const ys = pts.map(p => p.p + basis).concat(avgPts.map(p => p[1]),historical);
   if (tgt != null) ys.push(tgt);
   if(lastNeed!=null)ys.push(lastNeed);
   if (proj && close<=t1) ys.push(proj.mean - 2 * proj.sd, proj.mean + 2 * proj.sd);
-  if (!ys.length) return;
+  if (!ys.length) {
+    g.fillStyle=css("--dim"); g.font="12px "+css("--display"); g.textAlign="center";
+    g.fillText("Waiting for price data", W/2, H/2); g.textAlign="left";
+    $("chartReadout").textContent="Connecting · observed prices will appear when available.";
+    return;
+  }
   let lo = Math.min(...ys), hi = Math.max(...ys);
   if (hi - lo < 20) { const c = (hi + lo) / 2; lo = c - 10; hi = c + 10; }
   const pad = (hi - lo) * 0.08; lo -= pad; hi += pad;
@@ -1306,7 +1373,7 @@ function drawMain(open, close, now, tgt, proj) {
   }
   // time labels: open, every 5 minutes, close
   g.textBaseline = "alphabetic"; g.textAlign = "center";
-  for (let t = Math.ceil(t0/(chartFocus?30:300))*(chartFocus?30:300); t <= t1; t += chartFocus?30:300) g.fillText(ET_CLOCK.format(new Date(t * 1000)).replace(/ [AP]M/, ""), X(t), H - 6);
+  for (let t = Math.ceil(t0/(chartFocus?30:300))*(chartFocus?30:300); t <= t1; t += chartFocus?30:300) g.fillText(ET_CLOCK.format(new Date(t * 1000)).replace(/ [AP]M/, ""), Math.max(22,Math.min(W-R-12,X(t))), H - 6);
   g.textAlign = "left";
   // open marker
   g.strokeStyle = css("--line"); g.beginPath(); g.moveTo(X(open), T); g.lineTo(X(open), H - B); g.stroke();
@@ -1335,11 +1402,12 @@ function drawMain(open, close, now, tgt, proj) {
     g.beginPath(); g.arc(xc, Y(proj.mean), 4, 0, 7); g.fill();
     g.restore();
   }
+  g.save(); g.beginPath();g.rect(L,T,W-L-R,H-T-B);g.clip();
   // the perpetual future, if it is connected
   const lead = leadTape.filter(p => p.t / 1000 >= t0);
   if (lead.length > 5) {
     g.strokeStyle = css("--lead"); g.lineWidth = 1; g.setLineDash([2, 3]); g.beginPath();
-    lead.forEach((p, i) => { const x = X(p.t / 1000), y = Y(p.p + basis); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+    lead.forEach((p, i) => { const x = X(p.t / 1000), y = Y(p.p + basis); i && p.t-lead[i-1].t<=FEED_FRESH_MS ? g.lineTo(x, y) : g.moveTo(x, y); });
     g.stroke(); g.setLineDash([]);
   }
   // spot: the seconds rebuilt from history as a thin line, then the live tape over it
@@ -1349,16 +1417,24 @@ function drawMain(open, close, now, tgt, proj) {
   for (let s = Math.ceil(t0); s <= firstLive; s++) { const v = sampleAt(s); if (v == null) { drawn = false; continue; } const x = X(s), y = Y(v + basis); drawn ? g.lineTo(x, y) : g.moveTo(x, y); drawn = true; }
   g.stroke();
   g.strokeStyle = css("--spot"); g.lineWidth = 1.2; g.beginPath();
-  pts.forEach((p, i) => { const x = X(p.t / 1000), y = Y(p.p + basis); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+  pts.forEach((p, i) => { const x = X(p.t / 1000), y = Y(p.p + basis); i && p.t-pts[i-1].t<=FEED_FRESH_MS ? g.lineTo(x, y) : g.moveTo(x, y); });
   g.stroke();
   // 60-s average
   g.strokeStyle = css("--avg"); g.lineWidth = 2.5; g.beginPath();
   avgPts.forEach(([s, a], i) => { const x = X(s), y = Y(a); i && s-avgPts[i-1][0]===1 ? g.lineTo(x, y) : g.moveTo(x, y); });
   g.stroke();
+  g.restore();
   // right-edge tags
+  const tagYs=[];
   const tag = (v, color, text) => {
     if (v == null) return;
-    const y = Math.min(H - B - 8, Math.max(T + 8, Y(v)));
+    const ideal = Math.min(H-B-8,Math.max(T+8,Y(v)));
+    let y=ideal;
+    for(let d=0;d<H;d+=18) {
+      const candidate=[ideal+d,ideal-d].find(a=>a>=T+8&&a<=H-B-8&&tagYs.every(b=>Math.abs(a-b)>=18));
+      if(candidate!=null){y=candidate;break;}
+    }
+    tagYs.push(y);
     g.fillStyle = color; g.fillRect(W - R + 2, y - 8, R - 4, 16);
     g.fillStyle = css("--ground"); g.textBaseline = "middle";
     g.fillText(text, W - R + 6, y); g.textBaseline = "alphabetic";
@@ -1367,6 +1443,15 @@ function drawMain(open, close, now, tgt, proj) {
   if (lastNeed != null && Math.abs(lastNeed - (tgt || 0)) > (hi - lo) * 0.04) tag(lastNeed, css("--warn"), "≥" + priceLabel(lastNeed));
   if (avgPts.length && now - avgPts[avgPts.length - 1][0] < FEED_FRESH_MS/1000) tag(avgPts[avgPts.length - 1][1], css("--avg"), priceLabel(avgPts[avgPts.length - 1][1]));
   if (pts.length) tag(pts[pts.length - 1].p + basis, css("--spot"), priceLabel(pts[pts.length - 1].p + basis));
+  if(chartInspect!=null) {
+    const at=t0+chartInspect*(t1-t0), sec=Math.round(at);
+    // Inspect only actual observed samples; do not interpolate through missing history.
+    const observed = pts.findLast(p=>p.t/1000<=at && at-p.t/1000<1);
+    const official=officialSeconds.get(sec), value=official??(observed?(observed.brti??observed.p+basis):null);
+    const a=officialTrailing(sec)?.v;
+    $("chartReadout").textContent=`${ET_CLOCK.format(new Date(at*1000))} ET · ${value==null?"No observed reading":`${official!=null || observed?.brti!=null?"BRTI":"Exchange estimate"} ${money(value)}`} · 60s avg ${money(a)}`;
+    g.strokeStyle=css("--dim"); g.setLineDash([3,3]); g.beginPath();g.moveTo(X(at),T);g.lineTo(X(at),H-B);g.stroke();g.setLineDash([]);
+  } else $("chartReadout").textContent="Touch / point to inspect · keyboard: ← → · Esc to clear";
   // now
   g.strokeStyle = "rgba(230,235,245,0.25)"; g.beginPath(); g.moveTo(X(now), T); g.lineTo(X(now), H - B); g.stroke();
 }
@@ -1374,6 +1459,7 @@ function drawMain(open, close, now, tgt, proj) {
 // Net flow per bar (5 s where the screen is wide enough, else 10 s), the running total since the
 // open as a line on its own scale, and liquidations as triangles: longs at the top pointing down.
 function drawFlow(open, close, now) {
+  if(!$("flowBox").open)return;
   const [g, W, H] = setupCanvas($("flow"));
   const L = 8, R = 74, T = 12, B = 12;
   g.clearRect(0, 0, W, H);
@@ -1439,8 +1525,9 @@ function drawFlow(open, close, now) {
 const pHist = new Map();
 // Forecasts are observed in real time only; empty history stays empty.
 function drawProb(open, close, now) {
+  if(!$("probBox").open)return;
   const [g, W, H] = setupCanvas($("prob"));
-  const L = 8, R = 74, T = 10, B = 10;
+  const L = 8, R = 74, T = 10, B = 28;
   g.clearRect(0, 0, W, H);
   const X = t => L + (t - (open - 60)) / (close - (open - 60)) * (W - L - R);
   const Y = p => T + (1 - p) * (H - T - B);
@@ -1487,18 +1574,29 @@ function drawProb(open, close, now) {
     g.fillText("Starts once the chance of Up is showing", (W - R) / 2, H / 2); g.textAlign = "left";
   }
 
+  g.fillStyle=css("--dim");g.textAlign="center";
+  for(let t=open;t<=close;t+=300)g.fillText(ET_CLOCK.format(new Date(t*1000)).replace(/ [AP]M/,""),Math.max(22,Math.min(W-R-12,X(t))),H-8);
+  g.textAlign="left";
   // Kalshi's book: the bid-ask band, and the ask as the line (that is the price of buying Up)
   const mk = [];
   for (const [s, v] of kalshi.hist) if (s >= open && s <= now) mk.push([s, v]);
   mk.sort((a, b) => a[0] - b[0]);
   if (mk.length > 1) {
-    g.beginPath();
-    mk.forEach(([s, [bid]], i) => { i ? g.lineTo(X(s), Y(bid)) : g.moveTo(X(s), Y(bid)); });
-    for (let i = mk.length - 1; i >= 0; i--) g.lineTo(X(mk[i][0]), Y(mk[i][1][1]));
-    g.closePath(); g.fillStyle = "rgba(230,235,245,0.15)"; g.fill();
-    g.beginPath();
-    mk.forEach(([s, [, ask]], i) => { i ? g.lineTo(X(s), Y(ask)) : g.moveTo(X(s), Y(ask)); });
-    g.strokeStyle = css("--ink"); g.lineWidth = 1.5; g.stroke();
+    const segments=[];
+    for(const row of mk) {
+      const segment=segments[segments.length-1];
+      if(!segment || row[0]-segment[segment.length-1][0]>5)segments.push([row]);
+      else segment.push(row);
+    }
+    for(const segment of segments) {
+      g.beginPath();
+      segment.forEach(([s,[bid]],i)=>{i?g.lineTo(X(s),Y(bid)):g.moveTo(X(s),Y(bid));});
+      for(let i=segment.length-1;i>=0;i--)g.lineTo(X(segment[i][0]),Y(segment[i][1][1]));
+      g.closePath();g.fillStyle="rgba(230,235,245,0.15)";g.fill();
+      g.beginPath();
+      segment.forEach(([s,[,ask]],i)=>{i?g.lineTo(X(s),Y(ask)):g.moveTo(X(s),Y(ask));});
+      g.strokeStyle=css("--ink");g.lineWidth=1.5;g.stroke();
+    }
   }
 
   // right-edge tags: the model and the market, so the gap between them reads at a glance
@@ -1552,7 +1650,8 @@ function verdict(el, fair, worstFair, priceCents, waitReason = "WAIT: model unav
   }
   let maxEntry=null;for(let c=99.9;c>=.1;c-=.1){const rounded=Math.round(c*10)/10;if(worstFair*100-rounded-feeCents(rounded/100)>=3){maxEntry=rounded;break;}}
   const sizeTxt = n >= 1 ? ` ${n} (about $${(n * (priceCents + fee) / 100).toFixed(2)})` + (avail && avail.price === priceCents ? (avail.size >= n ? ` · ${avail.size} offered` : ` · only ${avail.size} offered at this price`) : "") : "";
-  el.textContent = `${cents(edge)} a contract after fees · worst case ${cents(worst)} · ${call}` + (maxEntry!=null?` · max entry ${maxEntry.toFixed(1)}¢`:" · no qualifying entry") + sizeTxt;
+  el.textContent = `${call==="buy"?"Qualifies":call==="thin"?"Thin edge":"No edge"}\nEdge after fees ${cents(edge)} / contract\nConservative ${cents(worst)}\n${maxEntry!=null?`Entry ≤ ${maxEntry.toFixed(1)}¢`:"No qualifying entry"}${call==="buy"?`\nHypothetical size:${sizeTxt || " none"}`:""}`;
+  el.title = "Hypothetical size:" + (sizeTxt || " none") + ". Conservative edge must be at least 3¢ after fees.";
   el.className = "verdict " + (call === "buy" ? "good" : call === "no" ? "bad" : "meh");
   return {edge, worst, call, n};
 }
@@ -1829,7 +1928,7 @@ function render() {
     while (leadTape.length && leadTape[0].t < (open - 120) * 1000) leadTape.shift();
   }
   $("leadLegend").hidden = lead == null;
-  if (mk !== lastMk) { if(lastMk){$("rhUp").value="";$("rhDown").value="";} lastMk = mk; pHist.clear(); for (const k of kalshi.hist.keys()) if (k < open - 60) kalshi.hist.delete(k); for (const t of Object.keys(books)) if (t < mk) delete books[t]; }
+  if (mk !== lastMk) { if(lastMk){for(const side of ["Up","Down"]){const input=$("rh"+side);if(document.activeElement!==input)input.value="";manualQuoteAt[side]=0;}} lastMk = mk; pHist.clear(); for (const k of kalshi.hist.keys()) if (k < open - 60) kalshi.hist.delete(k); for (const t of Object.keys(books)) if (t < mk) delete books[t]; }
 
   // header
   $("winLabel").textContent = ET_CLOCK.format(new Date(open * 1000)).replace(/ [AP]M/, "") + "–" + ET_CLOCK.format(new Date(close * 1000)) + " ET";
@@ -1860,7 +1959,7 @@ function render() {
   const move10 = spot != null && back10 != null ? spot - back10 : null;
   const sharp = move10 != null && sig != null && Math.abs(move10) > 3 * sig * Math.sqrt(10);
   $("lvTgt").textContent = money(tgt);
-  $("lvTgtNote").textContent = tgtSrc;
+  $("lvTgtNote").textContent = tgtSrc + (exactTarget ? " · this market" : "");
 
   let proj = null, p = null, band = null, projectionStatus = null;
   const vols = live ? indexVols() : sigmas(), f30 = flowSum(NOW_H, now);
@@ -1885,6 +1984,9 @@ function render() {
   $("lvProjNote").textContent = proj ? (proj.observed ? (proj.official ? `${proj.observed}/60 pre-close BRTI readings` : `${proj.observed}/60 proxy samples, ${proj.reconstructed} reconstructed`) + (need != null ? ` · Up needs ≥ ${money(need)} over the last ${proj.m} s` : "") : (live ? "official index; forecast until the final minute" : "exchange-proxy forecast until the final minute")) + ` · ±${proj.sd.toFixed(proj.sd<1?2:0)} model scale · vol $${vols.s.toFixed(1)} now, $${vols.l.toFixed(1)}/√s over 15 min` + (lean ? ` · experimental lean ${signed(lean)} (not applied)` : "")
     : !live ? "Waiting for fresh official BRTI; projection paused" : projectionStatus && projectionStatus.missing ? `INCOMPLETE: ${projectionStatus.missing} elapsed BRTI readings missing` : vols == null ? "measuring volatility…" : "needs the target";
   if(view.pending)$("lvProjNote").textContent += ` · awaiting next BRTI; estimate ${(Math.max(0,nowMs-view.at)/1000).toFixed(1)}s old`;
+  $("projectionDetail").textContent = $("lvProjNote").textContent;
+  if(view.proj)$("lvProjNote").textContent = `BRTI · ±${view.proj.sd.toFixed(view.proj.sd<1?2:0)} model scale · ${view.pending?"awaiting next BRTI; estimate":"estimate"} ${(Math.max(0,nowMs-view.at)/1000).toFixed(1)}s old`;
+  $("modelFreshness").textContent = view.p == null ? "BRTI model · waiting for complete data" : `BRTI model · estimate ${(Math.max(0,nowMs-view.at)/1000).toFixed(1)}s old${view.pending?" · held while next reading is pending":""}`;
   lastNeed = need;
   lastInputs = proj ? {x: +x.toFixed(2), src: live ? "stream" : "exchanges", sd: +proj.sd.toFixed(1), lean: +lean.toFixed(1), known: proj.official ? "official" : proj.observed + "/60", tgt, vol: +vols.s.toFixed(2)} : null;
   // the settlement minute, in one strip
@@ -1904,7 +2006,7 @@ function render() {
     $("stAvg").textContent = "–"; $("stAvg").className = ""; $("stAvgNote").textContent = "Incomplete readings";
     $("stNeed").textContent = "–"; $("stNeed").className = ""; $("stNeedNote").textContent = "Signals paused";
   }
-  $("avgLegend").textContent = "60-s BRTI average · gaps stay empty";
+  $("avgLegend").textContent = "60-s BRTI average";
   // the slim bar, once the hero has scrolled away
   const bar = $("bar2");
   if (bar.classList.contains("on")) {
@@ -1933,8 +2035,8 @@ function render() {
     $("pBar").style.width = (p * 100).toFixed(1) + "%";
     const c = Math.min(99, Math.max(1, Math.round(p * 100)));
     const cl = Math.min(99, Math.max(1, Math.round(band.lo * 100))), ch = Math.min(99, Math.max(1, Math.round(band.hi * 100)));
-    $("fairUp").textContent = `Up ${c}¢ (${cl}–${ch})`;
-    $("fairDown").textContent = `Down ${100 - c}¢ (${100 - ch}–${100 - cl})`;
+    $("fairUp").textContent = `Up ${c}% · range ${cl}–${ch}%`;
+    $("fairDown").textContent = `Down ${100 - c}% · range ${100 - ch}–${100 - cl}%`;
     const gap = proj.mean - tgt;
     // In a sharp move the flow says whether the move has weight behind it or is a sweep of thin books.
     const withFlow = fw && fw.side ? (fw.side === Math.sign(move10) ? " with " + fw.text + " behind it" : " against " + fw.text) : fw ? " on balanced flow" : "";
@@ -1947,7 +2049,8 @@ function render() {
       + (fw && !sharp ? ` Flow 30 s: ${fw.text}${fw.side ? " " + signedUsd(fw.net) : ""}.` : "")
       + (basisSrc === "raw" ? " Enter the exact Robinhood target to set the level." : "")
       + (!exactTarget ? " Target estimated: buy calls wait until it is confirmed or entered." : "");
-    const whyHtml = `<span>${line1}</span>` + (line2.trim() ? `<span class="sub">${line2.trim()}</span>` : "");
+    $("modelExplanation").textContent = line1 + " " + line2;
+    const whyHtml = `<span>${sharp ? `Sharp move: ${signed(move10)} in 10s. ` : ""}Projected average ${signed(gap)} vs target · ±$${proj.sd.toFixed(0)} model scale.</span>`;
     if (!view.pending && $("why").innerHTML !== whyHtml) $("why").innerHTML = whyHtml;
     $("why").style.color = sharp ? (move10 > 0 ? css("--up") : css("--down")) : "";
   }
@@ -1957,11 +2060,18 @@ function render() {
   $("ask").hidden = tgt != null && !askOpen;
   const km = kalshi.market && kalshi.market.ticker === mk && nowMs - kalshi.market.at < 5000 && kalshi.market.bid && kalshi.market.ask ? kalshi.market : null;
   const upC = km ? Math.round(km.ask * 1000) / 10 : null, downC = km ? Math.round((1 - km.bid) * 1000) / 10 : null;
-  $("rhUp").placeholder = upC != null ? String(upC) : "type";
-  $("rhDown").placeholder = downC != null ? String(downC) : "type";
-  const dp = depth(mk);
-  $("edgeHead").textContent = km ? `Kalshi now: Up ${upC}¢${dp && dp.up ? " ×" + dp.up.size : ""} · Down ${downC}¢${dp && dp.down ? " ×" + dp.down.size : ""}, ${((nowMs - km.at) / 1000).toFixed(0)} s old · type over them if Robinhood shows something else`
-    : "Type what Robinhood's buttons say to see your edge";
+  $("rhUp").placeholder = "Enter cents";
+  $("rhDown").placeholder = "Enter cents";
+  $("edgeHead").textContent = "Kalshi bid / ask · compare a manual quote below. Edge uses the ask unless overridden.";
+  for (const side of ["Up", "Down"]) {
+    const bid = km ? (side === "Up" ? km.bid : 1-km.ask)*100 : null;
+    const ask = side === "Up" ? upC : downC;
+    $("market"+side).textContent = km ? `Bid ${bid.toFixed(1)}¢ · Ask ${ask.toFixed(1)}¢` : "Bid — · Ask —";
+    $("market"+side+"At").textContent = km ? `Kalshi · ${Math.max(0,(nowMs-km.at)/1000).toFixed(1)}s old` : "Kalshi · no fresh quote";
+    const manual = $("rh"+side).value !== "";
+    const age = manual ? Math.max(0,(nowMs-manualQuoteAt[side])/1000) : km ? Math.max(0,(nowMs-km.at)/1000) : null;
+    $("quote"+side+"Source").textContent = manual ? (manualQuoteAt[side]===0 ? "Previous market · edit to refresh" : `Manual quote · ${age.toFixed(0)}s old${age>15?" · expired":""}`) : km ? "Edge uses Kalshi ask" : "Kalshi unavailable · no fresh quote";
+  }
   const typedUp = $("rhUp").value ? parseFloat($("rhUp").value) : null, typedDown = $("rhDown").value ? parseFloat($("rhDown").value) : null;
   const exchangeState=exchangeHealth(nowMs), paused=exchangeState==="paused";
   const marketActive=kalshi.market?.ticker===mk&&kalshi.market.status==='active'&&Number.isFinite(kalshi.market.statusAt)&&nowMs-kalshi.market.statusAt>=0&&nowMs-kalshi.market.statusAt<30000;
@@ -1973,6 +2083,26 @@ function render() {
   decisionLine(signalP, band, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, left);
   if(exchangeState!=="open"||!marketActive)$("decision").textContent=waitReason;
   if (view.pending) $("decision").textContent = "Waiting for the next BRTI reading. Last estimate shown; trade signals paused.";
+  // Presentation only: summarize existing gates and verdicts without changing eligibility.
+  $("lvDistance").textContent = x != null && tgt != null ? signed(x-tgt) : "—";
+  $("lvDistanceNote").textContent = x != null && tgt != null ? `${x>=tgt?"Above":"Below"} target · ${live?"official BRTI":"exchange estimate"}` : "Needs current price and target";
+  let status="No trade", reason="Neither side clears the conservative edge threshold after fees.";
+  if (!live) { status=feed.brti?"Data stale":"Reconnecting"; reason="Official BRTI unavailable. Exchange estimates are context; forecasts and signals are paused."; }
+  else if (paused) { status="Market paused"; reason="Kalshi has paused trading. Signals are blocked."; }
+  else if (!marketActive) { status=kalshi.market?.ticker===mk && kalshi.market.status && kalshi.market.status!=="active"?"Market closed":"No trade"; reason="The current contract is not confirmed active. Signals are blocked."; }
+  else if (exchangeState!=="open") { status="No trade"; reason="Exchange availability is unknown. Signals are blocked."; }
+  else if (!exactTarget) { status="Calibrating"; reason="Enter or retrieve this market’s exact target to enable signals."; }
+  else if (projectionStatus?.missing && !view.pending) { status="Data gap"; reason=`${projectionStatus.missing} elapsed BRTI readings are missing. Forecasts and signals pause until recovered.`; }
+  else if (p==null || view.pending) { status=view.pending?"Data pending":"Calibrating"; reason=view.pending?"Waiting for the next BRTI reading. Last estimate shown; signals paused.":"Waiting for complete index readings and volatility history. Signals paused."; }
+  else if (vUp?.call==="buy" || vDown?.call==="buy") { status="Model signal"; reason=`${vUp?.call==="buy"?"Up":"Down"} has at least 3¢ conservative edge after fees. This is an unvalidated model signal.`; }
+  else if (!vUp && !vDown) reason="No eligible fresh quote. Enter a quote or wait for the market feed.";
+  const previous = record.windows.filter(w=>w.close<=now).sort((a,b)=>b.close-a.close)[0];
+  $("settlementState").hidden=!previous;
+  if(previous) $("settlementState").textContent = previous.src==="kalshi" && previous.result
+    ? `Previous market: ${previous.result==="yes"?"Up":"Down"} · confirmed by Kalshi${previous.officialCloseAvg!=null?` · actual average ${money(previous.officialCloseAvg)}`:""}`
+    : "Previous market: settlement pending · awaiting official Kalshi result.";
+  $("tradeStatus").textContent=status; $("statusReason").textContent=reason;
+  $("statusPanel").dataset.state=status==="Model signal"?"signal":"wait";
   keepRecord(mk, close, left, tgt, p, proj && tgt != null ? chanceMatched(proj.mean, proj.sd, tgt) : null, km, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, typedUp != null || typedDown != null);
 
   // sounds: a sharp move as it starts, a buy call on Kalshi's own prices once it has held for a few
@@ -2144,8 +2274,9 @@ $("lvTgt").parentElement.addEventListener("click", () => {
   askOpen = true;
   const t = $("lvTgt").textContent.replace(/[$,]/g, "");
   $("askIn").value = /^\d/.test(t) ? t : "";
-  render(); $("askIn").focus(); $("askIn").select();
+  render(); $("askIn").scrollIntoView({block:"center"}); $("askIn").focus(); $("askIn").select();
 });
+$("lvTgt").parentElement.addEventListener("keydown", e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();e.currentTarget.click();}});
 $("tgtSet").addEventListener("click", () => setTarget($("tgtIn")));
 $("askSet").addEventListener("click", () => setTarget($("askIn")));
 for (const id of ["tgtIn", "askIn"]) $(id).addEventListener("keydown", e => { if (e.key === "Enter") setTarget($(id)); });
@@ -2195,7 +2326,8 @@ connectFeed();
   setTimeout(second, 1000 - (t % 1000) + 20);
 })();
 setInterval(render, 100);
-window.addEventListener("resize", render);
+document.querySelectorAll("details").forEach(el=>el.addEventListener("toggle",()=>{chartsAt=0;render();}));
+window.addEventListener("resize", ()=>{chartsAt=0;render();});
 pollKalshi();
 render();
 </script>

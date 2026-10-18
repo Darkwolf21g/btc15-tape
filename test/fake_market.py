@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 
 PAGE = Path(__file__).resolve().parent.parent / "public" / "index.html"
-PAGE_URL = PAGE.as_uri()
+PAGE_URL = "https://fixture.test/index.html"
 WINDOW_START = 1791676800          # a window open, 8:00 PM ET on 10 Oct 2026
 
 
@@ -179,13 +179,15 @@ FAKE = r"""
 def new_page(playwright, seconds_into_window=300, width=400, height=1500):
     """A page with the fake market installed and the clock set; returns (browser, page, errors)."""
     browser = playwright.chromium.launch(executable_path=os.environ.get("BTC15_TEST_CHROMIUM"))
-    page = browser.new_page(viewport={"width": width, "height": height}, device_scale_factor=2)
+    page = browser.new_page(viewport={"width": width, "height": height}, device_scale_factor=2, has_touch=width < 600)
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))
     page.on("console", lambda m: m.type == "error" and "ERR_FAILED" not in m.text and errors.append(m.text))
     page.clock.install(time=at(seconds_into_window))
+    page.clock.pause_at(at(seconds_into_window))
     page.add_init_script(FAKE)
     page.route("**/fonts.googleapis.com/**", lambda r: r.abort())
+    page.route(PAGE_URL, lambda route: route.fulfill(content_type="text/html", body=PAGE.read_text()))
     page.goto(PAGE_URL)
     return browser, page, errors
 
