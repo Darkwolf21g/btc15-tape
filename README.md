@@ -19,6 +19,16 @@ Timed sessions remain `paper-session-v2` / `brti-driftless-v4` with unchanged ru
 Older dated release notes below describe historical versions and are superseded
 by current behavior, the settlement correction, and the audit handoff.
 
+## BRTI replica (research)
+
+The tape now recomputes BRTI every 200 ms from the constituent exchanges' public
+order books using CF Benchmarks' published calculation (methodology v17.0), and
+measures it against Kalshi's official stream: dollar error at the same source time,
+and whether it shows a move before the official tick reaches the page. Open
+**BRTI replica** under the levels. It is research context only and is not used by
+the frozen model, signals, paper trading or settlement. See [REPLICA.md](REPLICA.md)
+for the calculation, feeds, known differences and how to read the tracking lines.
+
 ## Settlement interval correction (v4)
 
 The KXBTC15M forecast now uses the 60 one-second BRTI readings strictly before

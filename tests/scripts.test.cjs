@@ -25,7 +25,7 @@ test('offline evaluation refuses to overwrite its input dataset or a symlink to 
 test('source check rejects either stale deployed page mirror',()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'btc15-mirrors-'));
  try{
-  for(const file of ['scripts/sync-model.cjs','worker.js','shared-model.js','shared-research.js','shared-session.js','shared-collector-health.js','public/index.html','public/agent.html','index.html','agent.html']){
+  for(const file of ['scripts/sync-model.cjs','worker.js','shared-model.js','shared-research.js','shared-session.js','shared-collector-health.js','shared-brti.js','public/index.html','public/agent.html','index.html','agent.html']){
    const output=path.join(dir,file);fs.mkdirSync(path.dirname(output),{recursive:true});fs.copyFileSync(path.join(root,file),output);
   }
   const check=()=>cli([path.join(dir,'scripts/sync-model.cjs'),'--check']);
