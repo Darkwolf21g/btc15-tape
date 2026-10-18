@@ -192,7 +192,7 @@ input,summary,[tabindex],button { scroll-margin-block:80px; }
 </section>
 
 </div>
-<section class="status-panel" id="statusPanel" aria-label="Trading status"><div class="status-heading"><span id="tradeStatus">Connecting</span><span class="badge">SIGNAL ONLY · NO EXECUTION</span></div><p id="statusReason">Waiting for market and index data.</p><div class="notes" id="decision" hidden></div><p class="notes" id="settlementState" hidden></p></section>
+<section class="status-panel" id="statusPanel" aria-label="Trading status"><div class="status-heading"><span id="tradeStatus">Connecting</span><span class="badge">SIGNAL ONLY · NO EXECUTION</span></div><p id="statusReason">Waiting for market and index data.</p><button id="feedAccess" type="button" hidden style="margin-top:10px">Set BRTI stream token</button><div class="notes" id="decision" hidden></div><p class="notes" id="settlementState" hidden></p></section>
 <div class="dashboard-grid"><section class="chart-panel" aria-label="Market price chart"><div class="section-title"><h2>Price vs target</h2><span class="label">USD · ET</span></div><div class="chart-controls"><button id="chartFocus" type="button">View: full window</button><button id="chartDelta" type="button">Axis: distance from target</button></div>
 <div class="chart"><canvas tabindex="0" role="img" aria-describedby="chartReadout" id="main" aria-label="Price this window"></canvas>
   <div class="legend">
@@ -296,9 +296,11 @@ Manual quotes expire after 15 seconds. Editing does not place an order.</div></s
       <button id="relaySet" type="button">Use relay</button>
     </div>
     <div class="row">
-      <input aria-label="Stream token" id="feedTokIn" inputmode="text" placeholder="Stream token (only if your relay sets FEED_TOKEN)" autocomplete="off">
+      <label for="feedTokIn">BRTI stream token</label>
+      <input aria-describedby="feedTokenHelp" id="feedTokIn" type="password" placeholder="Enter your relay’s stream token" autocomplete="off" autocapitalize="none" spellcheck="false">
       <button id="feedTokSet" type="button">Set token</button>
     </div>
+    <p id="feedTokenHelp" class="notes">Use the FEED_TOKEN configured on your relay, not your Kalshi API key. Saved in this browser on this site. Required for a protected BRTI stream, collector and agent data.</p>
     <div class="row">
       <input aria-label="Bankroll for sizing in USD" id="bankIn" inputmode="decimal" placeholder="Bankroll for sizing, $ (now 500)" autocomplete="off">
       <button id="bankSet" type="button">Set bankroll</button>
@@ -1052,7 +1054,7 @@ async function pollKalshi() {
 // estimates of the same things; the exchange consensus carries on underneath as the fallback.
 const FEED_FRESH_MS = 3000;
 const feed = {ws: null, state: "off", at: 0, openedAt: 0, relay: null, brti: null, avg60: null, settle: null, quote: null,
-              backoff: 1000, timer: null, counts: {}, fails: 0, token: store.get("feedToken") || "", diffs: []};
+              backoff: 1000, timer: null, check: null, counts: {}, fails: 0, token: store.get("feedToken") || "", diffs: []};
 function feedUrl() {
   const base = kalshi.relay || SAME_SITE;
   return base ? base.replace(/^http/, "ws") + "/feed" + (feed.token ? "?token=" + encodeURIComponent(feed.token) : "") : null;
@@ -1144,6 +1146,7 @@ function depth(mk) {
 }
 function connectFeed() {
   if(Date.now()<relayPauseUntil)return;
+  if (feed.state === "auth" || feed.check) return;
   if (feed.timer) { clearTimeout(feed.timer); feed.timer = null; }
   if (feed.ws && feed.ws.readyState <= 1) return;
   const url = feedUrl();
@@ -1151,7 +1154,7 @@ function connectFeed() {
   let ws;
   try { ws = new WebSocket(url); } catch (e) { feed.state = "off"; return retryFeed(); }
   feed.ws = ws; feed.state = "connecting";
-  ws.onopen = () => { feed.state = "open"; feed.at = feed.openedAt = Date.now(); feed.backoff = 1000; };
+  ws.onopen = () => { if (feed.ws !== ws) return; feed.state = "open"; feed.at = feed.openedAt = Date.now(); feed.backoff = 1000; feed.fails = 0; };
   ws.onmessage = ev => {
     if(feed.ws!==ws)return;
     feed.at = Date.now();
@@ -1189,9 +1192,40 @@ function connectFeed() {
     }
   };
   ws.onerror = () => {};
-  ws.onclose = () => { if (feed.ws === ws) { feed.state = "off"; if (Date.now() - feed.openedAt < 5000) feed.fails++; retryFeed(); } };
+  ws.onclose = () => { if (feed.ws === ws) { feed.state = "off"; feed.fails++; diagnoseFeed(ws, url); } };
+}
+// Browsers hide the HTTP status of a rejected WebSocket handshake. Check the
+// protected status endpoint to distinguish a token rejection from an outage.
+async function diagnoseFeed(ws, url) {
+  const check = new AbortController(); feed.check = check;
+  const deadline = setTimeout(() => check.abort(), 8000);
+  try {
+    const endpoint = new URL(url.replace(/^ws/, "http")); endpoint.pathname += "/status";
+    const r = await fetch(endpoint.href, {cache:"no-store", signal:check.signal});
+    const denied = r.status === 403 && (await r.text()).trim() === "token";
+    if (feed.ws !== ws || feed.check !== check) return;
+    if (denied) { feed.state = "auth"; render(); }
+  } catch (e) { /* Network errors retain the normal reconnect backoff. */ }
+  finally {
+    clearTimeout(deadline);
+    if (feed.check === check) {
+      feed.check = null;
+      if (feed.ws === ws && feed.state !== "auth") retryFeed();
+    }
+  }
+}
+function resetFeed() {
+  // Detach the old socket first: its delayed close/status response must not
+  // overwrite the connection started with the newly saved token or relay.
+  const old = feed.ws; feed.ws = null;
+  if (feed.check) { feed.check.abort(); feed.check = null; }
+  if (feed.timer) { clearTimeout(feed.timer); feed.timer = null; }
+  if (old) old.close();
+  feed.state = "off"; feed.relay = null; feed.fails = 0; feed.backoff = 1000;
+  connectFeed(); render();
 }
 function retryFeed() {
+  if (feed.state === "auth" || feed.check) return;
   if (feed.timer) clearTimeout(feed.timer);
   feed.timer = setTimeout(() => { feed.timer = null; connectFeed(); }, feed.backoff);
   feed.backoff = Math.min(feed.fails >= 5 ? 60000 : 15000, feed.backoff * 2);
@@ -1211,6 +1245,7 @@ function streamedFinalMinute(close) {
 }
 function feedWords() {                               // one line on the stream, for the chips and the diagnostics
   const r = feed.relay, t = Date.now();
+  if (feed.state === "auth") return ["off", feed.token ? "BRTI token rejected · update in Settings" : "BRTI needs a stream token · set in Settings"];
   if (!feedUrl()) return ["", "BRTI stream needs the relay"];
   if (feedLive()) return ["ok", `BRTI official ${(Math.max(0, t - feed.brti.t) / 1000).toFixed(1)} s`];
   if (feed.state !== "open") return ["off", "BRTI stream " + (feed.state === "connecting" ? "connecting" : feed.state === "no relay" ? "needs the relay" : "not reachable")];
@@ -2018,7 +2053,7 @@ function render() {
   const fw = flowWords(flowSum(30, now));
   const big = $("pBig");
   $("probBar").classList.toggle("waiting", p == null);
-  $("healthFeed").textContent = live ? `BRTI live · ${Math.max(0, (nowMs - feed.brti.t) / 1000).toFixed(1)}s old` : feed.brti ? "BRTI stale · signals paused" : "Exchange estimate · BRTI connecting";
+  $("healthFeed").textContent = feed.state === "auth" ? feedWords()[1] : live ? `BRTI live · ${Math.max(0, (nowMs - feed.brti.t) / 1000).toFixed(1)}s old` : feed.brti ? "BRTI stale · signals paused" : "Exchange estimate · BRTI connecting";
   $("healthFeed").className = live ? "good" : "meh";
   const eh=exchangeHealth(nowMs),eage=exch.at?Math.max(0,Math.round((nowMs-exch.at)/1000)):null;
   $("healthExchange").textContent=`Kalshi ${eh==="open"?"open":eh==="paused"?"paused":"status unknown"} · ${eage==null?"no successful check":`last checked ${eage}s ago`}`+(Date.now()<(kalshi.retryAt||0)?" · rate limited":"");
@@ -2087,7 +2122,8 @@ function render() {
   $("lvDistance").textContent = x != null && tgt != null ? signed(x-tgt) : "—";
   $("lvDistanceNote").textContent = x != null && tgt != null ? `${x>=tgt?"Above":"Below"} target · ${live?"official BRTI":"exchange estimate"}` : "Needs current price and target";
   let status="No trade", reason="Neither side clears the conservative edge threshold after fees.";
-  if (!live) { status=feed.brti?"Data stale":"Reconnecting"; reason="Official BRTI unavailable. Exchange estimates are context; forecasts and signals are paused."; }
+  if (!live && feed.state === "auth") { status="BRTI access needed"; reason=(feed.token ? "The relay rejected the saved stream token. Update it in Settings." : "This relay requires a stream token. Add it in Settings.") + " Forecasts and signals are paused; exchange prices remain available."; }
+  else if (!live) { status=feed.brti?"Data stale":"Reconnecting"; reason="Official BRTI unavailable. Exchange estimates are context; forecasts and signals are paused."; }
   else if (paused) { status="Market paused"; reason="Kalshi has paused trading. Signals are blocked."; }
   else if (!marketActive) { status=kalshi.market?.ticker===mk && kalshi.market.status && kalshi.market.status!=="active"?"Market closed":"No trade"; reason="The current contract is not confirmed active. Signals are blocked."; }
   else if (exchangeState!=="open") { status="No trade"; reason="Exchange availability is unknown. Signals are blocked."; }
@@ -2102,6 +2138,7 @@ function render() {
     ? `Previous market: ${previous.result==="yes"?"Up":"Down"} · confirmed by Kalshi${previous.officialCloseAvg!=null?` · actual average ${money(previous.officialCloseAvg)}`:""}`
     : "Previous market: settlement pending · awaiting official Kalshi result.";
   $("tradeStatus").textContent=status; $("statusReason").textContent=reason;
+  $("feedAccess").hidden = feed.state !== "auth";
   $("statusPanel").dataset.state=status==="Model signal"?"signal":"wait";
   keepRecord(mk, close, left, tgt, p, proj && tgt != null ? chanceMatched(proj.mean, proj.sd, tgt) : null, km, vUp, vDown, typedUp != null ? typedUp : upC, typedDown != null ? typedDown : downC, typedUp != null || typedDown != null);
 
@@ -2291,14 +2328,18 @@ $("relaySet").addEventListener("click", () => {
   const v = $("relayIn").value.trim().replace(/\/+$/, "");
   kalshi.relay = /^https:\/\//.test(v) ? v : "";
   store.set("relay", kalshi.relay); kalshi.ok = null; kalshi.base = null;
-  if (feed.ws) feed.ws.close(); feed.fails = 0; feed.backoff = 1000; connectFeed();
+  resetFeed();
   $("relayIn").value = ""; $("relayIn").placeholder = kalshi.relay ? "Relay set: " + kalshi.relay : "Relay cleared";
 });
 if (kalshi.relay) $("relayIn").placeholder = "Relay set: " + kalshi.relay;
 $("feedTokSet").addEventListener("click", () => {
   feed.token = $("feedTokIn").value.trim(); store.set("feedToken", feed.token);
   $("feedTokIn").value = ""; $("feedTokIn").placeholder = feed.token ? "Token set" : "Token cleared";
-  if (feed.ws) feed.ws.close(); feed.fails = 0; feed.backoff = 1000; connectFeed();
+  resetFeed(); refreshCollector(); agentRefresh();
+});
+$("feedTokIn").addEventListener("keydown", e => { if (e.key === "Enter") $("feedTokSet").click(); });
+$("feedAccess").addEventListener("click", () => {
+  $("setup").open = true; $("feedTokIn").scrollIntoView({block:"center"}); $("feedTokIn").focus();
 });
 let lock = null;
 async function keepAwake() {

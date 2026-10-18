@@ -33,3 +33,9 @@ The closing-average presentation fix from main `15c522d` is retained: uncertaint
 A separate Chromium check loaded the modified HTML over the production origin without deploying it: exchange prices updated over 24 seconds, the manual quote retained its value and focus, and no JavaScript errors occurred. The official BRTI WebSocket returned HTTP 403 in the fresh unauthenticated session; the dashboard correctly withheld forecasts and signals. Authenticated BRTI states were covered by fixtures. The proxy and TLS verification stayed enabled.
 
 Browser checks use Chromium with emulated touch. Physical iPhone/Safari behavior and live order execution have not been tested. The existing agent page remains accessible and its smoke tests pass; this change focuses on the tape dashboard.
+
+## BRTI access recovery
+
+The production `/feed/status` endpoint returned HTTP 403 with `token` for a fresh unauthenticated session. A rejected WebSocket handshake previously appeared as an endless reconnect. The client now confirms that rejection through the protected status endpoint, pauses retries, and displays a masked token field through a visible setup action. Saving a corrected token reconnects immediately; delayed responses from the previous connection cannot overwrite the new connection. Network failures still retry with backoff. Authentication, calculation logic and trading modes are unchanged.
+
+`tests/feed-access.test.cjs` covers rejection, network errors and connection races. `BTC15_TEST_CHROMIUM=/usr/bin/chromium python tests/feed-access-browser.py` passed at 390px and 1440px, including editable token preservation, wrong-token feedback and recovery to official BRTI using fixtures. [Mobile access state](brti-access-mobile.png). An authenticated production BRTI stream still requires the relay's existing FEED_TOKEN; no production credential was available for this verification.
