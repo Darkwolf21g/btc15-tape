@@ -148,6 +148,13 @@ and cancel pending simulations on upgrade while keeping their original history;
 open positions still await official settlement. A fresh session requires an explicit
 start. Five-second looks, four-window duration and strategy thresholds are unchanged.
 
+The tape and agent dashboard share collector health rules. A recent successful
+run does not mask failures in the latest completed run. Expand **Collector details**
+on the tape, or read **Collector and record** on `/agent`, to see failed task names,
+timestamps, and errors. After recovery, retained errors are labelled as history.
+These diagnostics require the existing stream token. A live BRTI feed alone does
+not establish complete recording or paper-session coverage.
+
 Slow session and collector maintenance requests run outside the research alarm's
 critical path. Single-flight jobs and atomic earliest-wake scheduling allow the next
 research arrival to run while those requests are pending. Legacy checkpoint quotes

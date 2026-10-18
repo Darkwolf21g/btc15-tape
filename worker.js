@@ -1230,9 +1230,11 @@ export class KalshiFeed {
     });
   }
   async collectorError(e,stage=null) {
+    const entry={at:Date.now(),stage,error:String(e.message||e).slice(0,200)};
     await this.updateCollector(log=>{
-      log.errors=(log.errors||[]).concat([{at:Date.now(),stage,error:String(e.message||e).slice(0,200)}]).slice(-10);
+      log.errors=(log.errors||[]).concat([entry]).slice(-10);
     });
+    return entry;
   }
   async scheduleAlarm(earlier=Infinity) {
     // Background session/maintenance completions can race the fast alarm. Compute
@@ -1264,11 +1266,11 @@ export class KalshiFeed {
   async collectorMaintenance() {
     // One deadline for maintenance market reads, rather than 12s per old row.
     const startedAt=Date.now(),options={signal:AbortSignal.timeout(8000)};
-    let failures=0;
+    const cycleErrors=[];
     const run=async(stage,job)=>{
       this.collectorStage=stage;
       try { options.signal.throwIfAborted(); await job(); }
-      catch(e) { failures++; await this.collectorError(e,stage); }
+      catch(e) { cycleErrors.push(await this.collectorError(e,stage)); }
     };
     await this.updateCollector(log=>{log.maintenanceStartedAt=startedAt;});
     await run('upstream',()=>this.ensureAlarm());
@@ -1289,8 +1291,8 @@ export class KalshiFeed {
     if(rows.size>5000)for(const [key]of [...rows].slice(0,rows.size-5000))await this.state.storage.delete(key);
     await this.updateCollector(log=>{
       log.lastCycleAt=Date.now();log.cycleDurationMs=Date.now()-startedAt;
-      log.cycleFailures=failures;log.stage=null;
-      if(!failures)log.lastOk=Date.now(); // A live heartbeat must not hide failed work.
+      log.cycleFailures=cycleErrors.length;log.cycleErrors=cycleErrors;log.stage=null;
+      if(!cycleErrors.length)log.lastOk=Date.now(); // A live heartbeat must not hide failed work.
       log.indexAgeMs=this.ticks.length?Date.now()-this.ticks[this.ticks.length-1][0]:null;
     });
   }

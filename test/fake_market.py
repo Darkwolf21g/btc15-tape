@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 
 PAGE = Path(__file__).resolve().parent.parent / "public" / "index.html"
-PAGE_URL = PAGE.as_uri()
+PAGE_URL = "https://fixture.test/index.html"
 WINDOW_START = 1791676800          # a window open, 8:00 PM ET on 10 Oct 2026
 
 
@@ -185,7 +185,10 @@ def new_page(playwright, seconds_into_window=300, width=400, height=1500):
     page.on("console", lambda m: m.type == "error" and "ERR_FAILED" not in m.text and errors.append(m.text))
     page.clock.install(time=at(seconds_into_window))
     page.add_init_script(FAKE)
-    page.route("**/fonts.googleapis.com/**", lambda r: r.abort())
+    # Serve only the local fixture document; this also works in browsers that
+    # prohibit file:// navigation. Every other real HTTP request is blocked.
+    page.route("**/*", lambda r: r.fulfill(content_type="text/html", body=PAGE.read_text())
+               if r.request.url == PAGE_URL else r.abort())
     page.goto(PAGE_URL)
     return browser, page, errors
 

@@ -368,8 +368,11 @@ test('failed checkpoint or historical settlement cannot starve remaining collect
  assert.deepEqual(seen,['OLD','NEXT','research']);
  const log=h.data.get('collector');assert.equal(log.lastOk,at-300000);assert.equal(log.lastCycleAt,at);assert.equal(log.cycleFailures,2);assert.equal(log.stage,null);
  assert.deepEqual(log.errors.map(x=>x.stage),['checkpoint','forecast settlement']);
+ assert.deepEqual(log.cycleErrors.map(x=>[x.stage,x.error]),[['checkpoint','checkpoint 503'],['forecast settlement','settlement 503']]);
  h.obj.checkpoint=async()=>{};h.obj.settle=async()=>{};await h.obj.collectorMaintenance();
  assert.equal(h.data.get('collector').lastOk,at);assert.equal(h.data.get('collector').cycleFailures,0);
+ assert.deepEqual(h.data.get('collector').cycleErrors,[]);
+ assert.equal(h.data.get('collector').errors.length,2); // Recovery preserves history without treating it as current failure.
 });
 test('maintenance shares an eight-second read budget and stops issuing work after cancellation',async()=>{
  const h=worker(),controller=new AbortController();let budget,reads=0;

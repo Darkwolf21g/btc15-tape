@@ -140,6 +140,37 @@ pre,.notes {overflow-wrap:anywhere;}
 
 <script>
 "use strict";
+// BEGIN SHARED BTC15 COLLECTOR HEALTH
+// One read-only health presentation for the tape and agent dashboard.
+(() => {
+function summarize(c) {
+  const now=Number.isFinite(c.now)?c.now:Date.now();
+  const age=t=>Number.isFinite(t)&&t>0?Math.max(0,(now-t)/1000):Infinity;
+  const okAge=age(c.lastOk),cycleAge=age(c.lastCycleAt),runAge=age(c.lastRun);
+  const lastSuccess=Number.isFinite(okAge)?(okAge<60?Math.round(okAge)+'s':Math.round(okAge/60)+'m')+' ago':'no successful run';
+  const failures=Number.isFinite(c.cycleFailures)?Math.max(0,c.cycleFailures):0;
+  let state,text;
+  if(c.maintenanceRunning&&age(c.maintenanceStartedAt)>=15){state='stalled';text='maintenance overdue'+(c.stage?' · '+c.stage:'');}
+  else if(failures>0&&cycleAge<120){state='degraded';text=failures+' failed task'+(failures===1?'':'s')+' · last success '+lastSuccess;}
+  else if(okAge<120&&!failures&&c.healthy!==false){state='active';text=Math.round(okAge)+'s ago · '+(c.forecasts||0)+' forecasts';}
+  else if(runAge<120){state='working';text='last success '+lastSuccess;}
+  else {state='stale';text=lastSuccess;}
+  const history=Array.isArray(c.errors)?c.errors:[];
+  // New responses identify failures from the completed cycle explicitly. Old
+  // deployments retain a clearly labelled history instead of guessing attribution.
+  const cycleErrors=failures>0&&Array.isArray(c.cycleErrors)?c.cycleErrors:[];
+  const when=t=>Number.isFinite(t)&&t>0?new Date(t).toISOString():'time unavailable';
+  const describe=e=>when(e.at)+' · '+(e.stage||'collector')+': '+String(e.error||'unknown error');
+  const details=[];
+  if(state==='stalled')details.push('Current task: '+(c.stage||'unknown')+' · running '+Math.round(age(c.maintenanceStartedAt))+'s.');
+  if(cycleErrors.length)details.push('Failures in the last completed run ('+when(c.lastCycleAt)+'):\n'+cycleErrors.map(describe).join('\n'));
+  else if(history.length)details.push((state==='active'?'Recent error history (latest run succeeded):':'Recent error history:')+'\n'+history.slice(-3).map(describe).join('\n'));
+  if(failures>0&&!cycleErrors.length)details.push('The last completed run reported '+failures+' failed task'+(failures===1?'':'s')+'.');
+  return {state,healthy:state==='active',text:'Collector '+state+' · '+text,details:details.join('\n')};
+}
+globalThis.BTC15CollectorHealth=Object.freeze({summarize});
+})();
+// END SHARED BTC15 COLLECTOR HEALTH
 const $ = id => document.getElementById(id);
 const store = {get(k) { try { return JSON.parse(localStorage.getItem("btc15tape." + k)); } catch (e) { return null; } }, set(k, v) { try { localStorage.setItem("btc15tape." + k, JSON.stringify(v)); } catch (e) {} }};
 let token = store.get("feedToken") || "";
@@ -182,9 +213,10 @@ $('sessionExport').onclick=async()=>{
 let cfg = null, refreshing = false;
 async function refresh() {
   if (refreshing) return; refreshing = true;
+  const collectorTask=refreshCollector();
   try {
     const r = await fetch("./trade/status" + q(), {cache: "no-store", signal: AbortSignal.timeout(10000)});
-    if (!r.ok) { $("line").textContent = r.status === 403 ? "The relay wants the stream token: save it below." : "Relay answered " + r.status; $("when").textContent = "STALE · not updated"; refreshing = false; return; }
+    if (!r.ok) { $("line").textContent = r.status === 403 ? "The relay wants the stream token: save it below." : "Relay answered " + r.status; $("when").textContent = "STALE · not updated"; return; }
     const st = await r.json(); cfg = st.config;
     $("csv").href = "./record.csv" + q(); $("json").href = "./record" + q();
     $("when").textContent = "updated " + new Date().toLocaleTimeString();
@@ -217,12 +249,17 @@ async function refresh() {
     $("looks").textContent = looks.length ? looks.map(d => `${ET.format(new Date(d.at))} · ${mmss(d.left)} left · chance ${pct(d.p)}% (${pct(d.lo)}–${pct(d.hi)})` + (d.up ? ` · Up ${d.up.price}¢ ${cents(d.up.edge)} ${d.up.call}` : "") + (d.down ? ` · Down ${d.down.price}¢ ${cents(d.down.edge)} ${d.down.call}` : "")).join("\n") : (cfg.mode === "off" ? "The agent is off." : "Nothing logged yet; the first look comes in the next window's trading zone.");
     $("errors").textContent = st.errors && st.errors.length ? st.errors.map(e => `${ET.format(new Date(e.at))} ${e.error}`).join("\n") : "none";
   } catch (e) { $("line").textContent = "Relay not reachable."; $("when").textContent = "not updated"; }
+  finally { await collectorTask; refreshing=false; }
+}
+async function refreshCollector() {
   try {
-    const c = await (await fetch("./collector/status" + q(), {cache: "no-store", signal: AbortSignal.timeout(10000)})).json();
-    $("collector").textContent = `${c.lastOk && Date.now() - c.lastOk < 120000 ? "ACTIVE" : "STALE — collection needs attention"} · runs ${c.runs || 0} · last ${c.lastRun ? ET.format(new Date(c.lastRun)) : "never"} · next ${c.nextAlarm ? ET.format(new Date(c.nextAlarm)) : "–"}` + (c.errors && c.errors.length ? `\nlast error: ${c.errors[c.errors.length - 1].error}` : "");
+    const response=await fetch("./collector/status" + q(), {cache: "no-store", signal: AbortSignal.timeout(10000)});
+    if(!response.ok)throw Error(response.status===403?'token required':'HTTP '+response.status);
+    const c=await response.json(),health=globalThis.BTC15CollectorHealth.summarize(c);
+    $("collector").textContent = health.text+`\nruns ${c.runs || 0} · last wake ${c.lastRun ? ET.format(new Date(c.lastRun)) : "never"} · next ${c.nextAlarm ? ET.format(new Date(c.nextAlarm)) : "–"}`+(health.details?'\n'+health.details:'');
+    $("collector").className=health.healthy?'good':'bad';
     if(c.api)$("collector").textContent+="\nAPI limits: "+(c.api.limits?`${c.api.limits.usage_tier} · read ${c.api.limits.read?.refill_rate} tokens/s · write ${c.api.limits.write?.refill_rate} tokens/s`:"unknown")+(c.api.error?" · last check failed":"");
-  } catch (e) { $("collector").textContent = "Collector unavailable"; }
-  refreshing = false;
+  } catch (e) { $("collector").textContent = "Collector unavailable · "+e.message; $("collector").className='bad'; }
 }
 async function set(body) {
   if (!token) { $("ctlNote").textContent = "Save the stream token first."; return; }
