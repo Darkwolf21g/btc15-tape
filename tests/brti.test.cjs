@@ -19,22 +19,30 @@ test('page embeds the canonical replica source', () => {
 });
 
 test('weighted mid over the grid matches the discrete exponential sum by hand', () => {
-  // One book: bids 99 x1, 97 x1; asks 101 x1, 102 x1. Cap = 1 (all sizes equal).
+  // One book: bids 99.9 x1, 99.6 x1; asks 100.1 x1, 100.2 x1. Cap = 1 (all sizes equal).
   // Spacing = min(2/100, kde(n<4 -> smallest size 1)) = 0.02; grid 0.02..2.00 (100 points).
-  const r = R.calculate({a: book([[99, 1], [97, 1]], [[101, 1], [102, 1]])}, now);
+  // Mid-spread stays within D = 0.5% (0.1% then 0.3%), so every grid point is used.
+  const r = R.calculate({a: book([[99.9, 1], [99.6, 1]], [[100.1, 1], [100.2, 1]])}, now);
   close(r.cap, 1); close(r.spacing, 0.02); assert.equal(r.points, 100); assert.equal(r.depthLimited, true);
   const s = 0.02, vT = 2, lambda = 1 / (0.3 * vT);
   let sum = 0, w = 0;
-  for (let i = 1; i <= 100; i++) { const v = i * s, mid = v <= 1 + 1e-9 ? 100 : 99.5, e = Math.exp(-lambda * v); sum += e * mid; w += e; }
+  for (let i = 1; i <= 100; i++) { const v = i * s, mid = v <= 1 + 1e-9 ? 100 : 99.9, e = Math.exp(-lambda * v); sum += e * mid; w += e; }
   close(r.value, sum / w, 1e-9);
-  assert.ok(r.value > 99.75 && r.value < 100, 'front of the book carries more weight');
+  assert.ok(r.value > 99.95 && r.value < 100, 'front of the book carries more weight');
   assert.equal(r.rounded, Math.round(r.value * 100) / 100);
 });
 
-test('utilized depth stops at the 5% mid-spread band when the books are deep enough', () => {
+test('the deviation parameter is the published 0.5%, and a wide touch floors the depth at one spacing', () => {
+  assert.equal(R.PARAMS.deviation, 0.005);
+  // Half-spread 1% at the touch: the first grid point already exceeds D, so v_T = s and the value is the top mid.
+  const r = R.calculate({a: book([[99, 1], [97, 1]], [[101, 1], [102, 1]])}, now);
+  assert.equal(r.points, 1); close(r.vT, r.spacing); close(r.value, 100);
+});
+
+test('utilized depth stops at the 0.5% mid-spread band when the books are deep enough', () => {
   const bids = [[100, 1], [90, 1], [50, 1]], asks = [[101, 1], [120, 1], [200, 1]];
   const r = R.calculate({a: book(bids, asks)}, now);
-  // Spacing 3/100 = 0.03. v<=1: ask 101 / mid 100.5 - 1 = 0.5%; v>1: 120 / 105 - 1 = 14% > D.
+  // Spacing 3/100 = 0.03. v<=1: ask 101 / mid 100.5 - 1 = 0.498% <= D; v>1: 120 / 105 - 1 = 14% > D.
   // The last grid point within the band is 33 x 0.03 = 0.99.
   close(r.spacing, 0.03);
   assert.equal(r.depthLimited, false);
@@ -139,7 +147,7 @@ function pageHarness() {
     localStorage: {getItem: () => null, setItem() {}}, fetch: async () => { throw Error('No network in tests'); },
   });
   vm.runInContext(script.slice(0, script.indexOf('// ---------------------------------------------------------------- start')) + `
-    globalThis.api = {DEPTH_VENUES, depthBooks, depthOps, replica, replicaTick, replicaText, renderReplica, acceptIndex, feed, krakenChecksum, crc32, truncateBook};
+    globalThis.api = {DEPTH_VENUES, depthBooks, depthOps, sharedDepth, replica, replicaTick, replicaText, renderReplica, acceptIndex, feed, krakenChecksum, crc32, truncateBook};
   `, ctx);
   return {api: ctx.api, node, setTime: t => { clock = t; }};
 }
@@ -223,12 +231,9 @@ test('Coinbase level2_batch adapter: snapshot, absolute changes, heartbeats', ()
   assert.match(api.DEPTH_VENUES.coinbase.url, /ws-feed\.exchange\.coinbase\.com/);
 });
 
-test('Bitstamp, Crypto.com and Bullish adapters replace the book with each snapshot', () => {
+test('Crypto.com and Bullish adapters replace the book with each snapshot', () => {
   const {api} = pageHarness();
-  let r = drive(api, 'bitstamp', [{event: 'data', channel: 'order_book_btcusd', data: {bids: [['100', '1'], ['99', '1']], asks: [['101', '2']]}},
-                                   {event: 'data', channel: 'order_book_btcusd', data: {bids: [['98', '1']], asks: [['102', '2']]}}]);
-  assert.deepEqual(r.bids, [[98, 1]]); assert.deepEqual(r.asks, [[102, 2]]);
-  r = drive(api, 'cryptocom', [{id: 7, method: 'public/heartbeat'},
+  let r = drive(api, 'cryptocom', [{id: 7, method: 'public/heartbeat'},
     {method: 'subscribe', result: {channel: 'book', subscription: 'book.BTC_USD.50', instrument_name: 'BTC_USD', data: [{bids: [['100', '1', '3']], asks: [['101', '0.5', '1']], t: 1}]}}]);
   assert.deepEqual(r.bids, [[100, 1]]); assert.deepEqual(r.asks, [[101, 0.5]]);
   assert.deepEqual(JSON.parse(r.sent[0]), {id: 7, method: 'public/respond-heartbeat'});
@@ -250,4 +255,18 @@ test('Gemini adapter builds from initial events, applies changes, and resyncs on
   assert.deepEqual(r.bids, [[100.5, 0.5], [100, 1]]); assert.deepEqual(r.asks, [[101.2, 1]]);
   r = drive(api, 'gemini', [init, {...chg, socket_sequence: 3}]);
   assert.equal(r.b.ready, false); assert.match(r.b.note, /sequence gap/);
+});
+
+test('Bitstamp depth comes from the tape quote socket, and a recovered book clears its note', () => {
+  const {api} = pageHarness();
+  assert.equal(api.DEPTH_VENUES.bitstamp.shared, true);
+  api.sharedDepth('bitstamp', [['100', '1'], ['99', '2']], [['101', '1']]);
+  const b = api.depthBooks.bitstamp;
+  assert.equal(b.ready, true); assert.equal(b.bids.get(99), 2); assert.equal(b.ws, null);
+  b.note = 'silent for 30 s, reconnecting';
+  api.sharedDepth('bitstamp', [['100', '1']], [['101', '1']]);
+  assert.equal(b.note, '');
+  const r = api.replicaTick(3560000);
+  assert.ok(r.used.includes('Bitstamp'));
+  assert.match(api.replicaText(3560000).out, /Bitstamp: used .* via the tape's quote socket/);
 });

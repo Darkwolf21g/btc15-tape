@@ -7,7 +7,7 @@ whether that actually happens. It is research context: it never replaces the
 official index, never settles anything and is not an input to the frozen
 `brti-driftless-v4` model, buy calls, paper trades or sessions.
 
-Canonical source: `shared-brti.js` (`brti-replica-v1`), embedded into
+Canonical source: `shared-brti.js` (`brti-replica-v2`), embedded into
 `public/index.html` by `npm run sync:model` and checked by `npm run check`.
 
 ## The calculation
@@ -33,8 +33,10 @@ Implemented from CF Benchmarks' *CME CF Real Time Indices Methodology* v17.0
    1.06·σ·n^−1/5) over the winsorized level sizes of the lower-liquidity side.
 7. Ask and bid price-volume curves (marginal price at cumulative volume) on the
    grid s, 2s, …; mid = their average; mid-spread = ask / mid − 1.
-8. Utilized depth v_T = the last grid point whose mid-spread is at most **5%**
-   (floor s).
+8. Utilized depth v_T = the last grid point whose mid-spread (ask curve over mid
+   curve, at the same volume) is at most **0.5%** (floor s). Replica v1 used 5%
+   here, a misreading of the parameter table that integrated hundreds of BTC
+   deep and ran $30–40 from the official index on live books; v2 corrects it.
 9. Index = Σ midPV(v)·w(v) over v ∈ {s, …, v_T}, w ∝ λe^(−λv), weights normalized
    to one, λ = 1 / (**0.3**·v_T). Published precision is $0.01.
 
@@ -50,7 +52,7 @@ check each book's status after deploying.
 | --- | --- | --- | --- | --- |
 | Coinbase | Exchange `level2_batch` + `heartbeat` | full book | none on this channel; heartbeats keep it fresh | Coinbase Exchange docs (public without auth) |
 | Kraken | WS v2 `book`, depth 1000 | 1000 | CRC32 of top 10 (verified against Kraken's worked example); mismatch forces a resync | Kraken v2 docs |
-| Bitstamp | `order_book_btcusd` | top 100, full replace per message | none needed | already used by the tape; official page unreadable here |
+| Bitstamp | the tape's own `order_book_btcusd` quote socket | top 100, full replace per message | none needed | no second connection; shares the quote feed |
 | Gemini | v1 market data, bids/offers | full book | `socket_sequence` gap forces a resync | the v1 feed the tape already uses (v2 is archived) |
 | Crypto.com | `book.BTC_USD.50`, `SNAPSHOT` mode | top 50 every 500 ms | none needed | Crypto.com changelog; message shape partly unverified |
 | Bullish | `l2Orderbook` | top 100 | snapshots only; updates are undocumented and ignored | Bullish docs; may be unavailable in the US |
@@ -67,7 +69,7 @@ A socket silent for 30 s is reconnected.
   27 July 2026). The page uses those it can read from a browser; the panel lists
   which.
 - **Depth.** Some public feeds publish only the top N levels (see the adapter
-  table). When the visible books run out before the 5% band, the panel says
+  table). When the visible books run out before the 0.5% band, the panel says
   *depth-limited*: utilized depth and λ are then smaller than CF's, which pushes
   weight toward the top of the book. Levels more than 15% from an exchange's own
   touch are ignored for speed.
