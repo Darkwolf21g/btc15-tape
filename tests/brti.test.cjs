@@ -283,14 +283,17 @@ test('tracking with the level removed finds a perpetual that leads despite its b
   assert.ok(raw.receiptBest.mae > 30, 'without demeaning the basis dominates the error');
 });
 
-test('Binance perp adapter quotes from bookTicker, takes trades from aggTrade, and feeds the lead series', () => {
+test('Binance perp adapter subscribes by message, recognises quotes and trades by shape, and feeds the lead series', () => {
   const {api} = pageHarness();
   const spec = api.VENUES.binancef;
   assert.equal(spec.lead, true);
-  const quotes = [], trades = [];
-  spec.msg({stream: 'btcusdt@bookTicker', data: {e: 'bookTicker', b: '100.0', a: '100.2', T: 5}}, (b, a) => quotes.push([b, a]), {}, {}, (p, s, buy, t) => trades.push([p, s, buy, t]));
-  spec.msg({stream: 'btcusdt@aggTrade', data: {e: 'aggTrade', p: '100.1', q: '0.5', m: false, T: 7}}, () => {}, {}, {}, (p, s, buy, t) => trades.push([p, s, buy, t]));
-  spec.msg({stream: 'btcusdt@aggTrade', data: {e: 'aggTrade', p: '100.0', q: '0.2', m: true, T: 8}}, () => {}, {}, {}, (p, s, buy, t) => trades.push([p, s, buy, t]));
+  const sent = []; spec.open({send: m => sent.push(JSON.parse(m))});
+  assert.deepEqual(sent, [{method: 'SUBSCRIBE', params: ['btcusdt@bookTicker', 'btcusdt@aggTrade'], id: 1}]);
+  const quotes = [], trades = [], q = (b, a) => quotes.push([b, a]), tr = (p, s, buy, t) => trades.push([p, s, buy, t]);
+  spec.msg({result: null, id: 1}, q, {}, {}, tr);                                                         // acknowledgement
+  spec.msg({e: 'bookTicker', u: 1, s: 'BTCUSDT', b: '100.0', B: '7', a: '100.2', A: '3', T: 5, E: 5}, q, {}, {}, tr);   // raw frame, bookTicker carries T too
+  spec.msg({stream: 'btcusdt@aggTrade', data: {e: 'aggTrade', p: '100.1', q: '0.5', m: false, T: 7}}, q, {}, {}, tr);   // wrapped frame
+  spec.msg({s: 'BTCUSDT', a: 9, p: '100.0', q: '0.2', f: 1, l: 2, T: 8, m: true}, q, {}, {}, tr);           // untagged, as AGGR tolerates
   assert.deepEqual(quotes, [[100, 100.2]]);
   assert.deepEqual(trades, [[100.1, 0.5, true, 7], [100, 0.2, false, 8]]);
   api.noteLeadMid('binancef', 100.1, 3560000); api.noteLeadMid('binancef', 100.3, 3560100);

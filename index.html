@@ -772,12 +772,16 @@ const VENUES = {
   // The largest perpetual venue, also not part of the index. AGGR connects to fstream directly from
   // the browser and the tape's own liquidation socket to it is live from US phones, so the earlier
   // "refuses US connections" note was about the environment that first tested it, not Binance.
-  binancef: {name: "Binance perp", lead: true, url: "wss://fstream.binance.com/stream?streams=btcusdt@bookTicker/btcusdt@aggTrade",
-    open: () => {},
+  // Subscribed by message on AGGR's endpoint rather than by URL: the combined-stream URL delivered
+  // quotes but never a trade from this phone. Frames are recognised by shape, as AGGR does, so a
+  // payload without its "e" tag still counts.
+  binancef: {name: "Binance perp", lead: true, url: "wss://fstream.binance.com/market/ws",
+    open: ws => ws.send(JSON.stringify({method: "SUBSCRIBE", params: ["btcusdt@bookTicker", "btcusdt@aggTrade"], id: 1})),
     msg: (d, q, ws, st, tr) => {
-      const x = d.data; if (!x) return;
-      if (x.e === "bookTicker" && +x.b > 0) q(+x.b, +x.a);
-      else if (x.e === "aggTrade" && +x.q > 0) tr(+x.p, +x.q, x.m === false, +x.T || 0);   // m: the buyer was the maker, so the taker sold
+      const x = d.data && typeof d.data === "object" ? d.data : d;
+      if (!x || x.result === null) return;                                              // subscribe acknowledgement
+      if (+x.p > 0 && +x.q > 0 && typeof x.m === "boolean") tr(+x.p, +x.q, x.m === false, +x.T || 0);   // aggTrade: m = buyer was the maker, so the taker sold
+      else if (+x.b > 0 && +x.a > 0 && x.p == null) q(+x.b, +x.a);                        // bookTicker: best bid b / ask a
     }},
   // Liquidation feeds (derivatives venues, not part of the index). A `liq` venue never supplies a
   // price; `pingEvery` keeps the socket provably alive between rare events; `quiet` venues send
@@ -2531,6 +2535,11 @@ function diagnostics(now, open) {
   const recentTimes = [...officialTimes.values()].sort((a,b)=>a-b).slice(-8);
   lines.push(`BRTI recovery v1: ${av.n}/60 seconds · one-Hz source age ${one ? ((t-one.at)/1000).toFixed(1) : "-"}s · transport delay ${one ? one.delay : "-"}ms · aggregate ${ag ? `${ag.n} ticks, end ${ag.end}, source ${ag.at}, span ${ag.end-ag.start}ms` : "none"}`);
   lines.push(`BRTI raw times: ${recentTimes.join(",")} · missing seconds: ${Array.from({length:60},(_,i)=>latest-60+i).filter(s=>!officialSeconds.has(s)).join(",")}`);
+  const leadDiag = Object.entries(leadSeries).map(([k, s]) => {
+    const tr2 = replica.leads && replica.leads[k], zero = tr2 && tr2.receiptCurve ? tr2.receiptCurve.find(c => c.lag === 0) : null;
+    return `${VENUES[k] ? VENUES[k].name : k} ${s.length} quotes, ${zero ? zero.n : 0} paired at 0 ms` + (tr2 && tr2.receiptBest ? `, best ${tr2.receiptBest.lag} ms` : "");
+  });
+  lines.push(`perp tracking: official ticks kept ${replica.official.length}, replica values ${replica.hist.length} · ` + (leadDiag.length ? leadDiag.join(" · ") : "no lead quotes yet") + (feed.note ? ` · ${feed.note}` : ""));
   const st = calStats();
   lines.push(`nowcast: samples ${cal.n.toFixed(0)}` + (st ? ` · flow ${st.b1.toFixed(1)} $ per $1M (t ${st.t1.toFixed(1)}, ${st.flowOn ? "on" : "off"}) · perp gap ×${st.b2.toFixed(2)} (t ${st.t2.toFixed(1)}, ${st.leadOn ? "on" : "off"})` : " · needs 120")
     + ` · level sd ${levelSd().toFixed(1)}` + (basisSd != null ? ` (measured ${basisSd.toFixed(2)})` : "") + ` · bankroll $${bankroll}`);
@@ -2598,7 +2607,11 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return;
   if (lock) keepAwake();
   reconnectAll();                                    // iPhones drop the connections while another app is in front
-  feed.backoff = 1000; if (!feed.ws || feed.ws.readyState > 1) connectFeed();
+  feed.backoff = 1000;
+  // A relay socket that survived the background but is behind would now drain a backlog in order,
+  // leaving the index tens of seconds stale. Drop it and start fresh instead.
+  if (feed.ws && feed.ws.readyState === 1 && feed.brti && Date.now() - feed.brti.at > 5000) { feed.note = "reconnected after resume: index was " + ((Date.now() - feed.brti.at) / 1000).toFixed(0) + " s behind"; try { feed.ws.close(); } catch (e) {} }
+  if (!feed.ws || feed.ws.readyState > 1) connectFeed();
   fetchBackfill(false, bounds(Date.now() / 1000)[0] - 60);
 });
 window.addEventListener("online", reconnectAll);
