@@ -91,6 +91,26 @@ filters, maximum fill latency or retention. Slow research metadata itself still
 fails closed when the existing capture tolerance is exceeded. This is isolation
 from unrelated work, not a guarantee of network latency or executable fills.
 
+## Depth timestamp policy — depth-clock-v2 (October 19, 2026)
+
+A Kalshi book frame carries Kalshi's own timestamp (`ts_ms` on deltas,
+`sending_ts_ms` on snapshots). Until now a frame was rejected as "missing, stale
+or future depth timestamp" if that timestamp ran more than 250 ms ahead of the
+Worker's clock. On the evening of 15 October Kalshi's clock was 266–365 ms ahead,
+so books 1–3 ms old were rejected: four of the eleven attempts in the first timed
+paper session failed on this gate alone. In the research export the offset has a
+25 ms median and 297 ms maximum, so earlier checkpoints were affected rarely.
+
+The Worker now keeps the median of (source timestamp − local receipt) over the
+last 64 book frames, estimated from frames *before* the one being judged and only
+once eight samples exist. Depth snapshots record `clockOffsetMs` and
+`correctedSourceAgeMs` and are fresh when the corrected age is within
+[−250 ms, 1500 ms]. The local receipt age bound (≤ 1500 ms) is unchanged, so a
+replayed old frame is still rejected regardless of the estimate. Snapshots carry
+`depthPolicy: "depth-clock-v2"`; older records have no such field and were judged
+under the uncorrected rule. The estimate is visible on `/selftest` as
+`bookClockOffsetMs`. No model, threshold or cohort definition changed.
+
 ## Chronological evaluation
 
 Fixed UTC test blocks contain 20 windows (five hours). For each checkpoint, choose
