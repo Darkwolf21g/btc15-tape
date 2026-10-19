@@ -179,10 +179,14 @@ function track(replica, official, opts = {}) {
     const series = official.filter(o => Number.isFinite(o[key]) && Number.isFinite(o.v)).sort((a, b) => a[key] - b[key]);
     let best = null; const curveOut = [];
     for (const lag of lags) {
-      const errs = [];
-      for (const r of replica) { const o = at(series, key, r.t + lag); if (o != null && Number.isFinite(r.v)) errs.push(Math.abs(r.v - o)); }
+      let errs = [];
+      for (const r of replica) { const o = at(series, key, r.t + lag); if (o != null && Number.isFinite(r.v)) errs.push(r.v - o); }
       if (errs.length < (opts.minPairs || 20)) { curveOut.push({lag, n: errs.length, mae: null}); continue; }
-      errs.sort((a, b) => a - b);
+      if (opts.demean) {            // a series with a level offset (a perpetual's basis): score around its median difference
+        const sorted = errs.slice().sort((a, b) => a - b), med = sorted[(sorted.length - 1) >> 1];
+        errs = errs.map(e => e - med);
+      }
+      errs = errs.map(Math.abs).sort((a, b) => a - b);
       const mae = mean(errs), med = errs[(errs.length - 1) >> 1];
       curveOut.push({lag, n: errs.length, mae, median: med});
       if (!best || mae < best.mae) best = {lag, n: errs.length, mae, median: med};

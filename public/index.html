@@ -630,10 +630,14 @@ function track(replica, official, opts = {}) {
     const series = official.filter(o => Number.isFinite(o[key]) && Number.isFinite(o.v)).sort((a, b) => a[key] - b[key]);
     let best = null; const curveOut = [];
     for (const lag of lags) {
-      const errs = [];
-      for (const r of replica) { const o = at(series, key, r.t + lag); if (o != null && Number.isFinite(r.v)) errs.push(Math.abs(r.v - o)); }
+      let errs = [];
+      for (const r of replica) { const o = at(series, key, r.t + lag); if (o != null && Number.isFinite(r.v)) errs.push(r.v - o); }
       if (errs.length < (opts.minPairs || 20)) { curveOut.push({lag, n: errs.length, mae: null}); continue; }
-      errs.sort((a, b) => a - b);
+      if (opts.demean) {            // a series with a level offset (a perpetual's basis): score around its median difference
+        const sorted = errs.slice().sort((a, b) => a - b), med = sorted[(sorted.length - 1) >> 1];
+        errs = errs.map(e => e - med);
+      }
+      errs = errs.map(Math.abs).sort((a, b) => a - b);
       const mae = mean(errs), med = errs[(errs.length - 1) >> 1];
       curveOut.push({lag, n: errs.length, mae, median: med});
       if (!best || mae < best.mae) best = {lag, n: errs.length, mae, median: med};
@@ -765,6 +769,16 @@ const VENUES = {
       if (d.channel === "bbo") { const b = d.data && d.data.bbo; if (b && b[0] && b[1]) q(+b[0].px, +b[1].px); }
       else if (d.channel === "trades" && Array.isArray(d.data)) for (const x of d.data) if (x.coin === "BTC") tr(+x.px, +x.sz, x.side === "B", +x.time || 0);
     }},
+  // The largest perpetual venue, also not part of the index. AGGR connects to fstream directly from
+  // the browser and the tape's own liquidation socket to it is live from US phones, so the earlier
+  // "refuses US connections" note was about the environment that first tested it, not Binance.
+  binancef: {name: "Binance perp", lead: true, url: "wss://fstream.binance.com/stream?streams=btcusdt@bookTicker/btcusdt@aggTrade",
+    open: () => {},
+    msg: (d, q, ws, st, tr) => {
+      const x = d.data; if (!x) return;
+      if (x.e === "bookTicker" && +x.b > 0) q(+x.b, +x.a);
+      else if (x.e === "aggTrade" && +x.q > 0) tr(+x.p, +x.q, x.m === false, +x.T || 0);   // m: the buyer was the maker, so the taker sold
+    }},
   // Liquidation feeds (derivatives venues, not part of the index). A `liq` venue never supplies a
   // price; `pingEvery` keeps the socket provably alive between rare events; `quiet` venues send
   // nothing between events and are not closed for silence.
@@ -841,7 +855,7 @@ function connect(key) {
     spec.msg(d, (bid, ask) => {
       if (!(bid > 0 && ask >= bid && (ask - bid) / ask < 0.005)) return;
       const mid = (bid + ask) / 2, t = Date.now();
-      if (mid !== v.mid || !v.changedAt) v.changedAt = t;
+      if (mid !== v.mid || !v.changedAt) { v.changedAt = t; if (spec.lead) noteLeadMid(key, mid, t); }
       v.mid = mid; v.quoteAt = t; v.state = "live"; v.backoff = 1000;
     }, ws, st,
     (px, size, takerBuy, tMs) => onTrade(key, v, px, size, takerBuy, tMs),
@@ -2691,7 +2705,13 @@ function krakenChecksum(b) {
 }
 const CONSTITUENTS = ["Bitstamp", "Coinbase", "Kraken", "Gemini", "Bullish", "Crypto.com", "LMAX Digital"];
 const depthBooks = {};   // key -> {bids, asks (Map price -> size), at, ready, state, ws, backoff, timer, fails, note, seq}
-const replica = {last: null, state: {excluded: {}}, hist: [], official: [], tracking: null, trackedAt: 0};
+const replica = {last: null, state: {excluded: {}}, hist: [], official: [], tracking: null, trackedAt: 0, leads: {}};
+const leadSeries = {};      // lead venue -> [{t, v}] mid changes, ten minutes, for lead/lag against the official index
+function noteLeadMid(key, mid, t) {
+  const s = leadSeries[key] || (leadSeries[key] = []);
+  if (s.length && s[s.length - 1].t === t) s[s.length - 1].v = mid; else s.push({t, v: mid});
+  while (s.length && s[0].t < t - REPLICA_KEEP_MS) s.shift();
+}
 function depthOps(b, ws) {
   const put = (m, p, sz) => { p = +p; sz = +sz; if (!(Number.isFinite(p) && p > 0)) return; if (Number.isFinite(sz) && sz > 0) m.set(p, sz); else m.delete(p); };
   return {
@@ -2774,7 +2794,15 @@ function replicaTick(nowMs = Date.now()) {
   if (Number.isFinite(r.value)) replica.hist.push({t: nowMs, v: r.value});
   while (replica.hist.length && replica.hist[0].t < nowMs - REPLICA_KEEP_MS) replica.hist.shift();
   while (replica.official.length && replica.official[0].at < nowMs - REPLICA_KEEP_MS) replica.official.shift();
-  if (nowMs - replica.trackedAt >= 10000) { replica.trackedAt = nowMs; replica.tracking = globalThis.BTC15Replica.track(replica.hist, replica.official); }
+  if (nowMs - replica.trackedAt >= 10000) {
+    replica.trackedAt = nowMs; replica.tracking = globalThis.BTC15Replica.track(replica.hist, replica.official);
+    replica.leads = {};
+    for (const [key, series] of Object.entries(leadSeries)) {
+      if (!VENUES[key] || !VENUES[key].lead) continue;
+      // A perpetual trades at a basis to spot: the level is removed, only timing and residual noise are scored.
+      replica.leads[key] = globalThis.BTC15Replica.track(series, replica.official, {demean: true, minPairs: 50});
+    }
+  }
   return r;
 }
 function noteOfficialForReplica(v, ms, atMs) {      // official BRTI ticks: source time and local receipt
@@ -2810,6 +2838,18 @@ function replicaText(nowMs = Date.now()) {
     if (tr.sourceBest) lines.push(`  Best source-time alignment ${tr.sourceBest.lag} ms (mean ${tr.sourceBest.mae.toFixed(2)})`);
     if (tr.receiptBest) lines.push(`  Against when the official tick reached this page, the replica is best aligned ${tr.receiptBest.lag} ms ${tr.receiptBest.lag >= 0 ? "ahead" : "behind"} (mean ${tr.receiptBest.mae.toFixed(2)})`);
     lines.push("  Positive means the replica showed the move before the official tick arrived here. Descriptive only.");
+  }
+  const leads = Object.entries(replica.leads || {});
+  if (leads.length) {
+    lines.push("");
+    lines.push("Perpetuals against the official index (basis removed, same 10 min):");
+    for (const [key, tr2] of leads) {
+      const v = venue[key], name = VENUES[key].name;
+      if (!tr2 || !tr2.receiptBest) { lines.push(`  ${name}: ${v && v.mid != null ? "needs a minute of overlap" : "no quotes"}`); continue; }
+      const basis = v && v.mid != null && feedLive() ? ` · basis ${signed(v.mid - feed.brti.v)}` : "";
+      lines.push(`  ${name}: best aligned ${tr2.receiptBest.lag} ms ${tr2.receiptBest.lag >= 0 ? "ahead of" : "behind"} official receipt (residual ${tr2.receiptBest.mae.toFixed(2)}; at 0 ms ${tr2.accuracy ? tr2.accuracy.mae.toFixed(2) : "–"})${basis}`);
+    }
+    lines.push("  A perpetual that leads the official tick is not yet a lead over the Kalshi book; that needs the Worker-side comparison.");
   }
   return {sum, out: lines.join("\n")};
 }
