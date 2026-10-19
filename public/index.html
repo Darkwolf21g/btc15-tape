@@ -454,12 +454,13 @@ globalThis.BTC15Model=Object.freeze({VERSION,SETTLEMENT_CONVENTION,EXECUTION_VER
 // 21 Sep 2026) from the constituent order books the page can see. It is research context:
 // it never replaces the official index, never settles anything and is not used by the
 // frozen probability model. Deviations from the official calculation are listed in REPLICA.md.
+// v2 corrects D from 5% to the published 0.5%; v1 integrated hundreds of BTC deep and ran $30-40 off.
 (() => {
-const VERSION = "brti-replica-v1";
+const VERSION = "brti-replica-v2";
 const METHODOLOGY = "CME CF RTI methodology v17.0";
 // BTC-USD parameters (methodology sections 6.1-6.2).
 const PARAMS = Object.freeze({
-  deviation: 0.05,      // D: utilized depth stops where the ask is more than 5% above mid
+  deviation: 0.005,     // D: utilized depth stops where the ask curve is more than 0.5% above the mid curve
   erroneous: 0.05,      // a book whose mid is >5% from the median mid is excluded
   reinstate: 0.025,     // ...and readmitted only once back within half that
   lagMs: 10000,         // a book retrieved more than 10 s before the calculation is excluded
@@ -602,7 +603,7 @@ function calculate(books, nowMs, state = {excluded: {}}) {
     const mid = (ask[i] + bid[i]) / 2;
     if (ask[i] / mid - 1 <= PARAMS.deviation) last = i; else break;
   }
-  const depthLimited = last === n - 1;            // the visible books ran out before the 5% band did
+  const depthLimited = last === n - 1;            // the visible books ran out before the 0.5% band did
   const vT = (last + 1) * s, lambda = 1 / (PARAMS.lambdaFrac * vT);
   let sum = 0, wsum = 0;
   for (let i = 0; i <= last; i++) {
@@ -729,7 +730,7 @@ const VENUES = {
     ping: ws => ws.send(JSON.stringify({event: "bts:heartbeat"})),
     msg: (d, q, ws, st, tr) => {
       if (d.event === "bts:request_reconnect") ws.close();
-      else if (d.event === "data" && d.data && d.data.bids && d.data.bids.length && d.data.asks.length) q(+d.data.bids[0][0], +d.data.asks[0][0]);
+      else if (d.event === "data" && d.data && d.data.bids && d.data.bids.length && d.data.asks.length) { q(+d.data.bids[0][0], +d.data.asks[0][0]); sharedDepth("bitstamp", d.data.bids, d.data.asks); }   // the same message is the replica's Bitstamp book
       else if (d.event === "trade" && d.data && d.data.price) tr(+d.data.price, +d.data.amount, +d.data.type === 0, +d.data.microtimestamp / 1000);   // type 0 buy, 1 sell
     }},
   gemini: {name: "Gemini", url: "wss://api.gemini.com/v1/marketdata/BTCUSD?top_of_book=true&trades=true&heartbeat=true",
@@ -2626,15 +2627,9 @@ const DEPTH_VENUES = {
         }
       }
     }},
-  // Bitstamp: every message is the full top 100 bids and asks.
-  bitstamp: {name: "Bitstamp", url: "wss://ws.bitstamp.net", depth: 100,
-    open: ws => ws.send(JSON.stringify({event: "bts:subscribe", data: {channel: "order_book_btcusd"}})),
-    ping: ws => ws.send(JSON.stringify({event: "bts:heartbeat"})),
-    msg: (d, book, ws) => {
-      if (d.event === "bts:request_reconnect") book.reset("exchange asked to reconnect");
-      else if (d.event === "data" && d.channel === "order_book_btcusd" && d.data && Array.isArray(d.data.bids)) book.snapshot(d.data.bids, d.data.asks || []);
-      else if (d.event === "bts:heartbeat") book.touch();
-    }},
+  // Bitstamp: the tape's own Bitstamp socket already receives the full top 100 bids and asks
+  // with every message, so the replica reads that book rather than opening a second connection.
+  bitstamp: {name: "Bitstamp", shared: true, depth: 100},
   // Gemini v1 market data, full book: the first update carries every level ("initial");
   // later changes give the absolute remaining size. socket_sequence must rise by one.
   gemini: {name: "Gemini", url: "wss://api.gemini.com/v1/marketdata/BTCUSD?bids=true&offers=true&trades=false&auctions=false&heartbeat=true",
@@ -2700,15 +2695,26 @@ const replica = {last: null, state: {excluded: {}}, hist: [], official: [], trac
 function depthOps(b, ws) {
   const put = (m, p, sz) => { p = +p; sz = +sz; if (!(Number.isFinite(p) && p > 0)) return; if (Number.isFinite(sz) && sz > 0) m.set(p, sz); else m.delete(p); };
   return {
-    snapshot(bids, asks) { b.bids.clear(); b.asks.clear(); for (const [p, sz] of bids) put(b.bids, p, sz); for (const [p, sz] of asks) put(b.asks, p, sz); b.ready = true; b.at = Date.now(); b.state = "live"; b.backoff = 1000; },
+    snapshot(bids, asks) { b.bids.clear(); b.asks.clear(); for (const [p, sz] of bids) put(b.bids, p, sz); for (const [p, sz] of asks) put(b.asks, p, sz); b.ready = true; b.at = Date.now(); b.state = "live"; b.backoff = 1000; b.note = ""; },
     set(isBid, p, sz) { if (!b.ready) return; put(isBid ? b.bids : b.asks, p, sz); b.at = Date.now(); },
     touch() { if (b.ready) b.at = Date.now(); },               // heartbeat: the book we hold is still current
     reset(reason) { b.ready = false; b.bids.clear(); b.asks.clear(); b.note = reason; b.state = "resync"; try { ws.close(); } catch (e) {} },
   };
 }
+function depthBook(key) {
+  return depthBooks[key] || (depthBooks[key] = {bids: new Map(), asks: new Map(), at: 0, ready: false, state: "off", ws: null, backoff: 1000, timer: null, fails: 0, note: "", seq: null});
+}
+// A book delivered by one of the tape's existing quote sockets (Bitstamp), not a depth socket of its own.
+function sharedDepth(key, bids, asks) {
+  if (!DEPTH_VENUES[key] || !DEPTH_VENUES[key].shared) return;
+  const b = depthBook(key);
+  if (!b.ops) b.ops = depthOps(b, {close() {}});
+  b.ops.snapshot(bids, asks);
+}
 function connectDepth(key) {
   const spec = DEPTH_VENUES[key];
-  const b = depthBooks[key] || (depthBooks[key] = {bids: new Map(), asks: new Map(), at: 0, ready: false, state: "off", ws: null, backoff: 1000, timer: null, fails: 0, note: "", seq: null});
+  if (spec.shared) return;
+  const b = depthBook(key);
   if (b.timer) { clearTimeout(b.timer); b.timer = null; }
   if (b.ws && b.ws.readyState <= 1) return;
   let ws;
@@ -2729,7 +2735,7 @@ function connectDepth(key) {
 function depthWatchdog(nowMs = Date.now()) {   // pings, and a book socket silent for 30 s is a dead one
   for (const [key, spec] of Object.entries(DEPTH_VENUES)) {
     const b = depthBooks[key];
-    if (!b || !b.ws) continue;
+    if (!b || !b.ws || spec.shared) continue;
     if (b.ws.readyState === 1) {
       if (b.at && nowMs - b.at > 30000 || !b.at && b.openedAt && nowMs - b.openedAt > 30000) { b.note = "silent for 30 s, reconnecting"; try { b.ws.close(); } catch (e) {} }
       else if (spec.ping) { try { spec.ping(b.ws); } catch (e) {} }
@@ -2785,7 +2791,7 @@ function replicaText(nowMs = Date.now()) {
   const sum = Number.isFinite(r.value) ? `${money(r.value)} · ${nBooks} of ${CONSTITUENTS.length} books${vs}${lead}` : `no value: ${r.reason}`;
   const lines = [];
   lines.push(`${r.version} · ${globalThis.BTC15Replica.METHODOLOGY} · computed ${age} s ago`);
-  if (Number.isFinite(r.value)) lines.push(`Value ${r.value.toFixed(4)} (published precision ${money(r.rounded)}) · size cap ${r.cap.toFixed(4)} BTC · spacing ${r.spacing.toFixed(4)} BTC · utilized depth ${r.vT.toFixed(2)} BTC over ${r.points} points${r.depthLimited ? " · visible books ran out before the 5% band (depth-limited)" : ""}`);
+  if (Number.isFinite(r.value)) lines.push(`Value ${r.value.toFixed(4)} (published precision ${money(r.rounded)}) · size cap ${r.cap.toFixed(4)} BTC · spacing ${r.spacing.toFixed(4)} BTC · utilized depth ${r.vT.toFixed(2)} BTC over ${r.points} points${r.depthLimited ? " · visible books ran out before the 0.5% band (depth-limited)" : ""}`);
   lines.push("");
   lines.push("Books (bid/ask levels held):");
   for (const [key, spec] of Object.entries(DEPTH_VENUES)) {
@@ -2793,7 +2799,7 @@ function replicaText(nowMs = Date.now()) {
     const why = r.excluded[spec.name];
     const levels = b ? `${b.bids.size}/${b.asks.size} levels` : "";
     const fresh = b && b.at ? `${((nowMs - b.at) / 1000).toFixed(1)} s old` : "never updated";
-    lines.push(`  ${spec.name}: ${r.used.includes(spec.name) ? "used" : why || (b ? b.state : "off")} · ${levels || "no book"} · ${fresh}${b && b.note ? " · " + b.note : ""}`);
+    lines.push(`  ${spec.name}: ${r.used.includes(spec.name) ? "used" : why || (b ? b.state : spec.shared ? "waiting for the quote feed" : "off")} · ${levels || "no book"} · ${fresh}${b && b.note ? " · " + b.note : ""}${spec.shared ? " · via the tape's quote socket" : ""}`);
   }
   for (const name of CONSTITUENTS) if (!Object.values(DEPTH_VENUES).some(s => s.name === name)) lines.push(`  ${name}: not visible from a browser`);
   lines.push("");

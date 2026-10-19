@@ -3,12 +3,13 @@
 // 21 Sep 2026) from the constituent order books the page can see. It is research context:
 // it never replaces the official index, never settles anything and is not used by the
 // frozen probability model. Deviations from the official calculation are listed in REPLICA.md.
+// v2 corrects D from 5% to the published 0.5%; v1 integrated hundreds of BTC deep and ran $30-40 off.
 (() => {
-const VERSION = "brti-replica-v1";
+const VERSION = "brti-replica-v2";
 const METHODOLOGY = "CME CF RTI methodology v17.0";
 // BTC-USD parameters (methodology sections 6.1-6.2).
 const PARAMS = Object.freeze({
-  deviation: 0.05,      // D: utilized depth stops where the ask is more than 5% above mid
+  deviation: 0.005,     // D: utilized depth stops where the ask curve is more than 0.5% above the mid curve
   erroneous: 0.05,      // a book whose mid is >5% from the median mid is excluded
   reinstate: 0.025,     // ...and readmitted only once back within half that
   lagMs: 10000,         // a book retrieved more than 10 s before the calculation is excluded
@@ -151,7 +152,7 @@ function calculate(books, nowMs, state = {excluded: {}}) {
     const mid = (ask[i] + bid[i]) / 2;
     if (ask[i] / mid - 1 <= PARAMS.deviation) last = i; else break;
   }
-  const depthLimited = last === n - 1;            // the visible books ran out before the 5% band did
+  const depthLimited = last === n - 1;            // the visible books ran out before the 0.5% band did
   const vT = (last + 1) * s, lambda = 1 / (PARAMS.lambdaFrac * vT);
   let sum = 0, wsum = 0;
   for (let i = 0; i <= last; i++) {
