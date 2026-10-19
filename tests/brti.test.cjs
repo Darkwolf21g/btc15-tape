@@ -147,7 +147,7 @@ function pageHarness() {
     localStorage: {getItem: () => null, setItem() {}}, fetch: async () => { throw Error('No network in tests'); },
   });
   vm.runInContext(script.slice(0, script.indexOf('// ---------------------------------------------------------------- start')) + `
-    globalThis.api = {DEPTH_VENUES, depthBooks, depthOps, sharedDepth, replica, replicaTick, replicaText, renderReplica, acceptIndex, feed, krakenChecksum, crc32, truncateBook};
+    globalThis.api = {DEPTH_VENUES, depthBooks, depthOps, sharedDepth, replica, replicaTick, replicaText, renderReplica, acceptIndex, feed, krakenChecksum, crc32, truncateBook, VENUES, noteLeadMid, leadSeries};
   `, ctx);
   return {api: ctx.api, node, setTime: t => { clock = t; }};
 }
@@ -269,4 +269,32 @@ test('Bitstamp depth comes from the tape quote socket, and a recovered book clea
   const r = api.replicaTick(3560000);
   assert.ok(r.used.includes('Bitstamp'));
   assert.match(api.replicaText(3560000).out, /Bitstamp: used .* via the tape's quote socket/);
+});
+
+test('tracking with the level removed finds a perpetual that leads despite its basis', () => {
+  const perp = [], official = [];
+  const path = t => 60000 + 50 * Math.sin(t / 3000) + 20 * Math.sin(t / 700);
+  for (let t = 0; t < 120000; t += 100) perp.push({t, v: path(t + 800) + 35});   // 800 ms early, $35 above spot
+  for (let t = 0; t < 120000; t += 200) official.push({t, at: t + 300, v: path(t)});
+  const r = R.track(perp, official, {demean: true, minPairs: 50});
+  assert.equal(r.receiptBest.lag, 1200, '800 ms market lead plus 300 ms delivery, on a 200 ms grid');
+  assert.ok(r.receiptBest.median < 0.1, 'basis removed, residual is small at the right lag');
+  const raw = R.track(perp, official, {minPairs: 50});
+  assert.ok(raw.receiptBest.mae > 30, 'without demeaning the basis dominates the error');
+});
+
+test('Binance perp adapter quotes from bookTicker, takes trades from aggTrade, and feeds the lead series', () => {
+  const {api} = pageHarness();
+  const spec = api.VENUES.binancef;
+  assert.equal(spec.lead, true);
+  const quotes = [], trades = [];
+  spec.msg({stream: 'btcusdt@bookTicker', data: {e: 'bookTicker', b: '100.0', a: '100.2', T: 5}}, (b, a) => quotes.push([b, a]), {}, {}, (p, s, buy, t) => trades.push([p, s, buy, t]));
+  spec.msg({stream: 'btcusdt@aggTrade', data: {e: 'aggTrade', p: '100.1', q: '0.5', m: false, T: 7}}, () => {}, {}, {}, (p, s, buy, t) => trades.push([p, s, buy, t]));
+  spec.msg({stream: 'btcusdt@aggTrade', data: {e: 'aggTrade', p: '100.0', q: '0.2', m: true, T: 8}}, () => {}, {}, {}, (p, s, buy, t) => trades.push([p, s, buy, t]));
+  assert.deepEqual(quotes, [[100, 100.2]]);
+  assert.deepEqual(trades, [[100.1, 0.5, true, 7], [100, 0.2, false, 8]]);
+  api.noteLeadMid('binancef', 100.1, 3560000); api.noteLeadMid('binancef', 100.3, 3560100);
+  assert.deepEqual(JSON.parse(JSON.stringify(api.leadSeries.binancef)), [{t: 3560000, v: 100.1}, {t: 3560100, v: 100.3}]);
+  api.noteLeadMid('binancef', 100.4, 3560100);
+  assert.equal(api.leadSeries.binancef.length, 2); assert.equal(api.leadSeries.binancef[1].v, 100.4);
 });

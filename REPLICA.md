@@ -85,6 +85,13 @@ None of these is assumed small. The tracking lines measure the result.
 
 ## Tracking
 
+The panel also scores the two perpetuals the tape follows (Binance Futures and
+Hyperliquid) against the official index, with their basis removed (the median
+difference at each lag is subtracted before the error is taken), so what remains
+is timing and residual noise. A perpetual that leads the official tick is a
+candidate for information the Kalshi book may not yet have; it is not evidence
+of a lead over the book, which only the Worker-side comparison can show.
+
 The panel keeps ten minutes of replica values and official 5 Hz BRTI ticks (both
 the source timestamp and the time each tick reached the page) and, every 10 s,
 reports:
