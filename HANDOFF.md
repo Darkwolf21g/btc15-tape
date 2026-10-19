@@ -1,5 +1,17 @@
 # BTC 15 Tape — handoff
 
+## Depth clock offset — October 19, 2026
+
+Analysis of the 18 October research export (525 settled windows), the page record
+(400 windows) and timed session `ab3c0b2f` found the frozen model's Brier worse than
+the Kalshi mid at every checkpoint with a usable sample, with the model's mean
+probability tracking the market mid bucket by bucket: it reconstructs the price
+from the same inputs and has no independent information. Simulated P&L is negative
+at every checkpoint. The replica's tracking panel, not the paper agent, is now the
+test that matters. Separately, the session lost four of eleven attempts to a depth
+gate that treated Kalshi's clock running ahead as staleness; see RESEARCH.md
+"depth-clock-v2". By 30 s before close two thirds of windows have a one-sided book.
+
 ## Unlisted markets — October 18, 2026
 
 Kalshi listed no KXBTC15M markets from 03:15 to 05:00 ET on Thursday 15 October

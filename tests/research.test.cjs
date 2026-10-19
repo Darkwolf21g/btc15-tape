@@ -498,3 +498,31 @@ test('bias coverage counts never-listed windows separately from pending labels',
  const h=harness(),rows=tagged(h,3);rows[0].src='unlisted';rows[0].result=null;rows[1].src=null;
  const r=h.r.biasReport(rows);assert.equal(r.coverage.unlisted,1);assert.equal(r.coverage.pending,1);assert.equal(r.captured,3);
 });
+test('depth freshness corrects for an upstream clock that runs ahead, estimated from earlier frames only',async()=>{
+ const h=harness(),at=h.now(),send=d=>h.obj.onUpstream(JSON.stringify(d));
+ const snap=ts=>send({type:'orderbook_snapshot',sending_ts_ms:ts,msg:{market_ticker:'TEST',yes_dollars_fp:[['0.4000','10.00']],no_dollars_fp:[['0.5000','10.00']]}});
+ const delta=ts=>send({type:'orderbook_delta',msg:{market_ticker:'TEST',side:'yes',price_dollars:'0.4000',delta_fp:'0.10',ts_ms:ts}});
+ // Kalshi's clock 340 ms ahead: the first frames carry no estimate and fail as before (the old behaviour, now only during warm-up).
+ snap(at+340);
+ let d=h.r.depthSnapshot(h.obj.books.TEST,at);assert.equal(d.valid,false);assert.equal(d.clockOffsetMs,null);assert.equal(d.depthPolicy,'depth-clock-v2');
+ for(let i=0;i<7;i++)delta(at+340);
+ d=h.r.depthSnapshot(h.obj.books.TEST,at);assert.equal(d.valid,false,'the estimate excludes the frame being judged');
+ delta(at+340);
+ d=h.r.depthSnapshot(h.obj.books.TEST,at);
+ assert.equal(d.valid,true);assert.equal(d.clockOffsetMs,340);assert.equal(d.sourceAgeMs,-340);assert.equal(d.correctedSourceAgeMs,0);assert.equal(d.clockAheadMs,340);
+ assert.equal(h.obj.status().msg.bookClockOffsetMs,340);
+ // A replayed frame is still stale after correction; a local future receipt still fails.
+ delta(at-5000);assert.equal(h.r.depthSnapshot(h.obj.books.TEST,at).valid,false);
+ assert.match(h.r.depthSnapshot(h.obj.books.TEST,at).reason,/stale or future/);
+ h.obj.books.TEST.sourceAt=at+340;h.obj.books.TEST.at=at+1;assert.equal(h.r.depthSnapshot(h.obj.books.TEST,at).valid,false);
+ // Without an estimate the raw 250 ms tolerance is unchanged.
+ assert.equal(h.r.clockOffsetEstimate([1,2,3]),null);assert.equal(h.r.clockOffsetEstimate([5,1,9,3,7,2,8,4]),4.5);
+});
+test('a wrongly large offset estimate cannot make an old book look fresh',()=>{
+ const h=harness(),at=h.now();
+ const b={...book(at),sourceAt:at-3000,clockOffsetMs:-3000};   // correction would zero the source age...
+ const d=h.r.depthSnapshot({...b,at:at-2000},at);                  // ...but local receipt age still bounds it
+ assert.equal(d.valid,false);
+ assert.equal(h.r.depthSnapshot({...book(at),sourceAt:at+900,clockOffsetMs:800},at).valid,true);
+ assert.equal(h.r.depthSnapshot({...book(at),sourceAt:at+1200,clockOffsetMs:800},at).valid,false);
+});

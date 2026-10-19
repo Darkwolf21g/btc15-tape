@@ -277,8 +277,9 @@ const BIAS_VERSION = 'btc15-bias-v3';
 const LEGACY_SETTLEMENT_CONVENTION = '(close-60s,close]';
 const PRICE_BANDS = [0,10,30,50,70,90,100];
 const CHECKS = [600, 300, 120, 60, 30, 15, 5];
+const DEPTH_POLICY = 'depth-clock-v2';
 const SETTINGS = Object.freeze({delayMs:1000, maxArrivalLateMs:3000, bookMaxAgeMs:1500,
-  indexMaxAgeMs:3000, sourceClockSkewMs:250, depthFraction:0.5, quantity:1, minEdgeCents:3,
+  indexMaxAgeMs:3000, sourceClockSkewMs:250, clockOffsetMinSamples:8, clockOffsetSamples:64, depthFraction:0.5, quantity:1, minEdgeCents:3,
   feeVenue:'kalshi', feeAssumption:'general taker multiplier 1; whole-cent rounding per fill level',
   checkpointToleranceMs:5000, minTrainWindows:60, testWindows:20});
 const finite = v => typeof v === 'number' && Number.isFinite(v);
@@ -287,18 +288,32 @@ const depthWanted = now => {
   const left = (Math.floor(now / 900000) + 1) * 900 - now / 1000;
   return CHECKS.some(c => left <= c + 5 && left > c - 10);
 };
+// Upstream clock offset: the median of (source timestamp - local receipt) over recent book frames,
+// estimated before the frame being judged. Kalshi's clock has run up to ~370 ms ahead of the
+// Worker's; without this correction fresh books were rejected as "future". Network latency makes
+// the estimate conservative (it is offset minus typical latency), so a replayed old frame still
+// shows a large corrected age and is still rejected.
+function clockOffsetEstimate(samples) {
+  if (!Array.isArray(samples) || samples.length < SETTINGS.clockOffsetMinSamples) return null;
+  const s = samples.filter(finite).sort((a, b) => a - b);
+  if (s.length < SETTINGS.clockOffsetMinSamples) return null;
+  return (s[(s.length - 1) >> 1] + s[s.length >> 1]) / 2;
+}
 function depthSnapshot(book, at) {
   if (!book) return null;
   const sourceAt = finite(book.sourceAt) ? book.sourceAt : null;
   const age = at - book.at, sourceAge = sourceAt == null ? null : at - sourceAt;
+  const offset = finite(book.clockOffsetMs) ? book.clockOffsetMs : null;
+  const correctedSourceAge = sourceAge == null ? null : sourceAge + (offset ?? 0);
   const yes = globalThis.BTC15Model.asks(book,'Up').slice(0,10);
   const no = globalThis.BTC15Model.asks(book,'Down').slice(0,10);
   const bid = no.length ? 100-no[0].price : null, ask = yes[0]?.price ?? null;
-  const fresh = age >= 0 && age <= SETTINGS.bookMaxAgeMs && sourceAge != null &&
-    sourceAge >= -SETTINGS.sourceClockSkewMs && sourceAge <= SETTINGS.bookMaxAgeMs;
+  const fresh = age >= 0 && age <= SETTINGS.bookMaxAgeMs && correctedSourceAge != null &&
+    correctedSourceAge >= -SETTINGS.sourceClockSkewMs && correctedSourceAge <= SETTINGS.bookMaxAgeMs;
   const valid = fresh && finite(bid) && finite(ask) && bid <= ask;
-  return {receivedAt:book.at, sourceAt, sourceKind:book.sourceKind || null,
-    ageMs:age, sourceAgeMs:sourceAge, clockAheadMs:sourceAge==null?null:Math.max(0,-sourceAge), valid, bidCents:bid, askCents:ask, yes, no,
+  return {depthPolicy:DEPTH_POLICY, receivedAt:book.at, sourceAt, sourceKind:book.sourceKind || null,
+    ageMs:age, sourceAgeMs:sourceAge, clockOffsetMs:offset, correctedSourceAgeMs:correctedSourceAge,
+    clockAheadMs:sourceAge==null?null:Math.max(0,-sourceAge), valid, bidCents:bid, askCents:ask, yes, no,
     reason:!fresh?'missing, stale or future depth timestamp':!valid?'empty or crossed book':null};
 }
 function snapshot({at, close, target, targetAt, ticks, book, exchange, marketStatus}) {
@@ -487,7 +502,7 @@ function biasReport(recorded) {
       'Repeated windows may be dependent. No confidence, significance or automatic promotion claim.',
       'Fee multiplier 1 and depth haircut are assumptions; missing data and rolling retention may bias results.']};
 }
-globalThis.BTC15Research=Object.freeze({VERSION,BIAS_VERSION,LEGACY_SETTLEMENT_CONVENTION,CHECKS,SETTINGS,currentCohort,depthWanted,depthSnapshot,snapshot,simulate,report,biasReport});
+globalThis.BTC15Research=Object.freeze({DEPTH_POLICY, clockOffsetEstimate, VERSION,BIAS_VERSION,LEGACY_SETTLEMENT_CONVENTION,CHECKS,SETTINGS,currentCohort,depthWanted,depthSnapshot,snapshot,simulate,report,biasReport});
 })();
 // END SHARED BTC15 RESEARCH
 const research = globalThis.BTC15Research;
@@ -703,6 +718,7 @@ export class KalshiFeed {
   status() {
     return {type: "relay", msg: {state: this.upState, since: this.upSince, lastMessage: this.upMsgAt, error: this.lastErr,
                                  clients: this.clients.size, tickers: this.tickerSet, counts: this.counts, hasKey: !!(this.env.KALSHI_KEY_ID && this.env.KALSHI_PRIVATE_KEY),
+                                 bookClockOffsetMs: this.bookClockOffset ? this.bookClockOffset.estimate : null, bookClockSamples: this.bookClockOffset ? this.bookClockOffset.samples.length : 0,
                                  // names only, never values: what the relay can see of its settings
                                  settings: Object.keys(this.env).filter(k => typeof this.env[k] === "string").map(k => k + (this.env[k] ? "" : " (empty)")),
                                  keyLooksLikePem: typeof this.env.KALSHI_PRIVATE_KEY === "string" && /BEGIN .*PRIVATE KEY/.test(this.env.KALSHI_PRIVATE_KEY)}};
@@ -1536,8 +1552,20 @@ export class KalshiFeed {
       }
       if (Number.isFinite(d.seq)){this.bookSequences.set(sid,d.seq);this.bookSequence=d.seq;}
     }
+    if ((d.type === "orderbook_snapshot" || d.type === "orderbook_delta") && d.msg) {
+      // Offset of Kalshi's clock from this Worker's, from frames before the one being judged.
+      const src = Number(d.msg.ts_ms ?? d.sending_ts_ms);
+      this.bookClockOffset = this.bookClockOffset || {samples: [], estimate: null};
+      const estimate = this.bookClockOffset.estimate;
+      if (Number.isFinite(src) && src > 0) {
+        this.bookClockOffset.samples.push(src - Date.now());
+        if (this.bookClockOffset.samples.length > research.SETTINGS.clockOffsetSamples) this.bookClockOffset.samples.shift();
+        this.bookClockOffset.estimate = research.clockOffsetEstimate(this.bookClockOffset.samples);
+      }
+      this.bookClockOffsetBefore = estimate;
+    }
     if (d.type === "orderbook_snapshot" && d.msg && d.msg.market_ticker) {
-      const b = {yes: new Map(), no: new Map(), at: Date.now(), sourceAt:Number(d.sending_ts_ms)||null, sourceKind:'sending_ts_ms'};
+      const b = {yes: new Map(), no: new Map(), at: Date.now(), sourceAt:Number(d.sending_ts_ms)||null, sourceKind:'sending_ts_ms', clockOffsetMs:this.bookClockOffsetBefore ?? null};
       for (const [px, q] of d.msg.yes_dollars_fp || []) if (+q > 0) b.yes.set(+px, +q);
       for (const [px, q] of d.msg.no_dollars_fp || []) if (+q > 0) b.no.set(+px, +q);
       this.books[d.msg.market_ticker] = b;
@@ -1548,6 +1576,7 @@ export class KalshiFeed {
       this.books[d.msg.market_ticker].at = Date.now();
       this.books[d.msg.market_ticker].sourceAt = Number(d.msg.ts_ms??d.sending_ts_ms)||null;
       this.books[d.msg.market_ticker].sourceKind = d.msg.ts_ms!=null?'ts_ms':'sending_ts_ms';
+      this.books[d.msg.market_ticker].clockOffsetMs = this.bookClockOffsetBefore ?? null;
     }
     if (d.type === "cfbenchmarks_value_5hz" && d.msg && d.msg.index_id === "BRTI" && +d.msg.value_usd > 0) this.pushTick(+d.msg.source_ts_ms, +d.msg.value_usd);
     if (d.type === "cfbenchmarks_value" && d.msg) {
