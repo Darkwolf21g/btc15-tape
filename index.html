@@ -2908,7 +2908,7 @@ function replicaText(nowMs = Date.now()) {
   if (w && w.enabled) {
     const fresh = nowMs - w.receivedAt < 30000;
     lines.push(`Worker replica (computed on Cloudflare, next to the Kalshi socket; ${fresh ? "updated " + ((nowMs - w.receivedAt) / 1000).toFixed(0) + " s ago" : "stale, last update " + ((nowMs - w.receivedAt) / 1000).toFixed(0) + " s ago"}):`);
-    lines.push(`  ${Number.isFinite(w.value) ? money(w.value) : "no value: " + (w.reason || "–")} · ${w.usedBooks} of ${w.constituents} books${Number.isFinite(w.diff) ? ` · ${signed(w.diff)} vs official` : ""} · ${w.cpuMsPerTick != null ? w.cpuMsPerTick.toFixed(0) + " ms per tick" : ""}${w.errors ? ` · ${w.errors} errors (${w.lastError})` : ""}`);
+    lines.push(`  ${Number.isFinite(w.value) ? money(w.value) : "no value: " + (w.reason || "–")} · ${w.usedBooks} of ${w.constituents} books${Number.isFinite(w.diff) ? ` · ${signed(w.diff)} vs official` : ""} · ${w.tickGapMs != null ? "tick every " + w.tickGapMs.toFixed(0) + " ms (target 200, worst " + (w.tickGapMaxMs || 0).toFixed(0) + ")" : ""}${w.errors ? ` · ${w.errors} errors (${w.lastError})` : ""}`);
     const t = w.tracking;
     if (t && t.accuracy) lines.push(`  vs official: error mean ${t.accuracy.mae.toFixed(2)} · median ${t.accuracy.median.toFixed(2)} USD · ${t.headStartMs != null ? (t.headStartMs > 0 ? "ahead of" : t.headStartMs < 0 ? "behind" : "level with") + " the Worker's own receipt by " + Math.abs(t.headStartMs) + " ms" : "head start pending"} (${t.accuracy.n} pairs)`);
     else lines.push("  vs official: needs a minute of overlap");
