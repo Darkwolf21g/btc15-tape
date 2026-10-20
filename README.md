@@ -21,7 +21,9 @@ by current behavior, the settlement correction, and the audit handoff.
 
 ## BRTI replica (research)
 
-The tape now recomputes BRTI every 200 ms from the constituent exchanges' public
+The Worker recomputes BRTI itself, next to its Kalshi socket, and scores whether the
+Kalshi book moves after the replica or before it (`GET /replica/status`; `REPLICA=off`
+to disable). The tape also recomputes BRTI every 200 ms from the constituent exchanges' public
 order books using CF Benchmarks' published calculation (methodology v17.0), and
 measures it against Kalshi's official stream: dollar error at the same source time,
 and whether it shows a move before the official tick reaches the page. Open

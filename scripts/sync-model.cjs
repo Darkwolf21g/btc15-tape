@@ -26,13 +26,13 @@ for(const file of ['public/index.html','public/agent.html']) {
  const next=text.slice(0,a)+start+'\n'+fs.readFileSync(path.join(root,'shared-collector-health.js'),'utf8').trimEnd()+'\n'+text.slice(b);
  if(process.argv.includes('--check')) {if(next!==text)throw Error('Stale collector health in '+file);}else fs.writeFileSync(name,next);
 }
-{
- const name=path.join(root,'public/index.html'),text=fs.readFileSync(name,'utf8');
- const start='// BEGIN SHARED BTC15 REPLICA',end='// END SHARED BTC15 REPLICA';
+for(const file of ['public/index.html','worker.js'])for(const [tag,src] of [['REPLICA','shared-brti.js'],['DEPTH','shared-depth.js']]){
+ const name=path.join(root,file),text=fs.readFileSync(name,'utf8');
+ const start='// BEGIN SHARED BTC15 '+tag,end='// END SHARED BTC15 '+tag;
  const a=text.indexOf(start),b=text.indexOf(end);
- if(a<0||b<a)throw Error('Missing replica markers in public/index.html');
- const next=text.slice(0,a)+start+'\n'+fs.readFileSync(path.join(root,'shared-brti.js'),'utf8').trimEnd()+'\n'+text.slice(b);
- if(process.argv.includes('--check')) {if(next!==text)throw Error('Stale replica in public/index.html');}else fs.writeFileSync(name,next);
+ if(a<0||b<a)throw Error('Missing '+tag+' markers in '+file);
+ const next=text.slice(0,a)+start+'\n'+fs.readFileSync(path.join(root,src),'utf8').trimEnd()+'\n'+text.slice(b);
+ if(process.argv.includes('--check')) {if(next!==text)throw Error('Stale '+tag+' in '+file);}else fs.writeFileSync(name,next);
 }
 if(!process.argv.includes('--check'))fs.copyFileSync(path.join(root,'public/index.html'),path.join(root,'index.html'));
 

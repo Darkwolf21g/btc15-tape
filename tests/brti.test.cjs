@@ -301,3 +301,39 @@ test('Binance perp adapter subscribes by message, recognises quotes and trades b
   api.noteLeadMid('binancef', 100.4, 3560100);
   assert.equal(api.leadSeries.binancef.length, 2); assert.equal(api.leadSeries.binancef[1].v, 100.4);
 });
+
+test('lead/lag scorer sees the Kalshi book move after the replica when it does, and before when it does', () => {
+  // Index steps of $12 every 20 s; otherwise a gentle wander. Book mid steps 3c, 700 ms after each index step.
+  const replica = [], mids = [];
+  let level = 60000, mid = 50;
+  for (let t = 0; t < 600000; t += 200) {
+    if (t % 20000 === 0 && t > 0) level += (t % 40000 === 0 ? 12 : -12);
+    replica.push({t, v: level + 0.3 * Math.sin(t / 1300)});
+  }
+  for (let t = 700; t < 600000; t += 20000) { mid += (t % 40000 === 700 ? 3 : -3); mids.push({t, v: mid}); }
+  mids.unshift({t: 0, v: 50});
+  const r = R.leadLag(replica, mids);
+  assert.ok(r.events >= 28 && r.events <= 30, 'about 29 index events');
+  assert.equal(r.before, 0); assert.equal(r.same, 0);
+  assert.equal(r.after, r.events); assert.equal(r.agree, r.events);
+  assert.ok(Math.abs(r.medianDtMs - 700) <= 200);
+  // Book that moves 900 ms BEFORE the index: the scorer must say so.
+  const early = mids.map(x => ({t: Math.max(0, x.t - 1600), v: x.v}));
+  const e = R.leadLag(replica, early);
+  assert.equal(e.after, 0); assert.equal(e.before, e.events);
+  // A book pinned at 99c never counts as reacting.
+  const pinned = mids.map(x => ({t: x.t, v: 99 + (x.v % 2) * 0.5}));
+  assert.equal(R.leadLag(replica, pinned).none, R.leadLag(replica, pinned).events);
+});
+
+test('lead/lag needs enough replica movement to score', () => {
+  assert.equal(R.leadLag([{t: 0, v: 1}, {t: 1000, v: 1}], [{t: 0, v: 50}]).events, 0);
+});
+
+test('kernel-density spacing subsamples very large books and is unchanged below the cap', () => {
+  const sizes = Array.from({length: 3000}, (_, i) => 0.05 + (i % 7) * 0.01);
+  const small = R.kdeMode(sizes);
+  const big = R.kdeMode(sizes.concat(Array.from({length: 30000}, (_, i) => 0.05 + (i % 7) * 0.01)));
+  close(small, big, 0.011, 'the mode survives subsampling');
+  const t0 = Date.now(); R.kdeMode(Array.from({length: 45000}, (_, i) => 0.001 + (i % 1000) * 0.0001)); assert.ok(Date.now() - t0 < 500, 'bounded cost');
+});

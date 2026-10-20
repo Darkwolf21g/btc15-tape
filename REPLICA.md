@@ -83,6 +83,30 @@ A socket silent for 30 s is reconnected.
 
 None of these is assumed small. The tracking lines measure the result.
 
+## Worker-side replica
+
+The same calculation also runs inside the Cloudflare Worker, next to its Kalshi
+socket, whenever the Worker has a Kalshi key (set `REPLICA=off` to disable). The
+Durable Object opens the six constituent sockets itself, recomputes every 200 ms,
+and every 10 s scores the value two ways:
+
+- against the official 5 Hz tick: same-time error and head start versus the
+  Worker's own receipt (`track`);
+- against the Kalshi book by events (`leadLag`): a replica event is a one-second
+  index move of at least three robust standard deviations of recent one-second
+  moves (floor $1); a book event is a mid change of at least 1¢ while the mid is
+  between 10¢ and 90¢. For each index move the nearest book move within 5 s is
+  found and classed as AFTER (book moved more than 150 ms later), BEFORE, same
+  time, or no reaction. AFTER is the count that would indicate information the
+  book did not yet have.
+
+`GET /replica/status` returns the current value, books, both scores and the CPU
+cost per tick; the tape shows the same under **BRTI replica** as "Worker replica".
+The summary is also saved to storage once a minute. The kernel-density spacing
+step subsamples books with more than 4,000 levels (every k-th size after sorting),
+a cost choice the methodology does not address. Egress from Cloudflare may be
+refused by some venues; the books list shows which connected.
+
 ## Tracking
 
 The panel also scores the two perpetuals the tape follows (Binance Futures and
