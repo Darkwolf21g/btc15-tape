@@ -81,6 +81,13 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url), path = url.pathname.replace(/\/+$/, "");
     if (request.method === "OPTIONS") return new Response(null, {headers: {...CORS, "Access-Control-Allow-Headers": "Content-Type"}});
+    // Public, read-only: the Worker replica's research summary. No key material, no account data,
+    // no Kalshi REST calls and nothing is woken by reading it.
+    if (path === "/replica/public") {
+      if (!env.FEED) return new Response("feed not configured", {status: 503, headers: CORS});
+      try { return await env.FEED.get(env.FEED.idFromName("brti")).fetch(request); }
+      catch (e) { return new Response(JSON.stringify({error: "unavailable"}), {status: 503, headers: {...CORS, "Content-Type": "application/json"}}); }
+    }
     if (path === "/feed" || path === "/feed/status" || path === "/record" || path === "/record.csv" || path === "/collector/status" || path === "/trade/status" || path === "/trade/config" || path === "/replica/status" || path.startsWith("/demo/") || path.startsWith("/research/") || path.startsWith("/paper-session/")) {
       if (env.FEED_TOKEN && url.searchParams.get("token") !== env.FEED_TOKEN) return new Response("token", {status: 403, headers: CORS});
       if (!env.FEED) return new Response("feed not configured", {status: 503, headers: CORS});
@@ -842,8 +849,17 @@ function leadLag(replica, mids, opts = {}) {
     const abs = moves.map(x => Math.abs(x.d)).sort((a, b) => a - b), med = abs[(abs.length - 1) >> 1];
     moveUsd = Math.max(1, 3 * 1.4826 * med);
   }
-  const rEvents = []; let lastAt = -Infinity;
-  for (const x of moves) if (Math.abs(x.d) >= moveUsd && x.t - lastAt >= debounce) { rEvents.push({t: x.t, dir: Math.sign(x.d)}); lastAt = x.t; }
+  // The book mid in force at a moment (last change at or before it); an index move while the
+  // mid sits outside [minMid, maxMid] is not an event, since the book has no reason to react.
+  const midAt = t => { let lo = 0, hi = m.length - 1, hit = -1; while (lo <= hi) { const k = (lo + hi) >> 1; if (m[k].t <= t) { hit = k; lo = k + 1; } else hi = k - 1; } return hit >= 0 ? m[hit].v : null; };
+  const rEvents = []; let lastAt = -Infinity, pinned = 0;
+  for (const x of moves) {
+    if (!(Math.abs(x.d) >= moveUsd && x.t - lastAt >= debounce)) continue;
+    lastAt = x.t;
+    const mid = midAt(x.t);
+    if (mid == null || mid < minMid || mid > maxMid) { pinned++; continue; }
+    rEvents.push({t: x.t, dir: Math.sign(x.d)});
+  }
   const mEvents = []; let prev = null; lastAt = -Infinity;
   for (const x of m) {
     if (prev && Math.abs(x.v - prev.v) >= midCents && x.v >= minMid && x.v <= maxMid && prev.v >= minMid && prev.v <= maxMid && x.t - lastAt >= 1000) { mEvents.push({t: x.t, dir: Math.sign(x.v - prev.v)}); lastAt = x.t; }
@@ -859,7 +875,7 @@ function leadLag(replica, mids, opts = {}) {
     if (best.dir === e.dir) agree++;
   }
   dts.sort((a, b) => a - b);
-  return {events: rEvents.length, bookEvents: mEvents.length, after, before, same, none, agree, moveUsd,
+  return {events: rEvents.length, bookEvents: mEvents.length, after, before, same, none, agree, moveUsd, pinned,
           medianDtMs: dts.length ? dts[(dts.length - 1) >> 1] : null, reacted: rEvents.length - none};
 }
 
@@ -1140,6 +1156,11 @@ export class KalshiFeed {
     if (url.pathname === "/watchdog") { await this.ensureAlarm(); return new Response("ok"); }
     if (url.pathname === "/feed/status") { await this.ensureAlarm(); return new Response(JSON.stringify(this.status().msg), {headers: {...CORS, "Content-Type": "application/json"}}); }
     if (url.pathname === "/replica/status") { await this.ensureAlarm(); this.ensureReplica(); return new Response(JSON.stringify(this.replicaStatus()), {headers: {...CORS, "Content-Type": "application/json"}}); }
+    if (url.pathname === "/replica/public") {
+      const live = this.replica ? this.replicaStatus() : (await this.state.storage.get("replica.summary")) || {enabled: false, reason: "not running"};
+      const history = (await this.state.storage.get("replica.history")) || [];
+      return new Response(JSON.stringify({live, history, note: "Research summary of the Worker-side BRTI replica. Nothing here trades."}), {headers: {...CORS, "Content-Type": "application/json", "Cache-Control": "public, max-age=5"}});
+    }
     if (url.pathname === "/trade/status") {
       const cfg = await this.tradeConfig(), log = await this.tradeLog(), day = (await this.state.storage.get("trade.day")) || null;
       const all = await this.state.storage.list({prefix: "t:"}), windows = [...all.values()].sort((a, b) => a.close - b.close).slice(-60);
@@ -1870,10 +1891,22 @@ export class KalshiFeed {
         r.lead = R.leadLag(r.hist, r.mids);
         r.gapMax = 0;                                                       // the maximum is per scoring period
         this.broadcast(JSON.stringify({type: "replica", msg: this.replicaStatus()}));
-        if (r.ticks % 300 === 0) this.state.waitUntil(this.state.storage.put("replica.summary", this.replicaStatus()).catch(() => {}));
+        // Every ten minutes: one history row, kept for 48 hours, so days accumulate without anyone watching.
+        if (now - (r.historyAt || 0) >= 600000) { r.historyAt = now; this.state.waitUntil(this.appendReplicaHistory().catch(() => {})); }
       }
     } catch (e) { r.errors++; r.lastError = String(e.message || e).slice(0, 120); }
     this.replicaTimer = setTimeout(() => this.replicaLoop(), REPLICA_MS);
+  }
+  async appendReplicaHistory() {
+    const s = this.replicaStatus(), t = s.tracking, l = s.lead;
+    const row = {at: s.now, value: s.value, diff: s.diff, usedBooks: s.usedBooks, tickGapMs: s.tickGapMs, tickGapMaxMs: s.tickGapMaxMs,
+                 errMean: t && t.accuracy ? t.accuracy.mae : null, errMedian: t && t.accuracy ? t.accuracy.median : null, pairs: t && t.accuracy ? t.accuracy.n : 0, headStartMs: t ? t.headStartMs : null,
+                 events: l ? l.events || 0 : 0, after: l ? l.after || 0 : 0, before: l ? l.before || 0 : 0, same: l ? l.same || 0 : 0, none: l ? l.none || 0 : 0, agree: l ? l.agree || 0 : 0, pinned: l ? l.pinned || 0 : 0, moveUsd: l ? l.moveUsd || null : null, medianDtMs: l ? l.medianDtMs : null,
+                 books: Object.fromEntries(Object.entries(s.books).map(([k, b]) => [k, b.used ? "used" : b.excluded || b.state]))};
+    const history = ((await this.state.storage.get("replica.history")) || []).filter(h => s.now - h.at < 48 * 3600000);
+    history.push(row);
+    await this.state.storage.put("replica.history", history);
+    await this.state.storage.put("replica.summary", s);
   }
   replicaStatus() {
     const r = this.replica, D = globalThis.BTC15Depth;

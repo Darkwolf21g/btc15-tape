@@ -97,11 +97,14 @@ and every 10 s scores the value two ways:
   moves (floor $1); a book event is a mid change of at least 1¢ while the mid is
   between 10¢ and 90¢. For each index move the nearest book move within 5 s is
   found and classed as AFTER (book moved more than 150 ms later), BEFORE, same
-  time, or no reaction. AFTER is the count that would indicate information the
+  time, or no reaction. Index moves while the mid sits outside 10–90¢ are
+  counted as `pinned` and not asked to react. AFTER is the count that would indicate information the
   book did not yet have.
 
-`GET /replica/status` returns the current value, books, both scores and the CPU
-cost per tick; the tape shows the same under **BRTI replica** as "Worker replica".
+`GET /replica/public` (no token) returns the live summary plus one row per ten
+minutes for the last 48 hours, so days accumulate without a viewer; it wakes
+nothing and makes no Kalshi request. `GET /replica/status` (token) returns the
+live view and starts the replica if needed. Both report the gap between ticks; the tape shows the same under **BRTI replica** as "Worker replica".
 The summary is also saved to storage once a minute. The kernel-density spacing
 step subsamples books with more than 4,000 levels (every k-th size after sorting),
 a cost choice the methodology does not address. Egress from Cloudflare may be

@@ -558,3 +558,19 @@ test('Worker replica: books from the shared adapters, Kalshi mid series, scoring
  // Disabled by configuration: no state, status says so.
  const off=harness();off.obj.env.REPLICA='off';off.obj.ensureReplica();assert.equal(off.obj.replica,undefined);assert.equal(off.obj.replicaStatus().enabled,false);
 });
+test('Worker replica keeps a ten-minute history for two days and serves it publicly without waking anything',async()=>{
+ const h=harness(),at=h.now();
+ h.context.fetch=async()=>{throw Error('no network');};h.context.setTimeout=()=>1;
+ h.obj.ensureReplica();h.obj.replicaLoop();
+ await h.obj.appendReplicaHistory();
+ let rows=h.data.get('replica.history');assert.equal(rows.length,1);assert.equal(rows[0].at,at);assert.equal(rows[0].usedBooks,0);
+ h.data.set('replica.history',[{at:at-49*3600000,usedBooks:3},...rows]);
+ h.setTime(at+600000);h.obj.replicaLoop();await h.obj.appendReplicaHistory();
+ rows=h.data.get('replica.history');assert.equal(rows.length,2,'rows older than 48 h are dropped');assert.equal(rows[1].at,at+600000);
+ let woke=0;h.obj.ensureAlarm=async()=>{woke++;};
+ const r=await h.obj.fetch(new h.context.Request('https://x/replica/public'));
+ const body=await r.json();assert.equal(r.status,200);assert.equal(body.live.enabled,true);assert.equal(body.history.length,2);assert.equal(woke,0);
+ assert.ok(!JSON.stringify(body).includes('fixture'),'no key material in the public body');
+ const cold=harness();const c=await cold.obj.fetch(new cold.context.Request('https://x/replica/public'));
+ assert.equal((await c.json()).live.enabled,false,'before the replica runs, the public view says so');
+});

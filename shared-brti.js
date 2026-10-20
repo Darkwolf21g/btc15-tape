@@ -228,8 +228,17 @@ function leadLag(replica, mids, opts = {}) {
     const abs = moves.map(x => Math.abs(x.d)).sort((a, b) => a - b), med = abs[(abs.length - 1) >> 1];
     moveUsd = Math.max(1, 3 * 1.4826 * med);
   }
-  const rEvents = []; let lastAt = -Infinity;
-  for (const x of moves) if (Math.abs(x.d) >= moveUsd && x.t - lastAt >= debounce) { rEvents.push({t: x.t, dir: Math.sign(x.d)}); lastAt = x.t; }
+  // The book mid in force at a moment (last change at or before it); an index move while the
+  // mid sits outside [minMid, maxMid] is not an event, since the book has no reason to react.
+  const midAt = t => { let lo = 0, hi = m.length - 1, hit = -1; while (lo <= hi) { const k = (lo + hi) >> 1; if (m[k].t <= t) { hit = k; lo = k + 1; } else hi = k - 1; } return hit >= 0 ? m[hit].v : null; };
+  const rEvents = []; let lastAt = -Infinity, pinned = 0;
+  for (const x of moves) {
+    if (!(Math.abs(x.d) >= moveUsd && x.t - lastAt >= debounce)) continue;
+    lastAt = x.t;
+    const mid = midAt(x.t);
+    if (mid == null || mid < minMid || mid > maxMid) { pinned++; continue; }
+    rEvents.push({t: x.t, dir: Math.sign(x.d)});
+  }
   const mEvents = []; let prev = null; lastAt = -Infinity;
   for (const x of m) {
     if (prev && Math.abs(x.v - prev.v) >= midCents && x.v >= minMid && x.v <= maxMid && prev.v >= minMid && prev.v <= maxMid && x.t - lastAt >= 1000) { mEvents.push({t: x.t, dir: Math.sign(x.v - prev.v)}); lastAt = x.t; }
@@ -245,7 +254,7 @@ function leadLag(replica, mids, opts = {}) {
     if (best.dir === e.dir) agree++;
   }
   dts.sort((a, b) => a - b);
-  return {events: rEvents.length, bookEvents: mEvents.length, after, before, same, none, agree, moveUsd,
+  return {events: rEvents.length, bookEvents: mEvents.length, after, before, same, none, agree, moveUsd, pinned,
           medianDtMs: dts.length ? dts[(dts.length - 1) >> 1] : null, reacted: rEvents.length - none};
 }
 
