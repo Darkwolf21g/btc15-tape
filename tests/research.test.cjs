@@ -551,7 +551,8 @@ test('Worker replica: books from the shared adapters, Kalshi mid series, scoring
  assert.equal(s.enabled,true);assert.equal(s.version,R.VERSION);assert.equal(s.usedBooks,2);
  assert.ok(Math.abs(s.value-100)<0.2,'two tight books around 100');assert.ok(Math.abs(s.diff-(s.value-100.02))<1e-9);
  assert.equal(s.books.Coinbase.used,true);assert.equal(s.books.Bitstamp.used,true);assert.ok(['off','connecting'].includes(s.books.Kraken.state));
- assert.equal(s.ticks,1);assert.ok(s.cpuMsPerTick>=0);assert.equal(s.errors,0);
+ assert.equal(s.ticks,1);assert.equal(s.tickGapMs,null,'one tick has no gap yet');assert.equal(s.errors,0);
+ h.setTime(at+200);h.obj.replicaLoop();assert.equal(h.obj.replicaStatus().tickGapMs,200);
  assert.ok(s.lead&&s.lead.events===0,'too little history to score lead/lag yet');
  assert.equal(s.midsKept,2);assert.equal(s.officialKept,1);
  // Disabled by configuration: no state, status says so.

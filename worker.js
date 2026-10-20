@@ -1793,7 +1793,7 @@ export class KalshiFeed {
   // (does the book move after the replica or before it). Research only; nothing trades on it.
   ensureReplica() {
     if (this.env.REPLICA === "off" || !(this.env.KALSHI_KEY_ID && this.env.KALSHI_PRIVATE_KEY)) return;
-    if (!this.replica) this.replica = {books: {}, hist: [], official: [], mids: [], last: null, state: {excluded: {}}, tracking: null, lead: null, scoredAt: 0, startedAt: Date.now(), ticks: 0, cpuMs: 0, cpuN: 0, errors: 0, lastError: null};
+    if (!this.replica) this.replica = {books: {}, hist: [], official: [], mids: [], last: null, state: {excluded: {}}, tracking: null, lead: null, scoredAt: 0, startedAt: Date.now(), ticks: 0, gapMs: 0, gapN: 0, gapMax: 0, lastTickAt: 0, errors: 0, lastError: null};
     for (const key of Object.keys(globalThis.BTC15Depth.DEPTH_VENUES)) this.connectDepth(key);
     if (!this.replicaTimer) this.replicaTimer = setTimeout(() => this.replicaLoop(), REPLICA_MS);
   }
@@ -1848,10 +1848,12 @@ export class KalshiFeed {
     if (!this.replica) return;
     const R = globalThis.BTC15Replica, D = globalThis.BTC15Depth, r = this.replica, now = Date.now();
     try {
-      const t0 = Date.now();
+      // Workers freeze the clock inside one execution, so the calculation cannot be timed directly.
+      // The gap between ticks can: 200 ms means the loop keeps up; longer means it is overloaded.
+      if (r.lastTickAt) { r.gapMs += now - r.lastTickAt; r.gapN++; if (now - r.lastTickAt > r.gapMax) r.gapMax = now - r.lastTickAt; }
+      r.lastTickAt = now;
       const out = R.calculate(D.replicaBooksFrom(r.books), now, r.state);
       r.state = out.state; r.last = {...out, t: now}; r.ticks++;
-      r.cpuMs += Date.now() - t0; r.cpuN++;
       if (Number.isFinite(out.value)) r.hist.push({t: now, v: out.value});
       const cut = now - REPLICA_KEEP_MS;
       while (r.hist.length && r.hist[0].t < cut) r.hist.shift();
@@ -1866,6 +1868,7 @@ export class KalshiFeed {
         r.scoredAt = now;
         r.tracking = R.track(r.hist, r.official);
         r.lead = R.leadLag(r.hist, r.mids);
+        r.gapMax = 0;                                                       // the maximum is per scoring period
         this.broadcast(JSON.stringify({type: "replica", msg: this.replicaStatus()}));
         if (r.ticks % 300 === 0) this.state.waitUntil(this.state.storage.put("replica.summary", this.replicaStatus()).catch(() => {}));
       }
@@ -1884,7 +1887,7 @@ export class KalshiFeed {
     return {enabled: true, version: globalThis.BTC15Replica.VERSION, at: r.last ? r.last.t : null, value: r.last ? r.last.value : null, reason: r.last ? r.last.reason || null : null,
             official: o ? {v: o.v, t: o.t, at: o.at} : null, diff: r.last && o && Number.isFinite(r.last.value) ? r.last.value - o.v : null,
             usedBooks: r.last ? r.last.used.length : 0, constituents: D.CONSTITUENTS.length, books, depthLimited: r.last ? !!r.last.depthLimited : null,
-            tracking: r.tracking, lead: r.lead, ticks: r.ticks, cpuMsPerTick: r.cpuN ? r.cpuMs / r.cpuN : null, since: r.startedAt,
+            tracking: r.tracking, lead: r.lead, ticks: r.ticks, tickGapMs: r.gapN ? r.gapMs / r.gapN : null, tickGapMaxMs: r.gapMax || null, since: r.startedAt,
             officialKept: r.official.length, midsKept: r.mids.length, errors: r.errors, lastError: r.lastError, now: Date.now()};
   }
   pushTick(ms, v) {
