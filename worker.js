@@ -15,6 +15,7 @@
 
 const UPSTREAMS = ["https://external-api.kalshi.com/trade-api/v2", "https://api.elections.kalshi.com/trade-api/v2"];
 const WS_UPSTREAM = "https://external-api-ws.kalshi.com/trade-api/ws/v2";   // https + Upgrade header: Workers do not take wss:// in fetch
+const REPLICA_MS = 200, REPLICA_KEEP_MS = 10 * 60 * 1000;                    // Worker-side BRTI replica cadence and scoring window
 const ALLOWED = [/^\/markets\/KXBTC15M-[A-Z0-9-]+$/, /^\/live_data\/events\/KXBTC15M-[A-Z0-9]+$/, /^\/exchange\/status$/];
 const CORS = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Cache-Control": "no-store"};
 const WINDOW = 900;
@@ -80,7 +81,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url), path = url.pathname.replace(/\/+$/, "");
     if (request.method === "OPTIONS") return new Response(null, {headers: {...CORS, "Access-Control-Allow-Headers": "Content-Type"}});
-    if (path === "/feed" || path === "/feed/status" || path === "/record" || path === "/record.csv" || path === "/collector/status" || path === "/trade/status" || path === "/trade/config" || path.startsWith("/demo/") || path.startsWith("/research/") || path.startsWith("/paper-session/")) {
+    if (path === "/feed" || path === "/feed/status" || path === "/record" || path === "/record.csv" || path === "/collector/status" || path === "/trade/status" || path === "/trade/config" || path === "/replica/status" || path.startsWith("/demo/") || path.startsWith("/research/") || path.startsWith("/paper-session/")) {
       if (env.FEED_TOKEN && url.searchParams.get("token") !== env.FEED_TOKEN) return new Response("token", {status: 403, headers: CORS});
       if (!env.FEED) return new Response("feed not configured", {status: 503, headers: CORS});
       try { return await env.FEED.get(env.FEED.idFromName("brti")).fetch(request); }
@@ -610,6 +611,402 @@ function due(s,now){if(!s)return Infinity;if(!active(s,now))return s.stoppedAt==
 globalThis.BTC15Session={VERSION,SETTINGS,create,compatible,reconcile,active,clock,stop,decide,arrive,settle,report,due};
 })();
 // END SHARED BTC15 SESSION
+// BEGIN SHARED BTC15 REPLICA
+// Canonical BRTI replica. scripts/sync-model.cjs embeds this exact source in the tape page.
+// Re-implements the published CME CF Real Time Indices calculation (methodology v17.0,
+// 21 Sep 2026) from the constituent order books the page can see. It is research context:
+// it never replaces the official index, never settles anything and is not used by the
+// frozen probability model. Deviations from the official calculation are listed in REPLICA.md.
+// v2 corrects D from 5% to the published 0.5%; v1 integrated hundreds of BTC deep and ran $30-40 off.
+(() => {
+const VERSION = "brti-replica-v2";
+const METHODOLOGY = "CME CF RTI methodology v17.0";
+// BTC-USD parameters (methodology sections 6.1-6.2).
+const PARAMS = Object.freeze({
+  deviation: 0.005,     // D: utilized depth stops where the ask curve is more than 0.5% above the mid curve
+  erroneous: 0.05,      // a book whose mid is >5% from the median mid is excluded
+  reinstate: 0.025,     // ...and readmitted only once back within half that
+  lagMs: 10000,         // a book retrieved more than 10 s before the calculation is excluded
+  tau: 100,             // level-based spacing: smaller side's liquidity / 100
+  lambdaFrac: 0.3,      // lambda = 1 / (0.3 * utilized depth)
+  capSd: 5,             // order size cap = trimmed mean + 5 winsorized standard deviations
+  capLevels: 50, capBand: 0.05, winsor: 0.01,
+  effectiveMs: 200,
+});
+
+// Aggregate one side by price, dropping non-numeric or non-positive entries.
+function side(raw, bids) {
+  const byPrice = new Map();
+  for (const level of raw || []) {
+    const p = +level[0], s = +level[1];
+    if (!(Number.isFinite(p) && p > 0 && Number.isFinite(s) && s > 0)) continue;
+    byPrice.set(p, (byPrice.get(p) || 0) + s);
+  }
+  return [...byPrice].sort(bids ? (a, b) => b[0] - a[0] : (a, b) => a[0] - b[0]);
+}
+// One exchange's relevant order book, or the reason it is excluded (methodology section 5).
+function cleanBook(book) {
+  if (!book || !Array.isArray(book.bids) || !Array.isArray(book.asks)) return {error: "unparseable"};
+  const bids = side(book.bids, true), asks = side(book.asks, false);
+  if (!bids.length || !asks.length) return {error: "one-sided"};
+  if (bids[0][0] >= asks[0][0]) return {error: "crossed"};
+  return {bids, asks, mid: (bids[0][0] + asks[0][0]) / 2};
+}
+function merge(books, bids) {
+  const byPrice = new Map();
+  for (const b of books) for (const [p, s] of bids ? b.bids : b.asks) byPrice.set(p, (byPrice.get(p) || 0) + s);
+  return [...byPrice].sort(bids ? (a, b) => b[0] - a[0] : (a, b) => a[0] - b[0]);
+}
+function winsorized(sorted) {          // sorted ascending; k = floor(1% of n) each tail
+  const n = sorted.length, k = Math.floor(PARAMS.winsor * n);
+  const lo = sorted[k], hi = sorted[n - 1 - k];
+  return {k, values: sorted.map(x => Math.min(hi, Math.max(lo, x)))};
+}
+const mean = xs => xs.reduce((a, b) => a + b, 0) / xs.length;
+function sd(xs) {
+  if (xs.length < 2) return 0;
+  const m = mean(xs);
+  return Math.sqrt(xs.reduce((a, x) => a + (x - m) ** 2, 0) / (xs.length - 1));
+}
+// Dynamic order size cap from the uncapped consolidated book (section 4.1.3).
+function sizeCap(bids, asks) {
+  const take = (levels, inBand) => levels.slice(0, Math.max(levels.filter(inBand).length, Math.min(levels.length, PARAMS.capLevels)));
+  const a = take(asks, ([p]) => p <= asks[0][0] * (1 + PARAMS.capBand));
+  const b = take(bids, ([p]) => p >= bids[0][0] * (1 - PARAMS.capBand));
+  const sizes = a.concat(b).map(([, s]) => s).sort((x, y) => x - y);
+  const {k, values} = winsorized(sizes);
+  const trimmed = sizes.slice(k, sizes.length - k);
+  return mean(trimmed) + PARAMS.capSd * sd(values);
+}
+// Remove the lesser top size from both sides while the consolidated book is crossed (v16.8+).
+function uncross(bids, asks) {
+  bids = bids.map(l => l.slice()); asks = asks.map(l => l.slice());
+  let i = 0, j = 0;
+  while (i < bids.length && j < asks.length && bids[i][0] >= asks[j][0]) {
+    const m = Math.min(bids[i][1], asks[j][1]);
+    bids[i][1] -= m; asks[j][1] -= m;
+    if (bids[i][1] <= 1e-12) i++;
+    if (asks[j][1] <= 1e-12) j++;
+  }
+  return {bids: bids.slice(i), asks: asks.slice(j)};
+}
+// Mode of a Gaussian kernel density over winsorized sizes, evaluated at the sample values.
+// The methodology does not state the search grid; evaluating at the samples is this replica's choice.
+// Books with tens of thousands of levels are subsampled (every k-th size after sorting) to keep
+// a 200 ms tick cheap; up to KDE_MAX_SAMPLES every size is used. A replica choice, not CF's.
+const KDE_MAX_SAMPLES = 4000;
+function kdeMode(sizes) {
+  let sorted = sizes.slice().sort((x, y) => x - y);
+  if (sorted.length > KDE_MAX_SAMPLES) { const k = Math.ceil(sorted.length / KDE_MAX_SAMPLES); sorted = sorted.filter((_, i) => i % k === 0); }
+  const n = sorted.length;
+  if (n < 4) return sorted[0];
+  const {values} = winsorized(sorted), sigma = sd(values);
+  if (!(sigma > 0)) return values[0];
+  const h = 1.06 * sigma * Math.pow(n, -0.2), reach = 6 * h;
+  let best = values[0], bestD = -1, lo = 0, hi = 0, prev = NaN;
+  for (const x of values) {
+    if (x === prev) continue; prev = x;
+    while (values[lo] < x - reach) lo++;
+    while (hi < n && values[hi] <= x + reach) hi++;
+    let d = 0;
+    for (let i = lo; i < hi; i++) d += Math.exp(-0.5 * ((x - values[i]) / h) ** 2);
+    if (d > bestD) { bestD = d; best = x; }
+  }
+  return best;
+}
+const total = levels => levels.reduce((a, [, s]) => a + s, 0);
+function spacing(bids, asks) {
+  const tb = total(bids), ta = total(asks);
+  const lev = Math.min(ta, tb) / PARAMS.tau;
+  const kde = kdeMode((tb < ta ? bids : asks).map(([, s]) => s));
+  return Math.min(lev, kde);
+}
+// Marginal price at cumulative volume v for each grid point s, 2s, ... while both sides last.
+function curve(levels, s, maxN) {
+  const out = []; let cum = 0, j = 0;
+  for (let i = 1; i <= maxN; i++) {
+    const v = i * s;
+    while (j < levels.length && cum + levels[j][1] < v - 1e-9 * v) { cum += levels[j][1]; j++; }
+    if (j >= levels.length) break;
+    out.push(levels[j][0]);
+  }
+  return out;
+}
+
+// state: {excluded: {exchange: true}} carried between calls for the erroneous-data hysteresis.
+function calculate(books, nowMs, state = {excluded: {}}) {
+  const used = [], excluded = {}, valid = [];
+  for (const [name, book] of Object.entries(books || {})) {
+    if (!book || !Number.isFinite(book.at)) { excluded[name] = "no book"; continue; }
+    if (nowMs - book.at > PARAMS.lagMs) { excluded[name] = "delayed"; continue; }
+    const c = cleanBook(book);
+    if (c.error) { excluded[name] = c.error; continue; }
+    valid.push([name, c]);
+  }
+  const mids = valid.map(([, c]) => c.mid).sort((a, b) => a - b);
+  const median = mids.length ? (mids[(mids.length - 1) >> 1] + mids[mids.length >> 1]) / 2 : null;
+  const nextState = {excluded: {}};
+  const kept = [];
+  for (const [name, c] of valid) {
+    const dev = Math.abs(c.mid / median - 1);
+    const limit = state.excluded && state.excluded[name] ? PARAMS.reinstate : PARAMS.erroneous;
+    if (dev > limit) { excluded[name] = "potentially erroneous"; nextState.excluded[name] = true; continue; }
+    kept.push(c); used.push(name);
+  }
+  const fail = reason => ({value: null, reason, used, excluded, state: nextState, version: VERSION});
+  if (!kept.length) return fail("no usable books");
+  let bids = merge(kept, true), asks = merge(kept, false);
+  const cap = sizeCap(bids, asks);
+  bids = bids.map(([p, s]) => [p, Math.min(s, cap)]);
+  asks = asks.map(([p, s]) => [p, Math.min(s, cap)]);
+  ({bids, asks} = uncross(bids, asks));
+  if (!bids.length || !asks.length) return fail("book exhausted by uncrossing");
+  const s = spacing(bids, asks);
+  if (!(s > 0)) return fail("no spacing");
+  const maxN = Math.floor(Math.min(total(bids), total(asks)) / s + 1e-9);
+  const ask = curve(asks, s, maxN), bid = curve(bids, s, maxN), n = Math.min(ask.length, bid.length);
+  if (!n) return fail("no curve");
+  let last = 0;                                   // index of the last grid point within D
+  for (let i = 0; i < n; i++) {
+    const mid = (ask[i] + bid[i]) / 2;
+    if (ask[i] / mid - 1 <= PARAMS.deviation) last = i; else break;
+  }
+  const depthLimited = last === n - 1;            // the visible books ran out before the 0.5% band did
+  const vT = (last + 1) * s, lambda = 1 / (PARAMS.lambdaFrac * vT);
+  let sum = 0, wsum = 0;
+  for (let i = 0; i <= last; i++) {
+    const w = Math.exp(-lambda * (i + 1) * s);
+    sum += w * (ask[i] + bid[i]) / 2; wsum += w;
+  }
+  const value = sum / wsum;
+  return {value, rounded: Math.round(value * 100) / 100, vT, spacing: s, cap, lambda, points: last + 1,
+          depthLimited, used, excluded, state: nextState, version: VERSION};
+}
+
+// Tracking against the official index. Replica values are stamped with local compute time;
+// official ticks carry both their source timestamp and local receipt time.
+function track(replica, official, opts = {}) {
+  const lags = opts.lags || Array.from({length: 31}, (_, i) => (i - 10) * 200);   // -2 s .. +4 s
+  const maxGap = opts.maxGapMs || 1500;
+  // Official value in force at a moment on the chosen clock (last tick at or before it).
+  const at = (series, key, t) => {
+    let lo = 0, hi = series.length - 1, hit = -1;
+    while (lo <= hi) { const m = (lo + hi) >> 1; if (series[m][key] <= t) { hit = m; lo = m + 1; } else hi = m - 1; }
+    return hit >= 0 && t - series[hit][key] <= maxGap ? series[hit].v : null;
+  };
+  const score = key => {
+    const series = official.filter(o => Number.isFinite(o[key]) && Number.isFinite(o.v)).sort((a, b) => a[key] - b[key]);
+    let best = null; const curveOut = [];
+    for (const lag of lags) {
+      let errs = [];
+      for (const r of replica) { const o = at(series, key, r.t + lag); if (o != null && Number.isFinite(r.v)) errs.push(r.v - o); }
+      if (errs.length < (opts.minPairs || 20)) { curveOut.push({lag, n: errs.length, mae: null}); continue; }
+      if (opts.demean) {            // a series with a level offset (a perpetual's basis): score around its median difference
+        const sorted = errs.slice().sort((a, b) => a - b), med = sorted[(sorted.length - 1) >> 1];
+        errs = errs.map(e => e - med);
+      }
+      errs = errs.map(Math.abs).sort((a, b) => a - b);
+      const mae = mean(errs), med = errs[(errs.length - 1) >> 1];
+      curveOut.push({lag, n: errs.length, mae, median: med});
+      if (!best || mae < best.mae) best = {lag, n: errs.length, mae, median: med};
+    }
+    return {best, curve: curveOut};
+  };
+  // Same-instant error against the source timestamp (accuracy), and the shift against
+  // receipt time that best aligns the two (positive = the replica moves first).
+  const source = score("t"), receipt = score("at");
+  const zero = source.curve.find(c => c.lag === 0);
+  return {accuracy: zero && zero.mae != null ? zero : null, sourceBest: source.best, headStartMs: receipt.best ? receipt.best.lag : null,
+          receiptBest: receipt.best, receiptCurve: receipt.curve};
+}
+
+// Does the Kalshi book move after the replica, or before it? Event-based: a replica event is a
+// one-second index move of at least `moveUsd` (default: three robust standard deviations of
+// one-second moves in the window); a book event is a mid change of at least `midCents` while the
+// mid is between `minMid` and `maxMid` (far from the strike the book has no reason to move).
+// For each replica event the nearest book event within `windowMs` is found and dt = book - replica.
+function leadLag(replica, mids, opts = {}) {
+  const windowMs = opts.windowMs || 5000, dead = opts.deadbandMs || 150, midCents = opts.midCents || 1;
+  const minMid = opts.minMid ?? 10, maxMid = opts.maxMid ?? 90, debounce = opts.debounceMs || 2000;
+  const r = replica.filter(x => Number.isFinite(x.v)).sort((a, b) => a.t - b.t);
+  const m = mids.filter(x => Number.isFinite(x.v)).sort((a, b) => a.t - b.t);
+  // One-second moves of the replica.
+  const moves = []; let j = 0;
+  for (let i = 0; i < r.length; i++) {
+    while (j < i && r[i].t - r[j + 1].t >= 1000) j++;
+    if (r[i].t - r[j].t >= 800 && r[i].t - r[j].t <= 1500) moves.push({t: r[i].t, d: r[i].v - r[j].v});
+  }
+  if (moves.length < 20) return {events: 0, reason: "too few replica moves", moveUsd: null};
+  let moveUsd = opts.moveUsd;
+  if (!(moveUsd > 0)) {
+    const abs = moves.map(x => Math.abs(x.d)).sort((a, b) => a - b), med = abs[(abs.length - 1) >> 1];
+    moveUsd = Math.max(1, 3 * 1.4826 * med);
+  }
+  const rEvents = []; let lastAt = -Infinity;
+  for (const x of moves) if (Math.abs(x.d) >= moveUsd && x.t - lastAt >= debounce) { rEvents.push({t: x.t, dir: Math.sign(x.d)}); lastAt = x.t; }
+  const mEvents = []; let prev = null; lastAt = -Infinity;
+  for (const x of m) {
+    if (prev && Math.abs(x.v - prev.v) >= midCents && x.v >= minMid && x.v <= maxMid && prev.v >= minMid && prev.v <= maxMid && x.t - lastAt >= 1000) { mEvents.push({t: x.t, dir: Math.sign(x.v - prev.v)}); lastAt = x.t; }
+    prev = x;
+  }
+  let after = 0, before = 0, same = 0, none = 0, agree = 0; const dts = [];
+  for (const e of rEvents) {
+    let best = null;
+    for (const k of mEvents) { const dt = k.t - e.t; if (Math.abs(dt) <= windowMs && (!best || Math.abs(dt) < Math.abs(best.dt))) best = {dt, dir: k.dir}; }
+    if (!best) { none++; continue; }
+    dts.push(best.dt);
+    if (best.dt > dead) after++; else if (best.dt < -dead) before++; else same++;
+    if (best.dir === e.dir) agree++;
+  }
+  dts.sort((a, b) => a - b);
+  return {events: rEvents.length, bookEvents: mEvents.length, after, before, same, none, agree, moveUsd,
+          medianDtMs: dts.length ? dts[(dts.length - 1) >> 1] : null, reacted: rEvents.length - none};
+}
+
+globalThis.BTC15Replica = Object.freeze({VERSION, METHODOLOGY, PARAMS, cleanBook, sizeCap, uncross, kdeMode, spacing, curve, calculate, track, leadLag});
+})();
+// END SHARED BTC15 REPLICA
+// BEGIN SHARED BTC15 DEPTH
+// Canonical order-book adapters for the BRTI replica. scripts/sync-model.cjs embeds this exact
+// source in the tape page and in the Worker. Each adapter keeps one constituent exchange's book
+// current through a book object with snapshot/set/touch/reset; the host owns the socket.
+(() => {
+const REPLICA_BAND = 0.15;   // levels further than this from an exchange's own touch are ignored
+const CONSTITUENTS = ["Bitstamp", "Coinbase", "Kraken", "Gemini", "Bullish", "Crypto.com", "LMAX Digital"];
+const DEPTH_VENUES = {
+  // Coinbase Exchange: level2_batch is the full book without authentication (50 ms batches).
+  // No sequence numbers on this channel; the heartbeat channel proves the connection is current.
+  coinbase: {name: "Coinbase", url: "wss://ws-feed.exchange.coinbase.com",
+    open: ws => ws.send(JSON.stringify({type: "subscribe", product_ids: ["BTC-USD"], channels: ["level2_batch", "heartbeat"]})),
+    msg: (d, book) => {
+      if (d.type === "snapshot" && d.product_id === "BTC-USD") book.snapshot(d.bids || [], d.asks || []);
+      else if (d.type === "l2update" && d.product_id === "BTC-USD") for (const [side, p, sz] of d.changes || []) book.set(side === "buy", p, sz);
+      else if (d.type === "heartbeat") book.touch();
+    }},
+  // Kraken v2 book, 1000 levels. Sizes are absolute; apply in order; levels pushed past the
+  // subscribed depth are not deleted by Kraken, so the book is truncated after each message.
+  // A CRC32 of the top ten levels guards the book; a mismatch forces a fresh snapshot.
+  kraken: {name: "Kraken", url: "wss://ws.kraken.com/v2", depth: 1000,
+    open: ws => ws.send(JSON.stringify({method: "subscribe", params: {channel: "book", symbol: ["BTC/USD"], depth: 1000}})),
+    msg: (d, book, ws, st, b) => {
+      if (d.channel === "heartbeat") return book.touch();
+      if (d.channel !== "book" || !Array.isArray(d.data)) return;
+      for (const x of d.data) {
+        if (x.symbol !== "BTC/USD") continue;
+        const lv = a => (a || []).map(l => [l.price, l.qty]);
+        if (d.type === "snapshot") book.snapshot(lv(x.bids), lv(x.asks));
+        else if (d.type === "update") { for (const [p, q] of lv(x.bids)) book.set(true, p, q); for (const [p, q] of lv(x.asks)) book.set(false, p, q); }
+        else continue;
+        truncateBook(b, 1000);
+        if (Number.isFinite(x.checksum) && b.ready) {
+          if (krakenChecksum(b) === x.checksum >>> 0) st.checked = true;
+          else if (st.checked) return book.reset("checksum mismatch, resyncing");
+          else b.note = "checksum format unconfirmed";
+        }
+      }
+    }},
+  // Bitstamp: every message is the full top 100 bids and asks. The page reads the book from its
+  // existing Bitstamp quote socket instead (it marks this entry shared); the Worker opens this one.
+  bitstamp: {name: "Bitstamp", url: "wss://ws.bitstamp.net", depth: 100,
+    open: ws => ws.send(JSON.stringify({event: "bts:subscribe", data: {channel: "order_book_btcusd"}})),
+    ping: ws => ws.send(JSON.stringify({event: "bts:heartbeat"})),
+    msg: (d, book) => {
+      if (d.event === "bts:request_reconnect") book.reset("exchange asked to reconnect");
+      else if (d.event === "data" && d.channel === "order_book_btcusd" && d.data && Array.isArray(d.data.bids)) book.snapshot(d.data.bids, d.data.asks || []);
+      else if (d.event === "bts:heartbeat") book.touch();
+    }},
+  // Gemini v1 market data, full book: the first update carries every level ("initial");
+  // later changes give the absolute remaining size. socket_sequence must rise by one.
+  gemini: {name: "Gemini", url: "wss://api.gemini.com/v1/marketdata/BTCUSD?bids=true&offers=true&trades=false&auctions=false&heartbeat=true",
+    open: () => {},
+    msg: (d, book, ws, st) => {
+      if (Number.isFinite(d.socket_sequence)) {
+        if (st.seq != null && d.socket_sequence !== st.seq + 1) return book.reset("sequence gap, resyncing");
+        st.seq = d.socket_sequence;
+      }
+      if (d.type === "heartbeat") return book.touch();
+      if (d.type !== "update" || !Array.isArray(d.events)) return;
+      const changes = d.events.filter(e => e.type === "change");
+      if (changes.length && changes.every(e => e.reason === "initial")) {
+        book.snapshot(changes.filter(e => e.side === "bid").map(e => [e.price, e.remaining]), changes.filter(e => e.side === "ask").map(e => [e.price, e.remaining]));
+      } else for (const e of changes) book.set(e.side === "bid", e.price, e.remaining);
+      book.touch();
+    }},
+  // Crypto.com: SNAPSHOT mode sends the full top 50 every 500 ms; heartbeats must be answered.
+  cryptocom: {name: "Crypto.com", url: "wss://stream.crypto.com/exchange/v1/market", depth: 50,
+    open: ws => setTimeout(() => { if (ws.readyState === 1) ws.send(JSON.stringify({id: 1, method: "subscribe", params: {channels: ["book.BTC_USD.50"], book_subscription_type: "SNAPSHOT"}, nonce: Date.now()})); }, 1000),
+    msg: (d, book, ws) => {
+      if (d.method === "public/heartbeat") { ws.send(JSON.stringify({id: d.id, method: "public/respond-heartbeat"})); return book.touch(); }
+      const r = d.result;
+      if (!r || r.channel !== "book" || r.instrument_name !== "BTC_USD" || !Array.isArray(r.data)) return;
+      for (const x of r.data) if (Array.isArray(x.bids) && Array.isArray(x.asks)) book.snapshot(x.bids, x.asks);
+    }},
+  // Bullish: documented snapshots of 100 levels as flat [price, qty, price, qty, ...] arrays.
+  // The incremental format is undocumented, so only snapshots are applied; a book that stops
+  // receiving them ages out after 10 s like any delayed book.
+  bullish: {name: "Bullish", url: "wss://api.exchange.bullish.com/trading-api/v1/market-data/orderbook", depth: 100,
+    open: ws => ws.send(JSON.stringify({jsonrpc: "2.0", type: "command", method: "subscribe", id: "1", params: {topic: "l2Orderbook", symbol: "BTCUSD"}})),
+    msg: (d, book, ws, st, b) => {
+      const x = d.data;
+      if (!x || !Array.isArray(x.bids) || !Array.isArray(x.asks) || x.symbol !== "BTCUSD") return;
+      const pairs = a => { const out = []; for (let i = 0; i + 1 < a.length; i += 2) out.push([a[i], a[i + 1]]); return out; };
+      if (d.type === "snapshot") book.snapshot(pairs(x.bids), pairs(x.asks));
+      else b.note = "ignoring undocumented " + String(d.type).slice(0, 20) + " messages";
+    }},
+};
+function truncateBook(b, n) {            // keep only the n best levels a side, as the exchange does
+  for (const [m, isBid] of [[b.bids, true], [b.asks, false]]) {
+    if (m.size <= n) continue;
+    const keep = [...m.keys()].sort(isBid ? (x, y) => y - x : (x, y) => x - y).slice(0, n);
+    const set = new Set(keep);
+    for (const p of [...m.keys()]) if (!set.has(p)) m.delete(p);
+  }
+}
+const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(str) { let c = 0xFFFFFFFF; for (let i = 0; i < str.length; i++) c = CRC_TABLE[(c ^ str.charCodeAt(i)) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+// Kraken's book checksum: top ten asks then bids; price (1 dp) and quantity (8 dp) with the
+// decimal point and leading zeros removed, concatenated. BTC/USD precisions are assumed here.
+function krakenChecksum(b) {
+  const part = (p, q) => p.toFixed(1).replace(".", "").replace(/^0+/, "") + q.toFixed(8).replace(".", "").replace(/^0+/, "");
+  const asks = [...b.asks].sort((x, y) => x[0] - y[0]).slice(0, 10), bids = [...b.bids].sort((x, y) => y[0] - x[0]).slice(0, 10);
+  let str = "";
+  for (const [p, q] of asks) str += part(p, q);
+  for (const [p, q] of bids) str += part(p, q);
+  return crc32(str);
+}
+function depthOps(b, ws) {
+  const put = (m, p, sz) => { p = +p; sz = +sz; if (!(Number.isFinite(p) && p > 0)) return; if (Number.isFinite(sz) && sz > 0) m.set(p, sz); else m.delete(p); };
+  return {
+    snapshot(bids, asks) { b.bids.clear(); b.asks.clear(); for (const [p, sz] of bids) put(b.bids, p, sz); for (const [p, sz] of asks) put(b.asks, p, sz); b.ready = true; b.at = Date.now(); b.state = "live"; b.backoff = 1000; b.note = ""; },
+    set(isBid, p, sz) { if (!b.ready) return; put(isBid ? b.bids : b.asks, p, sz); b.at = Date.now(); },
+    touch() { if (b.ready) b.at = Date.now(); },               // heartbeat: the book we hold is still current
+    reset(reason) { b.ready = false; b.bids.clear(); b.asks.clear(); b.note = reason; b.state = "resync"; try { ws.close(); } catch (e) {} },
+  };
+}
+function depthSide(m, isBid, limit, ref) {
+  const out = [];
+  for (const [p, sz] of m) if (isBid ? p >= ref * (1 - REPLICA_BAND) : p <= ref * (1 + REPLICA_BAND)) out.push([p, sz]);
+  out.sort(isBid ? (a, c) => c[0] - a[0] : (a, c) => a[0] - c[0]);
+  return limit && out.length > limit ? out.slice(0, limit) : out;
+}
+// The books in the shape BTC15Replica.calculate takes, keyed by exchange name.
+function replicaBooksFrom(depthBooks) {
+  const books = {};
+  for (const [key, spec] of Object.entries(DEPTH_VENUES)) {
+    const b = depthBooks[key];
+    if (!b || !b.ready || !b.bids.size || !b.asks.size) continue;
+    let bestBid = 0, bestAsk = Infinity;
+    for (const p of b.bids.keys()) if (p > bestBid) bestBid = p;
+    for (const p of b.asks.keys()) if (p < bestAsk) bestAsk = p;
+    const ref = (bestBid + bestAsk) / 2;
+    books[spec.name] = {bids: depthSide(b.bids, true, spec.depth, ref), asks: depthSide(b.asks, false, spec.depth, ref), at: b.at};
+  }
+  return books;
+}
+const newDepthBook = () => ({bids: new Map(), asks: new Map(), at: 0, ready: false, state: "off", ws: null, backoff: 1000, timer: null, fails: 0, note: "", seq: null, openedAt: 0});
+globalThis.BTC15Depth = Object.freeze({DEPTH_VENUES, CONSTITUENTS, REPLICA_BAND, depthOps, depthSide, replicaBooksFrom, newDepthBook, truncateBook, crc32, krakenChecksum});
+})();
+// END SHARED BTC15 DEPTH
 const paperSession = globalThis.BTC15Session;
 const {tailCdf,volsFrom,projectFrom} = globalThis.BTC15Model;
 function feeCents(p) { return globalThis.BTC15Model.feesCents(p*100); }
@@ -742,6 +1139,7 @@ export class KalshiFeed {
     if(url.pathname.startsWith("/demo/"))return this.demoRequest(request,url);
     if (url.pathname === "/watchdog") { await this.ensureAlarm(); return new Response("ok"); }
     if (url.pathname === "/feed/status") { await this.ensureAlarm(); return new Response(JSON.stringify(this.status().msg), {headers: {...CORS, "Content-Type": "application/json"}}); }
+    if (url.pathname === "/replica/status") { await this.ensureAlarm(); this.ensureReplica(); return new Response(JSON.stringify(this.replicaStatus()), {headers: {...CORS, "Content-Type": "application/json"}}); }
     if (url.pathname === "/trade/status") {
       const cfg = await this.tradeConfig(), log = await this.tradeLog(), day = (await this.state.storage.get("trade.day")) || null;
       const all = await this.state.storage.list({prefix: "t:"}), windows = [...all.values()].sort((a, b) => a.close - b.close).slice(-60);
@@ -1218,7 +1616,7 @@ export class KalshiFeed {
   }
   send(obj) { if (this.up) { obj.id = this.subId++; try { this.up.send(JSON.stringify(obj)); } catch (e) {} } }
   subscribeTickers() {                           // this window's market and the next; renewed at each boundary
-    const tk = currentTickers().slice(0,1), set = tk.join(","), wantDepth = this.clients.size > 0 || this.agentActive || research.depthWanted(Date.now());
+    const tk = currentTickers().slice(0,1), set = tk.join(","), wantDepth = this.clients.size > 0 || this.agentActive || research.depthWanted(Date.now()) || !!this.replica;
     if (set !== this.tickerSet || wantDepth !== this.depthSubscribed) {
       const old = [this.tickerSid, this.bookSid].filter(x => x != null);
       if (old.length) this.send({cmd: "unsubscribe", params: {sids: old}});
@@ -1235,6 +1633,7 @@ export class KalshiFeed {
   // ---- the collector: scores every window whether or not a page is open
   async ensureAlarm() {
     if (!(this.env.KALSHI_KEY_ID && this.env.KALSHI_PRIVATE_KEY)) return;
+    this.ensureReplica();
     const alarm = await this.state.storage.getAlarm(), now = Date.now();
     if (!this.alarmBusy && (alarm == null || alarm < now - 60000 || alarm > now + 60000))
       await this.scheduleAlarm(now + 1000);
@@ -1387,6 +1786,106 @@ export class KalshiFeed {
       if (m.expiration_value != null && Number.isFinite(+m.expiration_value)) w.officialCloseAvg = +m.expiration_value;
       await this.state.storage.put(key, w);
     }
+  }
+  // ---- the Worker-side BRTI replica: the constituent books held next to the Kalshi socket.
+  // Every 200 ms the canonical calculation runs over the fresh books; the value is scored against
+  // the official 5 Hz tick (accuracy and head start) and, by events, against the Kalshi book's mid
+  // (does the book move after the replica or before it). Research only; nothing trades on it.
+  ensureReplica() {
+    if (this.env.REPLICA === "off" || !(this.env.KALSHI_KEY_ID && this.env.KALSHI_PRIVATE_KEY)) return;
+    if (!this.replica) this.replica = {books: {}, hist: [], official: [], mids: [], last: null, state: {excluded: {}}, tracking: null, lead: null, scoredAt: 0, startedAt: Date.now(), ticks: 0, cpuMs: 0, cpuN: 0, errors: 0, lastError: null};
+    for (const key of Object.keys(globalThis.BTC15Depth.DEPTH_VENUES)) this.connectDepth(key);
+    if (!this.replicaTimer) this.replicaTimer = setTimeout(() => this.replicaLoop(), REPLICA_MS);
+  }
+  async connectDepth(key) {
+    const D = globalThis.BTC15Depth, spec = D.DEPTH_VENUES[key];
+    const b = this.replica.books[key] || (this.replica.books[key] = D.newDepthBook());
+    if (b.ws || b.connecting || b.timer) return;
+    b.connecting = true; b.state = "connecting";
+    try {
+      const resp = await upgradeFetch(spec.url.replace(/^wss:/, "https:"), {headers: {"Upgrade": "websocket"}});
+      const ws = resp.webSocket;
+      if (!ws) throw new Error("refused " + resp.status);
+      ws.accept();
+      b.ws = ws; b.connecting = false; b.state = "waiting"; b.openedAt = Date.now(); b.ready = false; b.bids.clear(); b.asks.clear();
+      const st = {}, ops = D.depthOps(b, ws);
+      try { spec.open(ws); } catch (e) {}
+      ws.addEventListener("message", ev => {
+        if (b.ws !== ws || typeof ev.data !== "string") return;
+        let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+        if (!d || typeof d !== "object") return;
+        b.fails = 0;
+        try { spec.msg(d, ops, ws, st, b); } catch (e) { ops.reset("parser error: " + e.message); }
+      });
+      const gone = why => { if (b.ws !== ws) return; b.ws = null; b.ready = false; if (b.state !== "resync") { b.state = "off"; b.note = why; } b.fails++; this.retryDepth(key); };
+      ws.addEventListener("close", ev => gone("closed " + ev.code));
+      ws.addEventListener("error", () => gone("socket error"));
+    } catch (e) {
+      b.connecting = false; b.ws = null; b.state = "off"; b.fails++; b.note = String(e.message || e).slice(0, 80);
+      this.retryDepth(key);
+    }
+  }
+  retryDepth(key) {
+    const b = this.replica.books[key];
+    if (b.timer) return;
+    b.timer = setTimeout(() => { b.timer = null; if (this.replica) this.connectDepth(key); }, b.backoff);
+    b.backoff = Math.min(b.fails >= 5 ? 60000 : 15000, b.backoff * 2);
+  }
+  noteKalshiMid(tk) {
+    if (!this.replica || tk !== currentTickers()[0]) return;
+    const b = this.books[tk]; if (!b) return;
+    let yesBid = 0, noBid = 0;
+    for (const p of b.yes.keys()) if (p > yesBid) yesBid = p;
+    for (const p of b.no.keys()) if (p > noBid) noBid = p;
+    if (!(yesBid > 0 && noBid > 0)) return;
+    const mid = Math.round((yesBid + (1 - noBid)) / 2 * 10000) / 100;      // cents
+    const s = this.replica.mids, last = s[s.length - 1];
+    if (last && last.v === mid) return;
+    s.push({t: Date.now(), v: mid});
+  }
+  replicaLoop() {
+    this.replicaTimer = null;
+    if (!this.replica) return;
+    const R = globalThis.BTC15Replica, D = globalThis.BTC15Depth, r = this.replica, now = Date.now();
+    try {
+      const t0 = Date.now();
+      const out = R.calculate(D.replicaBooksFrom(r.books), now, r.state);
+      r.state = out.state; r.last = {...out, t: now}; r.ticks++;
+      r.cpuMs += Date.now() - t0; r.cpuN++;
+      if (Number.isFinite(out.value)) r.hist.push({t: now, v: out.value});
+      const cut = now - REPLICA_KEEP_MS;
+      while (r.hist.length && r.hist[0].t < cut) r.hist.shift();
+      while (r.official.length && r.official[0].at < cut) r.official.shift();
+      while (r.mids.length > 1 && r.mids[1].t < cut) r.mids.shift();
+      if (r.ticks % 25 === 0) for (const [key, spec] of Object.entries(D.DEPTH_VENUES)) {       // pings every 5 s; silent sockets reconnect
+        const b = r.books[key]; if (!b || !b.ws) continue;
+        if ((b.at || b.openedAt) && now - Math.max(b.at, b.openedAt) > 30000) { b.note = "silent for 30 s"; try { b.ws.close(); } catch (e) {} }
+        else if (spec.ping) { try { spec.ping(b.ws); } catch (e) {} }
+      }
+      if (now - r.scoredAt >= 10000) {
+        r.scoredAt = now;
+        r.tracking = R.track(r.hist, r.official);
+        r.lead = R.leadLag(r.hist, r.mids);
+        this.broadcast(JSON.stringify({type: "replica", msg: this.replicaStatus()}));
+        if (r.ticks % 300 === 0) this.state.waitUntil(this.state.storage.put("replica.summary", this.replicaStatus()).catch(() => {}));
+      }
+    } catch (e) { r.errors++; r.lastError = String(e.message || e).slice(0, 120); }
+    this.replicaTimer = setTimeout(() => this.replicaLoop(), REPLICA_MS);
+  }
+  replicaStatus() {
+    const r = this.replica, D = globalThis.BTC15Depth;
+    if (!r) return {enabled: false, reason: this.env.REPLICA === "off" ? "disabled" : "no key"};
+    const books = {};
+    for (const [key, spec] of Object.entries(D.DEPTH_VENUES)) {
+      const b = r.books[key];
+      books[spec.name] = b ? {state: b.ready ? "live" : b.state, bids: b.bids.size, asks: b.asks.size, ageMs: b.at ? Date.now() - b.at : null, note: b.note || null, used: !!(r.last && r.last.used.includes(spec.name)), excluded: r.last && r.last.excluded[spec.name] || null} : {state: "off"};
+    }
+    const o = r.official[r.official.length - 1];
+    return {enabled: true, version: globalThis.BTC15Replica.VERSION, at: r.last ? r.last.t : null, value: r.last ? r.last.value : null, reason: r.last ? r.last.reason || null : null,
+            official: o ? {v: o.v, t: o.t, at: o.at} : null, diff: r.last && o && Number.isFinite(r.last.value) ? r.last.value - o.v : null,
+            usedBooks: r.last ? r.last.used.length : 0, constituents: D.CONSTITUENTS.length, books, depthLimited: r.last ? !!r.last.depthLimited : null,
+            tracking: r.tracking, lead: r.lead, ticks: r.ticks, cpuMsPerTick: r.cpuN ? r.cpuMs / r.cpuN : null, since: r.startedAt,
+            officialKept: r.official.length, midsKept: r.mids.length, errors: r.errors, lastError: r.lastError, now: Date.now()};
   }
   pushTick(ms, v) {
     if (!Number.isFinite(v) || !(v > 0) || !Number.isFinite(ms) || Date.now() - ms > 5000 || ms > Date.now() + 1000) return;
@@ -1578,7 +2077,11 @@ export class KalshiFeed {
       this.books[d.msg.market_ticker].sourceKind = d.msg.ts_ms!=null?'ts_ms':'sending_ts_ms';
       this.books[d.msg.market_ticker].clockOffsetMs = this.bookClockOffsetBefore ?? null;
     }
-    if (d.type === "cfbenchmarks_value_5hz" && d.msg && d.msg.index_id === "BRTI" && +d.msg.value_usd > 0) this.pushTick(+d.msg.source_ts_ms, +d.msg.value_usd);
+    if ((d.type === "orderbook_snapshot" || d.type === "orderbook_delta") && d.msg && d.msg.market_ticker) this.noteKalshiMid(d.msg.market_ticker);
+    if (d.type === "cfbenchmarks_value_5hz" && d.msg && d.msg.index_id === "BRTI" && +d.msg.value_usd > 0) {
+      this.pushTick(+d.msg.source_ts_ms, +d.msg.value_usd);
+      if (this.replica) { const o = this.replica.official, t = +d.msg.source_ts_ms, last = o[o.length - 1]; if (Number.isFinite(t) && (!last || t > last.t)) o.push({t, at: Date.now(), v: +d.msg.value_usd}); }
+    }
     if (d.type === "cfbenchmarks_value" && d.msg) {
       try {
         const raw = JSON.parse(d.msg.data), v = +raw.value, ms = typeof raw.time === "number" || /^\d{13}$/.test(raw.time) ? +raw.time : Date.parse(raw.time);

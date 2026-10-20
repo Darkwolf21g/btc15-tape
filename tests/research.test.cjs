@@ -526,3 +526,34 @@ test('a wrongly large offset estimate cannot make an old book look fresh',()=>{
  assert.equal(h.r.depthSnapshot({...book(at),sourceAt:at+900,clockOffsetMs:800},at).valid,true);
  assert.equal(h.r.depthSnapshot({...book(at),sourceAt:at+1200,clockOffsetMs:800},at).valid,false);
 });
+test('Worker replica: books from the shared adapters, Kalshi mid series, scoring and status',async()=>{
+ const h=harness(),at=h.now();
+ h.context.fetch=async()=>{throw Error('no network in tests');};        // exchange sockets cannot open here
+ h.context.setTimeout=()=>1;                                             // no loop or retry scheduling in tests
+ h.obj.ensureReplica();
+ assert.ok(h.obj.replica,'replica state exists with a key');
+ const D=h.context.BTC15Depth,R=h.context.BTC15Replica;
+ assert.deepEqual(Object.keys(h.obj.replica.books).sort(),Object.keys(D.DEPTH_VENUES).sort());
+ // Feed two books through the real adapters, as the sockets would.
+ const feedBook=(key,msgs)=>{const b=h.obj.replica.books[key];const ops=D.depthOps(b,{close(){}});const st={};for(const m of msgs)D.DEPTH_VENUES[key].msg(m,ops,{readyState:1,send(){}},st,b);};
+ feedBook('coinbase',[{type:'snapshot',product_id:'BTC-USD',bids:[['99.9','1'],['99.6','1']],asks:[['100.1','1'],['100.2','1']]}]);
+ feedBook('bitstamp',[{event:'data',channel:'order_book_btcusd',data:{bids:[['99.8','2']],asks:[['100.3','2']]}}]);
+ // Official ticks and a Kalshi book for the current market.
+ const tk=h.api.marketTicker((Math.floor(at/900000)+1)*900);
+ h.obj.onUpstream(JSON.stringify({type:'orderbook_snapshot',sending_ts_ms:at,msg:{market_ticker:tk,yes_dollars_fp:[['0.4000','10.00']],no_dollars_fp:[['0.5500','10.00']]}}));
+ assert.equal(h.obj.replica.mids.length,1);assert.equal(h.obj.replica.mids[0].v,42.5);
+ h.obj.onUpstream(JSON.stringify({type:'orderbook_delta',msg:{market_ticker:tk,side:'yes',price_dollars:'0.4100',delta_fp:'1.00',ts_ms:at}}));
+ assert.equal(h.obj.replica.mids.length,2);assert.equal(h.obj.replica.mids[1].v,43);
+ h.obj.onUpstream(JSON.stringify({type:'cfbenchmarks_value_5hz',msg:{index_id:'BRTI',source_ts_ms:at-100,value_usd:'100.02'}}));
+ assert.equal(h.obj.replica.official.length,1);assert.equal(h.obj.replica.official[0].at,at);
+ h.obj.replicaLoop();
+ const s=h.obj.replicaStatus();
+ assert.equal(s.enabled,true);assert.equal(s.version,R.VERSION);assert.equal(s.usedBooks,2);
+ assert.ok(Math.abs(s.value-100)<0.2,'two tight books around 100');assert.ok(Math.abs(s.diff-(s.value-100.02))<1e-9);
+ assert.equal(s.books.Coinbase.used,true);assert.equal(s.books.Bitstamp.used,true);assert.ok(['off','connecting'].includes(s.books.Kraken.state));
+ assert.equal(s.ticks,1);assert.ok(s.cpuMsPerTick>=0);assert.equal(s.errors,0);
+ assert.ok(s.lead&&s.lead.events===0,'too little history to score lead/lag yet');
+ assert.equal(s.midsKept,2);assert.equal(s.officialKept,1);
+ // Disabled by configuration: no state, status says so.
+ const off=harness();off.obj.env.REPLICA='off';off.obj.ensureReplica();assert.equal(off.obj.replica,undefined);assert.equal(off.obj.replicaStatus().enabled,false);
+});

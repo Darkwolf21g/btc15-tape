@@ -78,8 +78,13 @@ function uncross(bids, asks) {
 }
 // Mode of a Gaussian kernel density over winsorized sizes, evaluated at the sample values.
 // The methodology does not state the search grid; evaluating at the samples is this replica's choice.
+// Books with tens of thousands of levels are subsampled (every k-th size after sorting) to keep
+// a 200 ms tick cheap; up to KDE_MAX_SAMPLES every size is used. A replica choice, not CF's.
+const KDE_MAX_SAMPLES = 4000;
 function kdeMode(sizes) {
-  const sorted = sizes.slice().sort((x, y) => x - y), n = sorted.length;
+  let sorted = sizes.slice().sort((x, y) => x - y);
+  if (sorted.length > KDE_MAX_SAMPLES) { const k = Math.ceil(sorted.length / KDE_MAX_SAMPLES); sorted = sorted.filter((_, i) => i % k === 0); }
+  const n = sorted.length;
   if (n < 4) return sorted[0];
   const {values} = winsorized(sorted), sigma = sd(values);
   if (!(sigma > 0)) return values[0];
@@ -201,5 +206,48 @@ function track(replica, official, opts = {}) {
           receiptBest: receipt.best, receiptCurve: receipt.curve};
 }
 
-globalThis.BTC15Replica = Object.freeze({VERSION, METHODOLOGY, PARAMS, cleanBook, sizeCap, uncross, kdeMode, spacing, curve, calculate, track});
+// Does the Kalshi book move after the replica, or before it? Event-based: a replica event is a
+// one-second index move of at least `moveUsd` (default: three robust standard deviations of
+// one-second moves in the window); a book event is a mid change of at least `midCents` while the
+// mid is between `minMid` and `maxMid` (far from the strike the book has no reason to move).
+// For each replica event the nearest book event within `windowMs` is found and dt = book - replica.
+function leadLag(replica, mids, opts = {}) {
+  const windowMs = opts.windowMs || 5000, dead = opts.deadbandMs || 150, midCents = opts.midCents || 1;
+  const minMid = opts.minMid ?? 10, maxMid = opts.maxMid ?? 90, debounce = opts.debounceMs || 2000;
+  const r = replica.filter(x => Number.isFinite(x.v)).sort((a, b) => a.t - b.t);
+  const m = mids.filter(x => Number.isFinite(x.v)).sort((a, b) => a.t - b.t);
+  // One-second moves of the replica.
+  const moves = []; let j = 0;
+  for (let i = 0; i < r.length; i++) {
+    while (j < i && r[i].t - r[j + 1].t >= 1000) j++;
+    if (r[i].t - r[j].t >= 800 && r[i].t - r[j].t <= 1500) moves.push({t: r[i].t, d: r[i].v - r[j].v});
+  }
+  if (moves.length < 20) return {events: 0, reason: "too few replica moves", moveUsd: null};
+  let moveUsd = opts.moveUsd;
+  if (!(moveUsd > 0)) {
+    const abs = moves.map(x => Math.abs(x.d)).sort((a, b) => a - b), med = abs[(abs.length - 1) >> 1];
+    moveUsd = Math.max(1, 3 * 1.4826 * med);
+  }
+  const rEvents = []; let lastAt = -Infinity;
+  for (const x of moves) if (Math.abs(x.d) >= moveUsd && x.t - lastAt >= debounce) { rEvents.push({t: x.t, dir: Math.sign(x.d)}); lastAt = x.t; }
+  const mEvents = []; let prev = null; lastAt = -Infinity;
+  for (const x of m) {
+    if (prev && Math.abs(x.v - prev.v) >= midCents && x.v >= minMid && x.v <= maxMid && prev.v >= minMid && prev.v <= maxMid && x.t - lastAt >= 1000) { mEvents.push({t: x.t, dir: Math.sign(x.v - prev.v)}); lastAt = x.t; }
+    prev = x;
+  }
+  let after = 0, before = 0, same = 0, none = 0, agree = 0; const dts = [];
+  for (const e of rEvents) {
+    let best = null;
+    for (const k of mEvents) { const dt = k.t - e.t; if (Math.abs(dt) <= windowMs && (!best || Math.abs(dt) < Math.abs(best.dt))) best = {dt, dir: k.dir}; }
+    if (!best) { none++; continue; }
+    dts.push(best.dt);
+    if (best.dt > dead) after++; else if (best.dt < -dead) before++; else same++;
+    if (best.dir === e.dir) agree++;
+  }
+  dts.sort((a, b) => a - b);
+  return {events: rEvents.length, bookEvents: mEvents.length, after, before, same, none, agree, moveUsd,
+          medianDtMs: dts.length ? dts[(dts.length - 1) >> 1] : null, reacted: rEvents.length - none};
+}
+
+globalThis.BTC15Replica = Object.freeze({VERSION, METHODOLOGY, PARAMS, cleanBook, sizeCap, uncross, kdeMode, spacing, curve, calculate, track, leadLag});
 })();

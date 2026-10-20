@@ -529,8 +529,13 @@ function uncross(bids, asks) {
 }
 // Mode of a Gaussian kernel density over winsorized sizes, evaluated at the sample values.
 // The methodology does not state the search grid; evaluating at the samples is this replica's choice.
+// Books with tens of thousands of levels are subsampled (every k-th size after sorting) to keep
+// a 200 ms tick cheap; up to KDE_MAX_SAMPLES every size is used. A replica choice, not CF's.
+const KDE_MAX_SAMPLES = 4000;
 function kdeMode(sizes) {
-  const sorted = sizes.slice().sort((x, y) => x - y), n = sorted.length;
+  let sorted = sizes.slice().sort((x, y) => x - y);
+  if (sorted.length > KDE_MAX_SAMPLES) { const k = Math.ceil(sorted.length / KDE_MAX_SAMPLES); sorted = sorted.filter((_, i) => i % k === 0); }
+  const n = sorted.length;
   if (n < 4) return sorted[0];
   const {values} = winsorized(sorted), sigma = sd(values);
   if (!(sigma > 0)) return values[0];
@@ -652,7 +657,50 @@ function track(replica, official, opts = {}) {
           receiptBest: receipt.best, receiptCurve: receipt.curve};
 }
 
-globalThis.BTC15Replica = Object.freeze({VERSION, METHODOLOGY, PARAMS, cleanBook, sizeCap, uncross, kdeMode, spacing, curve, calculate, track});
+// Does the Kalshi book move after the replica, or before it? Event-based: a replica event is a
+// one-second index move of at least `moveUsd` (default: three robust standard deviations of
+// one-second moves in the window); a book event is a mid change of at least `midCents` while the
+// mid is between `minMid` and `maxMid` (far from the strike the book has no reason to move).
+// For each replica event the nearest book event within `windowMs` is found and dt = book - replica.
+function leadLag(replica, mids, opts = {}) {
+  const windowMs = opts.windowMs || 5000, dead = opts.deadbandMs || 150, midCents = opts.midCents || 1;
+  const minMid = opts.minMid ?? 10, maxMid = opts.maxMid ?? 90, debounce = opts.debounceMs || 2000;
+  const r = replica.filter(x => Number.isFinite(x.v)).sort((a, b) => a.t - b.t);
+  const m = mids.filter(x => Number.isFinite(x.v)).sort((a, b) => a.t - b.t);
+  // One-second moves of the replica.
+  const moves = []; let j = 0;
+  for (let i = 0; i < r.length; i++) {
+    while (j < i && r[i].t - r[j + 1].t >= 1000) j++;
+    if (r[i].t - r[j].t >= 800 && r[i].t - r[j].t <= 1500) moves.push({t: r[i].t, d: r[i].v - r[j].v});
+  }
+  if (moves.length < 20) return {events: 0, reason: "too few replica moves", moveUsd: null};
+  let moveUsd = opts.moveUsd;
+  if (!(moveUsd > 0)) {
+    const abs = moves.map(x => Math.abs(x.d)).sort((a, b) => a - b), med = abs[(abs.length - 1) >> 1];
+    moveUsd = Math.max(1, 3 * 1.4826 * med);
+  }
+  const rEvents = []; let lastAt = -Infinity;
+  for (const x of moves) if (Math.abs(x.d) >= moveUsd && x.t - lastAt >= debounce) { rEvents.push({t: x.t, dir: Math.sign(x.d)}); lastAt = x.t; }
+  const mEvents = []; let prev = null; lastAt = -Infinity;
+  for (const x of m) {
+    if (prev && Math.abs(x.v - prev.v) >= midCents && x.v >= minMid && x.v <= maxMid && prev.v >= minMid && prev.v <= maxMid && x.t - lastAt >= 1000) { mEvents.push({t: x.t, dir: Math.sign(x.v - prev.v)}); lastAt = x.t; }
+    prev = x;
+  }
+  let after = 0, before = 0, same = 0, none = 0, agree = 0; const dts = [];
+  for (const e of rEvents) {
+    let best = null;
+    for (const k of mEvents) { const dt = k.t - e.t; if (Math.abs(dt) <= windowMs && (!best || Math.abs(dt) < Math.abs(best.dt))) best = {dt, dir: k.dir}; }
+    if (!best) { none++; continue; }
+    dts.push(best.dt);
+    if (best.dt > dead) after++; else if (best.dt < -dead) before++; else same++;
+    if (best.dir === e.dir) agree++;
+  }
+  dts.sort((a, b) => a - b);
+  return {events: rEvents.length, bookEvents: mEvents.length, after, before, same, none, agree, moveUsd,
+          medianDtMs: dts.length ? dts[(dts.length - 1) >> 1] : null, reacted: rEvents.length - none};
+}
+
+globalThis.BTC15Replica = Object.freeze({VERSION, METHODOLOGY, PARAMS, cleanBook, sizeCap, uncross, kdeMode, spacing, curve, calculate, track, leadLag});
 })();
 // END SHARED BTC15 REPLICA
 // ---------------------------------------------------------------- settings
@@ -1422,6 +1470,7 @@ function connectFeed() {
     feed.counts[d.type] = (feed.counts[d.type] || 0) + 1;
     const m = d.msg || {};
     if (d.type === "relay") { feed.relay = m; return; }
+    if (d.type === "replica") { feed.workerReplica = {...m, receivedAt: Date.now()}; return; }
     if (d.type === "brti_snapshot") { acceptOfficialSnapshot(m); return; }
     if (d.type === "cfbenchmarks_value_5hz") {
       const v = +m.value_usd; if (m.index_id === "BRTI") acceptIndex(v, +m.source_ts_ms);
@@ -2621,7 +2670,14 @@ if ("IntersectionObserver" in window) new IntersectionObserver(([e]) => { const 
 // Separate sockets from the quote/trade feeds above, so a depth problem never touches spot,
 // the official index or the model. Each adapter keeps one exchange's book current; every 200 ms
 // the canonical BTC15Replica calculation runs over all fresh books. Research context only.
-const REPLICA_MS = 200, REPLICA_KEEP_MS = 10 * 60 * 1000, REPLICA_BAND = 0.15;
+const REPLICA_MS = 200, REPLICA_KEEP_MS = 10 * 60 * 1000;
+// BEGIN SHARED BTC15 DEPTH
+// Canonical order-book adapters for the BRTI replica. scripts/sync-model.cjs embeds this exact
+// source in the tape page and in the Worker. Each adapter keeps one constituent exchange's book
+// current through a book object with snapshot/set/touch/reset; the host owns the socket.
+(() => {
+const REPLICA_BAND = 0.15;   // levels further than this from an exchange's own touch are ignored
+const CONSTITUENTS = ["Bitstamp", "Coinbase", "Kraken", "Gemini", "Bullish", "Crypto.com", "LMAX Digital"];
 const DEPTH_VENUES = {
   // Coinbase Exchange: level2_batch is the full book without authentication (50 ms batches).
   // No sequence numbers on this channel; the heartbeat channel proves the connection is current.
@@ -2654,9 +2710,16 @@ const DEPTH_VENUES = {
         }
       }
     }},
-  // Bitstamp: the tape's own Bitstamp socket already receives the full top 100 bids and asks
-  // with every message, so the replica reads that book rather than opening a second connection.
-  bitstamp: {name: "Bitstamp", shared: true, depth: 100},
+  // Bitstamp: every message is the full top 100 bids and asks. The page reads the book from its
+  // existing Bitstamp quote socket instead (it marks this entry shared); the Worker opens this one.
+  bitstamp: {name: "Bitstamp", url: "wss://ws.bitstamp.net", depth: 100,
+    open: ws => ws.send(JSON.stringify({event: "bts:subscribe", data: {channel: "order_book_btcusd"}})),
+    ping: ws => ws.send(JSON.stringify({event: "bts:heartbeat"})),
+    msg: (d, book) => {
+      if (d.event === "bts:request_reconnect") book.reset("exchange asked to reconnect");
+      else if (d.event === "data" && d.channel === "order_book_btcusd" && d.data && Array.isArray(d.data.bids)) book.snapshot(d.data.bids, d.data.asks || []);
+      else if (d.event === "bts:heartbeat") book.touch();
+    }},
   // Gemini v1 market data, full book: the first update carries every level ("initial");
   // later changes give the absolute remaining size. socket_sequence must rise by one.
   gemini: {name: "Gemini", url: "wss://api.gemini.com/v1/marketdata/BTCUSD?bids=true&offers=true&trades=false&auctions=false&heartbeat=true",
@@ -2716,15 +2779,6 @@ function krakenChecksum(b) {
   for (const [p, q] of bids) str += part(p, q);
   return crc32(str);
 }
-const CONSTITUENTS = ["Bitstamp", "Coinbase", "Kraken", "Gemini", "Bullish", "Crypto.com", "LMAX Digital"];
-const depthBooks = {};   // key -> {bids, asks (Map price -> size), at, ready, state, ws, backoff, timer, fails, note, seq}
-const replica = {last: null, state: {excluded: {}}, hist: [], official: [], tracking: null, trackedAt: 0, leads: {}};
-const leadSeries = {};      // lead venue -> [{t, v}] mid changes, ten minutes, for lead/lag against the official index
-function noteLeadMid(key, mid, t) {
-  const s = leadSeries[key] || (leadSeries[key] = []);
-  if (s.length && s[s.length - 1].t === t) s[s.length - 1].v = mid; else s.push({t, v: mid});
-  while (s.length && s[0].t < t - REPLICA_KEEP_MS) s.shift();
-}
 function depthOps(b, ws) {
   const put = (m, p, sz) => { p = +p; sz = +sz; if (!(Number.isFinite(p) && p > 0)) return; if (Number.isFinite(sz) && sz > 0) m.set(p, sz); else m.delete(p); };
   return {
@@ -2734,8 +2788,44 @@ function depthOps(b, ws) {
     reset(reason) { b.ready = false; b.bids.clear(); b.asks.clear(); b.note = reason; b.state = "resync"; try { ws.close(); } catch (e) {} },
   };
 }
+function depthSide(m, isBid, limit, ref) {
+  const out = [];
+  for (const [p, sz] of m) if (isBid ? p >= ref * (1 - REPLICA_BAND) : p <= ref * (1 + REPLICA_BAND)) out.push([p, sz]);
+  out.sort(isBid ? (a, c) => c[0] - a[0] : (a, c) => a[0] - c[0]);
+  return limit && out.length > limit ? out.slice(0, limit) : out;
+}
+// The books in the shape BTC15Replica.calculate takes, keyed by exchange name.
+function replicaBooksFrom(depthBooks) {
+  const books = {};
+  for (const [key, spec] of Object.entries(DEPTH_VENUES)) {
+    const b = depthBooks[key];
+    if (!b || !b.ready || !b.bids.size || !b.asks.size) continue;
+    let bestBid = 0, bestAsk = Infinity;
+    for (const p of b.bids.keys()) if (p > bestBid) bestBid = p;
+    for (const p of b.asks.keys()) if (p < bestAsk) bestAsk = p;
+    const ref = (bestBid + bestAsk) / 2;
+    books[spec.name] = {bids: depthSide(b.bids, true, spec.depth, ref), asks: depthSide(b.asks, false, spec.depth, ref), at: b.at};
+  }
+  return books;
+}
+const newDepthBook = () => ({bids: new Map(), asks: new Map(), at: 0, ready: false, state: "off", ws: null, backoff: 1000, timer: null, fails: 0, note: "", seq: null, openedAt: 0});
+globalThis.BTC15Depth = Object.freeze({DEPTH_VENUES, CONSTITUENTS, REPLICA_BAND, depthOps, depthSide, replicaBooksFrom, newDepthBook, truncateBook, crc32, krakenChecksum});
+})();
+// END SHARED BTC15 DEPTH
+const {DEPTH_VENUES, CONSTITUENTS, depthOps, replicaBooksFrom, newDepthBook, krakenChecksum, crc32, truncateBook} = globalThis.BTC15Depth;
+// The tape already holds a Bitstamp quote socket that carries the full top-100 book: read that
+// instead of opening a second connection.
+DEPTH_VENUES.bitstamp.shared = true;
+const depthBooks = {};   // key -> {bids, asks (Map price -> size), at, ready, state, ws, backoff, timer, fails, note, seq}
+const replica = {last: null, state: {excluded: {}}, hist: [], official: [], tracking: null, trackedAt: 0, leads: {}};
+const leadSeries = {};      // lead venue -> [{t, v}] mid changes, ten minutes, for lead/lag against the official index
+function noteLeadMid(key, mid, t) {
+  const s = leadSeries[key] || (leadSeries[key] = []);
+  if (s.length && s[s.length - 1].t === t) s[s.length - 1].v = mid; else s.push({t, v: mid});
+  while (s.length && s[0].t < t - REPLICA_KEEP_MS) s.shift();
+}
 function depthBook(key) {
-  return depthBooks[key] || (depthBooks[key] = {bids: new Map(), asks: new Map(), at: 0, ready: false, state: "off", ws: null, backoff: 1000, timer: null, fails: 0, note: "", seq: null});
+  return depthBooks[key] || (depthBooks[key] = newDepthBook());
 }
 // A book delivered by one of the tape's existing quote sockets (Bitstamp), not a depth socket of its own.
 function sharedDepth(key, bids, asks) {
@@ -2782,25 +2872,7 @@ function retryDepth(key) {
   b.backoff = Math.min(b.fails >= 5 ? 60000 : 15000, b.backoff * 2);
 }
 // One side as sorted arrays, kept to the adapter's guaranteed depth and to a band around its own touch.
-function depthSide(m, isBid, limit, ref) {
-  const out = [];
-  for (const [p, sz] of m) if (isBid ? p >= ref * (1 - REPLICA_BAND) : p <= ref * (1 + REPLICA_BAND)) out.push([p, sz]);
-  out.sort(isBid ? (a, c) => c[0] - a[0] : (a, c) => a[0] - c[0]);
-  return limit && out.length > limit ? out.slice(0, limit) : out;
-}
-function replicaBooks() {
-  const books = {};
-  for (const [key, spec] of Object.entries(DEPTH_VENUES)) {
-    const b = depthBooks[key];
-    if (!b || !b.ready || !b.bids.size || !b.asks.size) continue;
-    let bestBid = 0, bestAsk = Infinity;
-    for (const p of b.bids.keys()) if (p > bestBid) bestBid = p;
-    for (const p of b.asks.keys()) if (p < bestAsk) bestAsk = p;
-    const ref = (bestBid + bestAsk) / 2;
-    books[spec.name] = {bids: depthSide(b.bids, true, spec.depth, ref), asks: depthSide(b.asks, false, spec.depth, ref), at: b.at};
-  }
-  return books;
-}
+function replicaBooks() { return replicaBooksFrom(depthBooks); }
 function replicaTick(nowMs = Date.now()) {
   const r = globalThis.BTC15Replica.calculate(replicaBooks(), nowMs, replica.state);
   replica.state = r.state; replica.last = {...r, t: nowMs};
@@ -2829,8 +2901,25 @@ function replicaText(nowMs = Date.now()) {
   const age = r.t ? ((nowMs - r.t) / 1000).toFixed(1) : "–";
   const vs = feedLive() && Number.isFinite(r.value) ? ` · ${signed(r.value - feed.brti.v)} vs official` : "";
   const lead = tr && tr.headStartMs != null ? ` · ${tr.headStartMs > 0 ? "leads" : tr.headStartMs < 0 ? "lags" : "level with"} receipt${tr.headStartMs ? " by " + Math.abs(tr.headStartMs) + " ms" : ""}` : "";
-  const sum = Number.isFinite(r.value) ? `${money(r.value)} · ${nBooks} of ${CONSTITUENTS.length} books${vs}${lead}` : `no value: ${r.reason}`;
+  const wk = feed.workerReplica, wl = wk && wk.enabled && wk.lead && wk.lead.events ? ` · Worker: book after ${wk.lead.after}/${wk.lead.events}` : wk && wk.enabled && wk.tracking && wk.tracking.accuracy ? ` · Worker err ${wk.tracking.accuracy.median.toFixed(2)}` : "";
+  const sum = (Number.isFinite(r.value) ? `${money(r.value)} · ${nBooks} of ${CONSTITUENTS.length} books${vs}${lead}` : `no value: ${r.reason}`) + wl;
   const lines = [];
+  const w = feed.workerReplica;
+  if (w && w.enabled) {
+    const fresh = nowMs - w.receivedAt < 30000;
+    lines.push(`Worker replica (computed on Cloudflare, next to the Kalshi socket; ${fresh ? "updated " + ((nowMs - w.receivedAt) / 1000).toFixed(0) + " s ago" : "stale, last update " + ((nowMs - w.receivedAt) / 1000).toFixed(0) + " s ago"}):`);
+    lines.push(`  ${Number.isFinite(w.value) ? money(w.value) : "no value: " + (w.reason || "–")} · ${w.usedBooks} of ${w.constituents} books${Number.isFinite(w.diff) ? ` · ${signed(w.diff)} vs official` : ""} · ${w.cpuMsPerTick != null ? w.cpuMsPerTick.toFixed(0) + " ms per tick" : ""}${w.errors ? ` · ${w.errors} errors (${w.lastError})` : ""}`);
+    const t = w.tracking;
+    if (t && t.accuracy) lines.push(`  vs official: error mean ${t.accuracy.mae.toFixed(2)} · median ${t.accuracy.median.toFixed(2)} USD · ${t.headStartMs != null ? (t.headStartMs > 0 ? "ahead of" : t.headStartMs < 0 ? "behind" : "level with") + " the Worker's own receipt by " + Math.abs(t.headStartMs) + " ms" : "head start pending"} (${t.accuracy.n} pairs)`);
+    else lines.push("  vs official: needs a minute of overlap");
+    const l = w.lead;
+    if (l && l.events) lines.push(`  vs Kalshi book: ${l.events} index moves of ≥$${l.moveUsd.toFixed(1)} · book moved AFTER ${l.after} · BEFORE ${l.before} · same time ${l.same} · no reaction ${l.none} · direction agreed ${l.agree} · median ${l.medianDtMs != null ? l.medianDtMs + " ms" : "–"}`);
+    else lines.push(`  vs Kalshi book: ${l && l.reason ? l.reason : "collecting"} (${w.midsKept || 0} mid changes kept)`);
+    lines.push("  " + Object.entries(w.books || {}).map(([name, b]) => `${name} ${b.used ? "used" : b.excluded || b.state}${b.note ? " (" + b.note + ")" : ""}`).join(" · "));
+    lines.push("  'AFTER' is the number that matters: index moves the book had not yet priced. Descriptive only; needs days, not minutes.");
+    lines.push("");
+    lines.push("Phone replica:");
+  }
   lines.push(`${r.version} · ${globalThis.BTC15Replica.METHODOLOGY} · computed ${age} s ago`);
   if (Number.isFinite(r.value)) lines.push(`Value ${r.value.toFixed(4)} (published precision ${money(r.rounded)}) · size cap ${r.cap.toFixed(4)} BTC · spacing ${r.spacing.toFixed(4)} BTC · utilized depth ${r.vT.toFixed(2)} BTC over ${r.points} points${r.depthLimited ? " · visible books ran out before the 0.5% band (depth-limited)" : ""}`);
   lines.push("");
