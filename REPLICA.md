@@ -101,6 +101,16 @@ and every 10 s scores the value two ways:
   counted as `pinned` and not asked to react. AFTER is the count that would indicate information the
   book did not yet have.
 
+**Cost.** Every frame a Durable Object receives on a WebSocket counts toward its
+request volume (Cloudflare bills 20 incoming messages as one request; the Free
+plan allows 100,000 requests a day, after which every Durable Object endpoint
+fails until the daily reset). The Worker replica therefore takes the Kalshi mid
+from the `ticker` channel, which sends only on a price change, rather than the
+order-book delta stream, and does not hold a depth subscription of its own.
+Per-venue message rates are reported in the status so each socket's cost is
+visible; `REPLICA=off` stops it entirely. Check the Durable Object request count
+in the Cloudflare dashboard after enabling it.
+
 `GET /replica/public` (no token) returns the live summary plus one row per ten
 minutes for the last 48 hours, so days accumulate without a viewer; it wakes
 nothing and makes no Kalshi request. `GET /replica/status` (token) returns the

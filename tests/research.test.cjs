@@ -540,10 +540,14 @@ test('Worker replica: books from the shared adapters, Kalshi mid series, scoring
  feedBook('bitstamp',[{event:'data',channel:'order_book_btcusd',data:{bids:[['99.8','2']],asks:[['100.3','2']]}}]);
  // Official ticks and a Kalshi book for the current market.
  const tk=h.api.marketTicker((Math.floor(at/900000)+1)*900);
- h.obj.onUpstream(JSON.stringify({type:'orderbook_snapshot',sending_ts_ms:at,msg:{market_ticker:tk,yes_dollars_fp:[['0.4000','10.00']],no_dollars_fp:[['0.5500','10.00']]}}));
+ h.obj.onUpstream(JSON.stringify({type:'ticker',msg:{market_ticker:tk,yes_bid_dollars:'0.4000',yes_ask_dollars:'0.4500',ts:1}}));
  assert.equal(h.obj.replica.mids.length,1);assert.equal(h.obj.replica.mids[0].v,42.5);
- h.obj.onUpstream(JSON.stringify({type:'orderbook_delta',msg:{market_ticker:tk,side:'yes',price_dollars:'0.4100',delta_fp:'1.00',ts_ms:at}}));
+ h.obj.onUpstream(JSON.stringify({type:'ticker',msg:{market_ticker:tk,yes_bid_dollars:'0.4100',yes_ask_dollars:'0.4500',ts:2}}));
  assert.equal(h.obj.replica.mids.length,2);assert.equal(h.obj.replica.mids[1].v,43);
+ h.obj.onUpstream(JSON.stringify({type:'ticker',msg:{market_ticker:tk,yes_bid_dollars:'0.4100',yes_ask_dollars:'0.4500',ts:3}}));
+ assert.equal(h.obj.replica.mids.length,2,'an unchanged mid adds nothing');
+ h.obj.onUpstream(JSON.stringify({type:'orderbook_snapshot',sending_ts_ms:at,msg:{market_ticker:tk,yes_dollars_fp:[['0.4000','10.00']],no_dollars_fp:[['0.5500','10.00']]}}));
+ assert.equal(h.obj.replica.mids.length,2,'book frames no longer drive the mid series');
  h.obj.onUpstream(JSON.stringify({type:'cfbenchmarks_value_5hz',msg:{index_id:'BRTI',source_ts_ms:at-100,value_usd:'100.02'}}));
  assert.equal(h.obj.replica.official.length,1);assert.equal(h.obj.replica.official[0].at,at);
  h.obj.replicaLoop();
