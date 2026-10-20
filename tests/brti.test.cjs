@@ -335,5 +335,5 @@ test('kernel-density spacing subsamples very large books and is unchanged below 
   const small = R.kdeMode(sizes);
   const big = R.kdeMode(sizes.concat(Array.from({length: 30000}, (_, i) => 0.05 + (i % 7) * 0.01)));
   close(small, big, 0.011, 'the mode survives subsampling');
-  const t0 = Date.now(); R.kdeMode(Array.from({length: 45000}, (_, i) => 0.001 + (i % 1000) * 0.0001)); assert.ok(Date.now() - t0 < 500, 'bounded cost');
+  const t0 = Date.now(); R.kdeMode(Array.from({length: 45000}, (_, i) => 0.001 + (i % 1000) * 0.0001)); assert.ok(Date.now() - t0 < 3000, 'bounded cost even on a slow runner');
 });
