@@ -1637,7 +1637,7 @@ export class KalshiFeed {
   }
   send(obj) { if (this.up) { obj.id = this.subId++; try { this.up.send(JSON.stringify(obj)); } catch (e) {} } }
   subscribeTickers() {                           // this window's market and the next; renewed at each boundary
-    const tk = currentTickers().slice(0,1), set = tk.join(","), wantDepth = this.clients.size > 0 || this.agentActive || research.depthWanted(Date.now()) || !!this.replica;
+    const tk = currentTickers().slice(0,1), set = tk.join(","), wantDepth = this.clients.size > 0 || this.agentActive || research.depthWanted(Date.now());
     if (set !== this.tickerSet || wantDepth !== this.depthSubscribed) {
       const old = [this.tickerSid, this.bookSid].filter(x => x != null);
       if (old.length) this.send({cmd: "unsubscribe", params: {sids: old}});
@@ -1833,6 +1833,7 @@ export class KalshiFeed {
       try { spec.open(ws); } catch (e) {}
       ws.addEventListener("message", ev => {
         if (b.ws !== ws || typeof ev.data !== "string") return;
+        b.messages = (b.messages || 0) + 1;                                  // every incoming frame counts toward Durable Object request volume
         let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
         if (!d || typeof d !== "object") return;
         b.fails = 0;
@@ -1854,12 +1855,8 @@ export class KalshiFeed {
   }
   noteKalshiMid(tk) {
     if (!this.replica || tk !== currentTickers()[0]) return;
-    const b = this.books[tk]; if (!b) return;
-    let yesBid = 0, noBid = 0;
-    for (const p of b.yes.keys()) if (p > yesBid) yesBid = p;
-    for (const p of b.no.keys()) if (p > noBid) noBid = p;
-    if (!(yesBid > 0 && noBid > 0)) return;
-    const mid = Math.round((yesBid + (1 - noBid)) / 2 * 10000) / 100;      // cents
+    const q = this.lastTicker[tk]; if (!q || !(q.bid > 0 && q.ask > 0)) return;
+    const mid = Math.round((q.bid + q.ask) / 2 * 10000) / 100;             // cents
     const s = this.replica.mids, last = s[s.length - 1];
     if (last && last.v === mid) return;
     s.push({t: Date.now(), v: mid});
@@ -1914,14 +1911,16 @@ export class KalshiFeed {
     const books = {};
     for (const [key, spec] of Object.entries(D.DEPTH_VENUES)) {
       const b = r.books[key];
-      books[spec.name] = b ? {state: b.ready ? "live" : b.state, bids: b.bids.size, asks: b.asks.size, ageMs: b.at ? Date.now() - b.at : null, note: b.note || null, used: !!(r.last && r.last.used.includes(spec.name)), excluded: r.last && r.last.excluded[spec.name] || null} : {state: "off"};
+      books[spec.name] = b ? {state: b.ready ? "live" : b.state, bids: b.bids.size, asks: b.asks.size, ageMs: b.at ? Date.now() - b.at : null, note: b.note || null, used: !!(r.last && r.last.used.includes(spec.name)), excluded: r.last && r.last.excluded[spec.name] || null,
+                              messages: b.messages || 0, messagesPerSec: b.messages && b.openedAt ? b.messages / Math.max(1, (Date.now() - b.openedAt) / 1000) : null} : {state: "off"};
     }
     const o = r.official[r.official.length - 1];
     return {enabled: true, version: globalThis.BTC15Replica.VERSION, at: r.last ? r.last.t : null, value: r.last ? r.last.value : null, reason: r.last ? r.last.reason || null : null,
             official: o ? {v: o.v, t: o.t, at: o.at} : null, diff: r.last && o && Number.isFinite(r.last.value) ? r.last.value - o.v : null,
             usedBooks: r.last ? r.last.used.length : 0, constituents: D.CONSTITUENTS.length, books, depthLimited: r.last ? !!r.last.depthLimited : null,
             tracking: r.tracking, lead: r.lead, ticks: r.ticks, tickGapMs: r.gapN ? r.gapMs / r.gapN : null, tickGapMaxMs: r.gapMax || null, since: r.startedAt,
-            officialKept: r.official.length, midsKept: r.mids.length, errors: r.errors, lastError: r.lastError, now: Date.now()};
+            officialKept: r.official.length, midsKept: r.mids.length, errors: r.errors, lastError: r.lastError, now: Date.now(),
+            upstreamCounts: this.counts || {}, upstreamSince: this.upSince || null};
   }
   pushTick(ms, v) {
     if (!Number.isFinite(v) || !(v > 0) || !Number.isFinite(ms) || Date.now() - ms > 5000 || ms > Date.now() + 1000) return;
@@ -2113,7 +2112,6 @@ export class KalshiFeed {
       this.books[d.msg.market_ticker].sourceKind = d.msg.ts_ms!=null?'ts_ms':'sending_ts_ms';
       this.books[d.msg.market_ticker].clockOffsetMs = this.bookClockOffsetBefore ?? null;
     }
-    if ((d.type === "orderbook_snapshot" || d.type === "orderbook_delta") && d.msg && d.msg.market_ticker) this.noteKalshiMid(d.msg.market_ticker);
     if (d.type === "cfbenchmarks_value_5hz" && d.msg && d.msg.index_id === "BRTI" && +d.msg.value_usd > 0) {
       this.pushTick(+d.msg.source_ts_ms, +d.msg.value_usd);
       if (this.replica) { const o = this.replica.official, t = +d.msg.source_ts_ms, last = o[o.length - 1]; if (Number.isFinite(t) && (!last || t > last.t)) o.push({t, at: Date.now(), v: +d.msg.value_usd}); }
@@ -2131,7 +2129,10 @@ export class KalshiFeed {
       const f = d.msg.last_60s_windowed_average_15min;
       this.settleAvg = f && +f.value > 0 ? {v: +f.value, n: +f.window_size, end: +f.window_end_ts_exclusive, at: Date.now()} : null;
     }
-    if (d.type === "ticker" && d.msg && d.msg.market_ticker) this.lastTicker[d.msg.market_ticker] = {bid: +d.msg.yes_bid_dollars || null, ask: +d.msg.yes_ask_dollars || null, at: Date.now()};
+    if (d.type === "ticker" && d.msg && d.msg.market_ticker) {
+      this.lastTicker[d.msg.market_ticker] = {bid: +d.msg.yes_bid_dollars || null, ask: +d.msg.yes_ask_dollars || null, at: Date.now()};
+      this.noteKalshiMid(d.msg.market_ticker);        // the ticker changes only when the price does: cheap, and enough for lead/lag
+    }
     if (d.type === "error" && [10,25,27].includes(Number(d.msg?.code))) {
       this.lastErr="Kalshi subscription error "+d.msg.code;
       if(Number(d.msg.code)===27)this.backoff=Math.max(this.backoff,30000);
