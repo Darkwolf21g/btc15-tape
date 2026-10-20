@@ -321,9 +321,10 @@ test('lead/lag scorer sees the Kalshi book move after the replica when it does, 
   const early = mids.map(x => ({t: Math.max(0, x.t - 1600), v: x.v}));
   const e = R.leadLag(replica, early);
   assert.equal(e.after, 0); assert.equal(e.before, e.events);
-  // A book pinned at 99c never counts as reacting.
+  // A book pinned at 99c is not asked to react: those index moves are counted separately.
   const pinned = mids.map(x => ({t: x.t, v: 99 + (x.v % 2) * 0.5}));
-  assert.equal(R.leadLag(replica, pinned).none, R.leadLag(replica, pinned).events);
+  const pr = R.leadLag(replica, pinned);
+  assert.equal(pr.events, 0); assert.ok(pr.pinned >= 28);
 });
 
 test('lead/lag needs enough replica movement to score', () => {
