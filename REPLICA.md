@@ -85,8 +85,11 @@ None of these is assumed small. The tracking lines measure the result.
 
 ## Worker-side replica
 
-The same calculation also runs inside the Cloudflare Worker, next to its Kalshi
-socket, whenever the Worker has a Kalshi key (set `REPLICA=off` to disable). The
+The same calculation can run inside the Cloudflare Worker, next to its Kalshi
+socket, when the Worker has a Kalshi key and `REPLICA=on` is set. It is off by
+default: running it saturated the Durable Object (240 ms ticks against the 200 ms
+target) and the collector's requests timed out behind it. Its result is recorded
+in HANDOFF.md. The
 Durable Object opens the six constituent sockets itself, recomputes every 200 ms,
 and every 10 s scores the value two ways:
 
@@ -108,7 +111,7 @@ fails until the daily reset). The Worker replica therefore takes the Kalshi mid
 from the `ticker` channel, which sends only on a price change, rather than the
 order-book delta stream, and does not hold a depth subscription of its own.
 Per-venue message rates are reported in the status so each socket's cost is
-visible; `REPLICA=off` stops it entirely. Check the Durable Object request count
+visible; it runs only with `REPLICA=on`. Check the Durable Object request count
 in the Cloudflare dashboard after enabling it.
 
 `GET /replica/public` (no token) returns the live summary plus one row per ten

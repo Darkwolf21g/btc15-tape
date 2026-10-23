@@ -530,7 +530,8 @@ test('Worker replica: books from the shared adapters, Kalshi mid series, scoring
  const h=harness(),at=h.now();
  h.context.fetch=async()=>{throw Error('no network in tests');};        // exchange sockets cannot open here
  h.context.setTimeout=()=>1;                                             // no loop or retry scheduling in tests
- h.obj.ensureReplica();
+ h.obj.ensureReplica();assert.equal(h.obj.replica,undefined,'opt-in: off unless REPLICA=on');
+ h.obj.env.REPLICA='on';h.obj.ensureReplica();
  assert.ok(h.obj.replica,'replica state exists with a key');
  const D=h.context.BTC15Depth,R=h.context.BTC15Replica;
  assert.deepEqual(Object.keys(h.obj.replica.books).sort(),Object.keys(D.DEPTH_VENUES).sort());
@@ -560,12 +561,12 @@ test('Worker replica: books from the shared adapters, Kalshi mid series, scoring
  assert.ok(s.lead&&s.lead.events===0,'too little history to score lead/lag yet');
  assert.equal(s.midsKept,2);assert.equal(s.officialKept,1);
  // Disabled by configuration: no state, status says so.
- const off=harness();off.obj.env.REPLICA='off';off.obj.ensureReplica();assert.equal(off.obj.replica,undefined);assert.equal(off.obj.replicaStatus().enabled,false);
+ const off=harness();off.obj.ensureReplica();assert.equal(off.obj.replica,undefined);assert.equal(off.obj.replicaStatus().enabled,false);assert.match(off.obj.replicaStatus().reason,/REPLICA=on/);
 });
 test('Worker replica keeps a ten-minute history for two days and serves it publicly without waking anything',async()=>{
  const h=harness(),at=h.now();
  h.context.fetch=async()=>{throw Error('no network');};h.context.setTimeout=()=>1;
- h.obj.ensureReplica();h.obj.replicaLoop();
+ h.obj.env.REPLICA='on';h.obj.ensureReplica();h.obj.replicaLoop();
  await h.obj.appendReplicaHistory();
  let rows=h.data.get('replica.history');assert.equal(rows.length,1);assert.equal(rows[0].at,at);assert.equal(rows[0].usedBooks,0);
  h.data.set('replica.history',[{at:at-49*3600000,usedBooks:3},...rows]);

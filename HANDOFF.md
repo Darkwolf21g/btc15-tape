@@ -1,5 +1,22 @@
 # BTC 15 Tape — handoff
 
+## Worker replica result — October 22, 2026
+
+The BRTI replica ran inside the Worker from 19 to 22 October, with six of the
+seven constituent books (LMAX has no public feed), scoring itself against the
+official 5 Hz tick and, by events, against the Kalshi book mid. Over 88 sharp
+index moves made while the book could react: the book moved AFTER the replica 40
+times, BEFORE it 47, at the same time once, never failed to react; direction
+agreed 70 of 88; median book move 264 ms *before* the replica. The replica itself
+ran about 200 ms behind the official tick on the Worker, with a $2.39 median
+error. Conclusion: computed from public feeds on Cloudflare's network, nothing in
+this pipeline is ahead of the Kalshi book; the quoters price the same information
+about a quarter second sooner. Together with the 654-window research result
+(model Brier worse than the market at every checkpoint), the latency hypothesis
+is closed by measurement. Running the replica saturated the Durable Object (240 ms
+ticks) and the collector's requests timed out behind it, so it is now opt-in
+(`REPLICA=on`). Phone replica, panel, `/replica/public` and the history remain.
+
 ## Depth clock offset — October 19, 2026
 
 Analysis of the 18 October research export (525 settled windows), the page record
