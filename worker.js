@@ -1813,7 +1813,9 @@ export class KalshiFeed {
   // the official 5 Hz tick (accuracy and head start) and, by events, against the Kalshi book's mid
   // (does the book move after the replica or before it). Research only; nothing trades on it.
   ensureReplica() {
-    if (this.env.REPLICA === "off" || !(this.env.KALSHI_KEY_ID && this.env.KALSHI_PRIVATE_KEY)) return;
+    // Opt-in (REPLICA=on). Running it saturated the Durable Object (240 ms ticks against a 200 ms
+    // target) and the collector's requests timed out behind it; see HANDOFF.md for the result it gave.
+    if (this.env.REPLICA !== "on" || !(this.env.KALSHI_KEY_ID && this.env.KALSHI_PRIVATE_KEY)) return;
     if (!this.replica) this.replica = {books: {}, hist: [], official: [], mids: [], last: null, state: {excluded: {}}, tracking: null, lead: null, scoredAt: 0, startedAt: Date.now(), ticks: 0, gapMs: 0, gapN: 0, gapMax: 0, lastTickAt: 0, errors: 0, lastError: null};
     for (const key of Object.keys(globalThis.BTC15Depth.DEPTH_VENUES)) this.connectDepth(key);
     if (!this.replicaTimer) this.replicaTimer = setTimeout(() => this.replicaLoop(), REPLICA_MS);
@@ -1907,7 +1909,7 @@ export class KalshiFeed {
   }
   replicaStatus() {
     const r = this.replica, D = globalThis.BTC15Depth;
-    if (!r) return {enabled: false, reason: this.env.REPLICA === "off" ? "disabled" : "no key"};
+    if (!r) return {enabled: false, reason: this.env.REPLICA !== "on" ? "off (set REPLICA=on to run it)" : "no key"};
     const books = {};
     for (const [key, spec] of Object.entries(D.DEPTH_VENUES)) {
       const b = r.books[key];
