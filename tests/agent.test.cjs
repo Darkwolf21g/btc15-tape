@@ -42,3 +42,8 @@ test('starting a session sends the chosen strategy and shows it in the status',a
  assert.ok(h.requests.some(u=>u.includes('/paper-session/start')&&u.includes('strategy=distance-v1')&&u.includes('token=fixture')),h.requests.join('\n'));
  assert.match(h.nodes.get('sessionStatus').textContent,/distance-v1/);assert.match(h.nodes.get('sessionStatus').textContent,/200 contracts, \$100.00 spent/);
 });
+test('a start whose reply lacks the selected strategy is called out instead of reported as scheduled',async()=>{
+ const h=agent();h.nodes.set('sessionStrategy',{value:'distance-v1'});
+ await vm.runInContext("$('sessionStart').onclick()",h.context);          // fixture Worker replies with a model-edge session
+ assert.match(h.nodes.get('sessionMessage').textContent,/scheduled a model-edge session, not distance-v1/);
+});
