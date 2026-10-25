@@ -206,7 +206,10 @@ async function refreshSession(){
 }
 for(const action of ['Start','Stop'])$('session'+action).onclick=async()=>{
  if(sessionSending)return;sessionSending=true;$('sessionStart').disabled=true;$('sessionStop').disabled=true;
- try{const d=await sessionCall(action.toLowerCase(),true,action==='Start'?{strategy:$('sessionStrategy').value}:{});$('sessionMessage').textContent=action==='Start'?`Scheduled (${d.session.settings?.strategy||'model-edge'}). Starts ${ET.format(new Date(d.session.startAt))} ET; you can close this page.`:'Stopped. Any open position will await official settlement.';}
+ try{const d=await sessionCall(action.toLowerCase(),true,action==='Start'?{strategy:$('sessionStrategy').value}:{});
+  if(action==='Start'){const want=$('sessionStrategy').value,got=d.session.settings?.strategy||'model-edge';
+   $('sessionMessage').textContent=got===want?`Scheduled (${got}). Starts ${ET.format(new Date(d.session.startAt))} ET; you can close this page.`:`The Worker scheduled a ${got} session, not ${want}: it is probably still running an older build. Stop this session and start again in a few minutes.`;}
+  else $('sessionMessage').textContent='Stopped. Any open position will await official settlement.';}
  catch(e){$('sessionMessage').textContent=e.message;}
  finally{sessionSending=false;await refreshSession();}
 };
