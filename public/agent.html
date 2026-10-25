@@ -54,13 +54,15 @@ pre,.notes {overflow-wrap:anywhere;}
 <section id="sessionPanel">
 <h2>One-hour paper session · full windows</h2>
 <p class="notes">Checks every 5 seconds from the start of each of four 15-minute windows. Starts at the next quarter hour; stops automatically after the fourth close. Uses simulated money only.</p>
+<div class="row"><label for="sessionStrategy">Strategy </label><select id="sessionStrategy" aria-label="Paper session strategy"><option value="model-edge">Model edge · 1 contract · 3¢ edge rule</option><option value="distance-v1">Distance · $100 per trade · enter ±$15, hold ≥$10, re-enter +$25</option></select></div>
 <div class="row"><button id="sessionStart" type="button">Start one-hour paper test</button><button id="sessionStop" type="button" class="danger">Stop session</button><button id="sessionExport" type="button">Download session</button></div>
 <p id="sessionMessage" class="notes" role="status"></p>
 <pre id="sessionStatus" aria-live="polite">Checking session…</pre>
 <pre id="sessionCoverage"></pre>
 <div class="tiles"><div class="tile"><span class="label">Realized net</span><b id="sessionPnl">—</b></div><div class="tile"><span class="label">Entries / early exits</span><b id="sessionFills">—</b></div><div class="tile"><span class="label">Open / pending</span><b id="sessionOpen">—</b></div></div>
 <pre id="sessionReasons"></pre>
-<p class="notes">Frozen research rule: buy the side with the largest estimated edge of at least 3¢ after fees. Sell when the bid after fees beats estimated hold value by 3¢. One contract at a time; 1–4 second arrival, original limit, 50% depth, 3 entry attempts per window, 30-second entry cooldown, $3 realized loss stop. The uncalibrated model can be wrong. Zero fills is a valid result.</p>
+<p class="notes"><b>Distance</b> ignores the model: it buys the side the official index is $15 or more past the target on, spending $100 at the ask (partial fills if the book is thin); holds while the distance stays at least $10; sells at the bid when it shrinks below $10 or the index crosses; after a sell it buys the same side again only once the index is $25 further out than where it sold; a cross restarts on the other side. No trades in the last 60 s of a window; 6 entry attempts per window, 10-second cooldown, $200 realized loss stop. Expect it to pay the spread and fees on every stop-out; the question the session answers is whether the rides to settlement cover them.</p>
+<p class="notes"><b>Model edge</b> (original rule): buy the side with the largest estimated edge of at least 3¢ after fees. Sell when the bid after fees beats estimated hold value by 3¢. One contract at a time; 1–4 second arrival, original limit, 50% depth, 3 entry attempts per window, 30-second entry cooldown, $3 realized loss stop. The uncalibrated model can be wrong. Zero fills is a valid result.</p>
 <p class="notes">Stop cancels pending simulations and prevents further entries or exits. Open positions remain pending until Kalshi officially settles them. Sessions are separate from the legacy agent and checkpoint research below.</p>
 </section>
 <h2 style="margin-top:24px">Legacy agent · separate experiment</h2>
@@ -182,8 +184,9 @@ const money = c => (c >= 0 ? "+" : "−") + "$" + (Math.abs(c) / 100).toFixed(2)
 const cents = v => (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + "¢";
 const escapeHtml = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let sessionData=null,sessionSending=false,sessionRefreshing=false;
-async function sessionCall(action,post=false){
- const r=await fetch('./paper-session/'+action+q(),{method:post?'POST':'GET',cache:'no-store',signal:AbortSignal.timeout(15000)});
+async function sessionCall(action,post=false,params={}){
+ const u=new URL('./paper-session/'+action,location.href);if(token)u.searchParams.set('token',token);for(const [k,v] of Object.entries(params))u.searchParams.set(k,v);
+ const r=await fetch(u,{method:post?'POST':'GET',cache:'no-store',signal:AbortSignal.timeout(15000)});
  const text=await r.text();let d;try{d=JSON.parse(text);}catch{d={error:r.status===403?'Save your stream token in Controls below.':'Session unavailable (HTTP '+r.status+').'};}
  if(!r.ok)throw Error(d.error||'Session request failed');return d;
 }
@@ -193,7 +196,7 @@ async function refreshSession(){
  $('sessionStart').disabled=sessionSending||!!(s&&(!s.stoppedAt&&sessionData.now<s.endAt||r.open));
  $('sessionStop').disabled=sessionSending||!s||!!s.stoppedAt;
  $('sessionExport').disabled=!s;
- $('sessionStatus').textContent=s?`${s.status.toUpperCase()} · ${s.version}\n${ET.format(new Date(s.startAt))} → ${ET.format(new Date(s.endAt))} ET\n${r.looks} looks · ${r.eligible} eligible · ${r.attempts} attempts · ${r.wins} profitable / ${r.losses} losing closed trades\nFees $${(r.feesCents/100).toFixed(2)} · realized drawdown $${(r.drawdownCents/100).toFixed(2)}${s.stopReason?'\nStopped: '+s.stopReason:''}`:'No timed session yet. Turn the legacy agent Off, then start here.';
+ $('sessionStatus').textContent=s?`${s.status.toUpperCase()} · ${s.version} · ${r.strategy||'model-edge'}\n${ET.format(new Date(s.startAt))} → ${ET.format(new Date(s.endAt))} ET\n${r.looks} looks · ${r.eligible} eligible · ${r.attempts} attempts · ${r.wins} profitable / ${r.losses} losing closed trades${r.contractsFilled>r.entryFills?` · ${r.contractsFilled} contracts, $${(r.spentCents/100).toFixed(2)} spent`:''}\nFees $${(r.feesCents/100).toFixed(2)} · realized drawdown $${(r.drawdownCents/100).toFixed(2)}${s.stopReason?'\nStopped: '+s.stopReason:''}`:'No timed session yet. Turn the legacy agent Off, then start here.';
  $('sessionPnl').textContent=r?money(r.pnlCents):'—';$('sessionFills').textContent=r?`${r.entryFills} / ${r.exitFills}`:'—';$('sessionOpen').textContent=r?`${r.open} / ${s.pending?1:0}`:'—';
  $('sessionReasons').textContent=r?Object.entries(r.reasons).map(([reason,n])=>`${n} · ${reason}`).join('\n'):'';
  const c=r?.coverage,d=r?.fillDelayMs;
@@ -203,7 +206,7 @@ async function refreshSession(){
 }
 for(const action of ['Start','Stop'])$('session'+action).onclick=async()=>{
  if(sessionSending)return;sessionSending=true;$('sessionStart').disabled=true;$('sessionStop').disabled=true;
- try{const d=await sessionCall(action.toLowerCase(),true);$('sessionMessage').textContent=action==='Start'?`Scheduled. Starts ${ET.format(new Date(d.session.startAt))} ET; you can close this page.`:'Stopped. Any open position will await official settlement.';}
+ try{const d=await sessionCall(action.toLowerCase(),true,action==='Start'?{strategy:$('sessionStrategy').value}:{});$('sessionMessage').textContent=action==='Start'?`Scheduled (${d.session.settings?.strategy||'model-edge'}). Starts ${ET.format(new Date(d.session.startAt))} ET; you can close this page.`:'Stopped. Any open position will await official settlement.';}
  catch(e){$('sessionMessage').textContent=e.message;}
  finally{sessionSending=false;await refreshSession();}
 };

@@ -111,6 +111,27 @@ replayed old frame is still rejected regardless of the estimate. Snapshots carry
 under the uncorrected rule. The estimate is visible on `/selftest` as
 `bookClockOffsetMs`. No model, threshold or cohort definition changed.
 
+## Timed-session strategies (October 25, 2026)
+
+A timed paper session is started with a strategy. `model-edge` is the original
+rule (one contract, buy the side whose model probability beats the ask by 3¢,
+sell when the bid beats hold value by 3¢). `distance-v1` ignores the model: it
+follows the official one-second index against the market's target. Enter when the
+index is at least $15 past the target, on that side, spending $100 at the ask with
+partial fills against half the displayed depth; hold while the distance stays at
+least $10; sell at the bid when it shrinks below $10 or the index crosses the
+target; after a sell, buy the same side again only once the index is $25 further
+from the target than where it sold; a cross restarts the entry rule on the other
+side. No trades in the last 60 s of a window; six entry attempts per window,
+10-second cooldown, $200 realized loss stop; open positions settle officially.
+Multi-contract fills record the average price, total fees and the levels taken;
+an unsold remainder after a partial exit stays open as its own position. Sessions
+record `settings.strategy` and `strategyParams`; reports carry `strategy`,
+`contractsFilled` and `spentCents`. Model-edge sessions are unchanged. A session
+is one hour; several sessions on different days are needed before a strategy's
+P&L means anything, and the research export's efficiency result applies: expect
+each stop-out to cost the spread plus fees.
+
 ## Chronological evaluation
 
 Fixed UTC test blocks contain 20 windows (five hours). For each checkpoint, choose

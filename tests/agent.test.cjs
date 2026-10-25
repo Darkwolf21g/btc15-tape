@@ -5,8 +5,8 @@ function agent(){
  const nodes=new Map(),requests=[];
  const context=vm.createContext({console,Intl,Date,AbortSignal,
   $:id=>{if(!nodes.has(id))nodes.set(id,{textContent:'',disabled:false});return nodes.get(id);},
-  q:()=>'?token=fixture',ET:new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit'}),
-  money:c=>(c/100).toFixed(2),fetch:async url=>{requests.push(url);return new Response(JSON.stringify(context.payload));},Response,
+  q:()=>'?token=fixture',token:'fixture',location:{href:'https://fixture.test/agent.html'},URL,ET:new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit'}),
+  money:c=>(c/100).toFixed(2),fetch:async url=>{requests.push(String(url));return new Response(JSON.stringify(context.payload));},Response,
  });
  for(const f of ['shared-model.js','shared-research.js','shared-session.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'..',f),'utf8'),context);
  const html=fs.readFileSync(path.join(__dirname,'../public/agent.html'),'utf8');
@@ -34,4 +34,11 @@ test('overlapping session polls coalesce while a response is pending',async()=>{
  h.context.fetch=async()=>{calls++;await gate;return new Response(JSON.stringify(h.context.payload));};
  const first=h.refresh();await h.refresh();assert.equal(calls,1);release();await first;
  await h.refresh();assert.equal(calls,2);
+});
+test('starting a session sends the chosen strategy and shows it in the status',async()=>{
+ const h=agent();h.nodes.set('sessionStrategy',{value:'distance-v1'});
+ h.context.payload={session:{...h.context.payload.session,settings:{...h.context.payload.session.settings,strategy:'distance-v1'}},report:{...h.context.payload.report,strategy:'distance-v1',contractsFilled:200,entryFills:1,spentCents:10000},now:h.context.payload.now};
+ await vm.runInContext("$('sessionStart').onclick()",h.context);
+ assert.ok(h.requests.some(u=>u.includes('/paper-session/start')&&u.includes('strategy=distance-v1')&&u.includes('token=fixture')),h.requests.join('\n'));
+ assert.match(h.nodes.get('sessionStatus').textContent,/distance-v1/);assert.match(h.nodes.get('sessionStatus').textContent,/200 contracts, \$100.00 spent/);
 });

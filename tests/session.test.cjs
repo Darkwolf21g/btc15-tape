@@ -71,7 +71,7 @@ test('new session freezes the v4 settlement cohort without changing execution po
  assert.equal(S.VERSION,'paper-session-v2');assert.equal(s.version,S.VERSION);
  assert.equal(s.settings.model,'brti-driftless-v4');assert.equal(s.settings.settlementConvention,'[close-60s,close)');
  assert.equal(S.compatible(s),true);assert.equal(S.reconcile(s,s.startAt),false);
- assert.deepEqual(copy(s.settings),{durationMs:3600000,cadenceMs:5000,delayMs:1000,maxDelayMs:4000,depthFraction:.5,quantity:1,minEdgeCents:3,exitEdgeCents:3,maxEntriesPerWindow:3,cooldownMs:30000,lossStopCents:300,model:'brti-driftless-v4',settlementConvention:'[close-60s,close)',feeAssumption:'general Kalshi taker fee, rounded up per one-contract fill'});
+ assert.deepEqual(copy(s.settings),{durationMs:3600000,cadenceMs:5000,delayMs:1000,maxDelayMs:4000,depthFraction:.5,quantity:1,minEdgeCents:3,exitEdgeCents:3,maxEntriesPerWindow:3,cooldownMs:30000,lossStopCents:300,model:'brti-driftless-v4',settlementConvention:'[close-60s,close)',feeAssumption:'general Kalshi taker fee, rounded up per one-contract fill',strategy:'model-edge',strategyParams:{name:'model-edge'}});
 });
 
 test('legacy report and scheduling reads preserve serialized attribution before transition',()=>{
@@ -196,4 +196,47 @@ test('canonical v4 research snapshots drive attributed timed-session decisions a
  const k=capture(at);assert.equal(k.status,'forecast');assert.equal(k.model,s.settings.model);assert.equal(k.settlementConvention,s.settings.settlementConvention);
  S.decide(s,k,'TEST',close);assert.equal(s.pending.action,'buy');S.arrive(s,capture(at+1000));
  assert.equal(s.trades.length,1);assert.equal(s.trades[0].model,k.model);assert.equal(s.trades[0].settlementConvention,k.settlementConvention);
+});
+
+// ---- distance-v1: a price-following rule that ignores the model
+function dq(R,at,index,target,yes=.4,no=.5,size=400,p=.5){const k=quote(R,at,p,yes,no,size);k.target=target;k.targetAt=at;k.index={source:'cfbenchmarks_value',value:index,ageMs:500,sourceAt:at-500,receivedAt:at,samples:900};return k;}
+function dsetup(){const {S,R}=h(),s=S.create(1800000000100,'distance-fixture','distance-v1'),at=s.startAt,close=Math.ceil(at/900000)*900;return {S,R,s,at,close};}
+test('distance-v1: enters at $15 from target spending $100 at the ask, holds above $10, sells below $10, re-enters only $25 further',()=>{
+ const {S,R,s,at,close}=dsetup();const K=80000;
+ assert.equal(s.settings.strategy,'distance-v1');assert.equal(S.report(s).strategyParams.enterUsd,15);
+ S.decide(s,dq(R,at,K+14.9,K),'TEST',close);assert.equal(s.pending,null);assert.match(s.looks.at(-1).reason,/inside entry band/);
+ S.decide(s,dq(R,at+5000,K+15,K),'TEST',close);assert.equal(s.pending.action,'buy');assert.equal(s.pending.side,'Up');assert.equal(s.pending.limit,50);assert.equal(s.pending.n,200,'$100 at 50c');
+ S.arrive(s,dq(R,at+6000,K+15,K));const t=s.trades[0];assert.equal(t.n,200);assert.equal(t.entryCents,50);assert.equal(t.entryFeeCents,S.report(s).feesCents);
+ assert.equal(S.report(s).spentCents,10000);assert.equal(S.report(s).contractsFilled,200);
+ S.decide(s,dq(R,at+10000,K+10,K),'TEST',close);assert.equal(s.pending,null);assert.match(s.looks.at(-1).reason,/hold: distance 10.00/);
+ S.decide(s,dq(R,at+15000,K+9.9,K,.46,.5),'TEST',close);assert.equal(s.pending.action,'sell');assert.equal(s.pending.n,200);assert.equal(s.pending.limit,46,'sell at the YES bid');
+ S.arrive(s,dq(R,at+16000,K+9.9,K,.46,.5));assert.equal(t.pnlCents!=null,true);assert.equal(t.exitCents,46);assert.equal(t.resolution,'early exit');assert.equal(t.pnlCents,Math.round((200*(46-50)-t.exitFeeCents-t.entryFeeCents)*100)/100);
+ assert.equal(s.lastSell.side,'Up');assert.ok(Math.abs(s.lastSell.distanceUsd-9.9)<1e-9);
+ // Back above $15 but less than $25 further than the sell: wait. $25 further: buy again.
+ S.decide(s,dq(R,at+30000,K+30,K),'TEST',close);assert.equal(s.pending,null);assert.match(s.looks.at(-1).reason,/awaiting re-entry/);
+ S.decide(s,dq(R,at+35000,K+34.9,K),'TEST',close);assert.equal(s.pending.action,'buy');assert.equal(s.pending.side,'Up');
+});
+test('distance-v1: a cross sells at the bid and restarts on the other side; no trading in the final minute',()=>{
+ const {S,R,s,at,close}=dsetup();const K=80000;
+ S.decide(s,dq(R,at,K-20,K),'TEST',close);assert.equal(s.pending.side,'Down');assert.equal(s.pending.limit,60,'NO ask = 100 - YES bid');assert.equal(s.pending.n,166,'$100 at 60c');S.arrive(s,dq(R,at+1000,K-20,K));
+ S.decide(s,dq(R,at+5000,K+3,K),'TEST',close);assert.equal(s.pending.action,'sell');assert.match(s.looks.at(-1).reason,/crossed/);S.arrive(s,dq(R,at+6000,K+3,K));
+ assert.equal(s.trades[0].pnlCents!=null,true);
+ S.decide(s,dq(R,at+20000,K+16,K),'TEST',close);assert.equal(s.pending.action,'buy');assert.equal(s.pending.side,'Up','the cross restarts the entry rule on the other side without a re-entry wait');
+ S.arrive(s,dq(R,at+21000,K+16,K));
+ S.decide(s,dq(R,close*1000-60000-3000,K+2,K),'TEST',close);assert.equal(s.pending,null);assert.match(s.looks.at(-1).reason,/final minute/);
+ S.settle(s,'TEST','yes',close*1000+1);const won=s.trades[1];assert.equal(won.pnlCents,Math.round((won.n*(100-won.entryCents)-won.entryFeeCents)*100)/100);
+});
+test('distance-v1: partial fills keep the remainder open and a stale index or missing target pauses it',()=>{
+ const {S,R,s,at,close}=dsetup();const K=80000;
+ S.decide(s,dq(R,at,K+20,K,.4,.5,400),'TEST',close);assert.equal(s.pending.n,200);
+ S.arrive(s,dq(R,at+1000,K+20,K,.4,.5,100));assert.equal(s.trades[0].n,50,'half of 100 displayed');assert.match(s.attempts[0].reason,/partial/);
+ S.decide(s,dq(R,at+10000,K+5,K,.46,.5,40),'TEST',close);S.arrive(s,dq(R,at+11000,K+5,K,.46,.5,40));
+ const closed=s.trades.find(t=>t.pnlCents!=null),open=s.trades.find(t=>t.pnlCents==null);
+ assert.equal(closed.n,20);assert.equal(open.n,30);assert.ok(Math.abs(closed.entryFeeCents+open.entryFeeCents-s.attempts[0].feesCents)<0.011);
+ const k=dq(R,at+20000,K+20,K);k.index.ageMs=3001;S.decide(s,k,'TEST',close);assert.match(s.looks.at(-1).reason,/stale official index/);
+ const k2=dq(R,at+25000,K+20,K);k2.target=null;S.decide(s,k2,'TEST',close);assert.match(s.looks.at(-1).reason,/missing target/);
+});
+test('model-edge sessions are unchanged by the strategy option',()=>{
+ const {S,R,s,at,close}=setup();assert.equal(s.settings.strategy,'model-edge');
+ S.decide(s,quote(R,at),'TEST',close);assert.equal(s.pending.n,undefined);S.arrive(s,quote(R,at+1000));assert.equal(s.trades[0].n,undefined);assert.equal(s.trades[0].entryCents,50);
 });
