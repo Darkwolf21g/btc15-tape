@@ -23,7 +23,7 @@ function page(savedRecord = []) {
     return nodes.get(id);
   };
   const context = vm.createContext({
-    Date: Clock, console, Intl, URL, AbortSignal, getComputedStyle() { return {getPropertyValue() { return "#888"; }}; }, setInterval() {}, clearTimeout() {},
+    Date: Clock, console, Intl, URL, URLSearchParams, AbortSignal, getComputedStyle() { return {getPropertyValue() { return "#888"; }}; }, setInterval() {}, clearTimeout() {},
     setTimeout(fn, ms) { timers.push({fn, ms}); return timers.length; },
     window: {addEventListener() {}}, navigator: {},
     document: {getElementById: node, addEventListener() {}},
@@ -45,6 +45,7 @@ function page(savedRecord = []) {
       setTarget(mk, value) { typedTarget[mk] = value; },
       drawMainActual:realDrawMain,refreshCollector,VENUES,connectFeed,renderChipsActual:realRenderChips,kalshiGet,pollExchange,onTrade,onLiq,flow,liqs,
     };
+    globalThis.tokenFromLink = tokenFromLink; globalThis.store = store;
   `, context);
   const api = context.api;
   api.setBasisValue(0);
@@ -531,4 +532,21 @@ test('closing-estimate chart renders endpoint scales without requiring a trailin
  const centre=lines.find(line=>line.length===2&&line[0][1]===arcs[0][1]&&line[1][1]===arcs[0][1]);assert.ok(centre);
  // Both scales stay inside the chart's vertical plotting region.
  assert.ok(outer[1]>=10&&outer[1]+outer[3]<=378);
+});
+
+test('a setup link carries the stream token in the fragment, saves it, and scrubs the address bar', () => {
+  const h = page();
+  // The harness has no location.hash; drive the helper directly with a replaced location.
+  const saved = [];
+  h.context.location = {protocol: 'https:', hostname: 'example.com', origin: 'https://example.com', pathname: '/', hash: '#token=abc%20123', search: ''};
+  h.context.history = {replaceState: (a, b, url) => saved.push(url)};
+  h.context.store.set('feedToken', 'old');
+  assert.equal(h.context.tokenFromLink(), 'abc 123');
+  assert.equal(h.context.store.get('feedToken'), 'abc 123', 'the link token replaces the stored one');
+  assert.deepEqual(saved, ['/'], 'the fragment is removed from the address bar');
+  h.context.location.hash = ''; h.context.location.search = '?token=q1';
+  assert.equal(h.context.tokenFromLink(), 'q1', 'a query token is accepted too');
+  h.context.location.search = '';
+  assert.equal(h.context.tokenFromLink(), null, 'no token in the link leaves the stored one alone');
+  assert.equal(h.context.store.get('feedToken'), 'q1');
 });

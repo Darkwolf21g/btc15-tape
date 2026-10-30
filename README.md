@@ -137,6 +137,7 @@ With an API key the Worker also streams Kalshi's own data to the page: the offic
 1. On Kalshi: profile settings → **API Keys** → **Create New API Key**, Ed25519 (the default). Save the downloaded key file; the private key is shown once. Note the key ID.
 2. On Cloudflare: the `btc15-tape` Worker → **Settings → Variables and Secrets** → add secrets `KALSHI_KEY_ID` (the key ID) and `KALSHI_PRIVATE_KEY` (the whole key file, including the BEGIN/END lines). Optionally `FEED_TOKEN`: any password; then enter it in the page under *Target and calibration → Stream token*.
 3. Reload the page. The Market chips show `BRTI official 0.3 s` when the stream is live, or why it is not (no key, Kalshi refused, connecting).
+4. Another phone: the token lives in each browser. Under *Target and calibration*, **Copy link for another phone** makes a link that carries the token in its fragment (`#token=…`, never sent to the server); open it once on the other phone and that browser is set up, for the tape and the agent page. Anyone with the link gets the same access, so share it privately.
 
 The key signs the WebSocket handshake and read-only API requests. The Worker subscribes to BRTI and the current contract; depth is enabled for viewers, paper activity and research bursts. CF Benchmarks data needs the account entitlement. One Durable Object shares the upstream connection and keeps collecting without viewers when credentials are configured. Never paste the key anywhere but the Cloudflare secret.
 
