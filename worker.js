@@ -79,8 +79,26 @@ export default {
     }
   },
   async fetch(request, env) {
-    const url = new URL(request.url), path = url.pathname.replace(/\/+$/, "");
+    let url = new URL(request.url);
+    const path = url.pathname.replace(/\/+$/, "");
     if (request.method === "OPTIONS") return new Response(null, {headers: {...CORS, "Access-Control-Allow-Headers": "Content-Type"}});
+    // Setup link: /setup?token=... verifies the token, keeps it as a secure same-site cookie for this
+    // site, and sends the browser on to the tape with the token in the fragment so the page saves it
+    // too. Another phone is then set up by opening one link. The cookie is HttpOnly: page scripts
+    // never see it, and SameSite=Lax keeps cross-site requests from carrying it.
+    if (path === "/setup") {
+      if (!env.FEED_TOKEN) return Response.redirect(url.origin + "/", 302);
+      const t = url.searchParams.get("token") || "";
+      if (t !== env.FEED_TOKEN) return new Response("token", {status: 403, headers: CORS});
+      return new Response(null, {status: 302, headers: {Location: url.origin + "/#token=" + encodeURIComponent(t), "Cache-Control": "no-store",
+        "Set-Cookie": "btc15_token=" + encodeURIComponent(t) + "; Path=/; Max-Age=31536000; Secure; HttpOnly; SameSite=Lax"}});
+    }
+    // A browser that holds the cookie is treated exactly like one that sent ?token=.
+    if (env.FEED_TOKEN && url.searchParams.get("token") == null) {
+      const m = (request.headers.get("Cookie") || "").match(/(?:^|;\s*)btc15_token=([^;]+)/);
+      let c = null; try { c = m ? decodeURIComponent(m[1]) : null; } catch (e) {}
+      if (c === env.FEED_TOKEN) { url.searchParams.set("token", c); request = new Request(url.toString(), request); }
+    }
     // Public, read-only: the Worker replica's research summary. No key material, no account data,
     // no Kalshi REST calls and nothing is woken by reading it.
     if (path === "/replica/public") {
