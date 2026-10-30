@@ -175,7 +175,20 @@ globalThis.BTC15CollectorHealth=Object.freeze({summarize});
 // END SHARED BTC15 COLLECTOR HEALTH
 const $ = id => document.getElementById(id);
 const store = {get(k) { try { return JSON.parse(localStorage.getItem("btc15tape." + k)); } catch (e) { return null; } }, set(k, v) { try { localStorage.setItem("btc15tape." + k, JSON.stringify(v)); } catch (e) {} }};
-let token = store.get("feedToken") || "";
+// A setup link carries the stream token in the URL fragment (#token=…), so another phone can be
+// set up by opening a link instead of typing. The fragment never reaches the server or its logs;
+// a ?token= query is accepted too. Either way the token is saved here and removed from the address bar.
+function tokenFromLink() {
+  try {
+    const hash = new URLSearchParams(location.hash.replace(/^#/, "")), query = new URLSearchParams(location.search);
+    const t = (hash.get("token") || query.get("token") || "").trim();
+    if (!t) return null;
+    store.set("feedToken", t);
+    history.replaceState(null, "", location.pathname);
+    return t;
+  } catch (e) { return null; }
+}
+let token = tokenFromLink() || store.get("feedToken") || "";
 const q = () => token ? "?token=" + encodeURIComponent(token) : "";
 const ET = new Intl.DateTimeFormat("en-US", {timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit"});
 const mmss = l => `${Math.floor((l || 0) / 60)}:${String((l || 0) % 60).padStart(2, "0")}`;
