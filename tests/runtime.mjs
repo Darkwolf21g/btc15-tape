@@ -21,5 +21,13 @@ try {
  assert.equal((await mf.dispatchFetch('https://test/paper-session/status')).status,403);
  const session=await (await mf.dispatchFetch('https://test/paper-session/status?token=local-test-token')).json();assert.equal(session.session,null);
  assert.equal((await mf.dispatchFetch('https://test/paper-session/start?token=local-test-token',{method:'POST'})).status,409);
- console.log('Worker runtime: auth, SQLite, default OFF, controls, research report/export/retention PASS');
+ // Setup link: wrong token refused; right token sets a cookie and redirects into the tape; the cookie then authenticates reads.
+ assert.equal((await mf.dispatchFetch('https://test/setup?token=wrong',{redirect:'manual'})).status,403);
+ const setup=await mf.dispatchFetch('https://test/setup?token=local-test-token',{redirect:'manual'});
+ assert.equal(setup.status,302);assert.equal(setup.headers.get('location'),'https://test/#token=local-test-token');
+ const cookie=setup.headers.get('set-cookie');assert.match(cookie,/^btc15_token=local-test-token; Path=\/; Max-Age=31536000; Secure; HttpOnly; SameSite=Lax$/);
+ const viaCookie=await mf.dispatchFetch('https://test/collector/status',{headers:{Cookie:'other=1; btc15_token=local-test-token'}});assert.equal(viaCookie.status,200);
+ assert.equal((await mf.dispatchFetch('https://test/collector/status',{headers:{Cookie:'btc15_token=nope'}})).status,403);
+ const sessionViaCookie=await mf.dispatchFetch('https://test/paper-session/status',{headers:{Cookie:'btc15_token=local-test-token'}});assert.equal(sessionViaCookie.status,200,'the DO sees the token the outer worker forwarded');
+ console.log('Worker runtime: auth, SQLite, default OFF, controls, research report/export/retention, setup link PASS');
 } finally { await mf.dispose(); }

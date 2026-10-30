@@ -308,7 +308,7 @@ Manual quotes expire after 15 seconds. Editing does not place an order.</div></s
       <button id="feedTokSet" type="button">Set token</button>
       <button id="feedTokLink" type="button">Copy link for another phone</button>
     </div>
-    <p id="feedTokenHelp" class="notes">Use the FEED_TOKEN configured on your relay, not your Kalshi API key. Saved in this browser on this site. Required for a protected BRTI stream, collector and agent data. <b>Copy link for another phone</b> makes a link that carries the token; open it on the other phone once and that phone is set up (the token is saved there and dropped from the address bar). Anyone with that link gets the same access, so send it privately.</p>
+    <p id="feedTokenHelp" class="notes">Use the FEED_TOKEN configured on your relay, not your Kalshi API key. Saved in this browser on this site. Required for a protected BRTI stream, collector and agent data. <b>Copy link for another phone</b> makes a link that carries the token; open it on the other phone once and that phone is set up (the relay checks the token, keeps it for this site, and the page saves it too). Anyone with that link gets the same access, so send it privately.</p>
     <p id="feedTokLinkOut" class="notes" style="word-break:break-all" hidden></p>
     <div class="row">
       <input aria-label="Bankroll for sizing in USD" id="bankIn" inputmode="decimal" placeholder="Bankroll for sizing, $ (now 500)" autocomplete="off">
@@ -2667,13 +2667,18 @@ $("feedTokSet").addEventListener("click", () => {
   resetFeed(); refreshCollector(); agentRefresh();
 });
 $("feedTokIn").addEventListener("keydown", e => { if (e.key === "Enter") $("feedTokSet").click(); });
+// A setup link opened while the tape is already in this tab only changes the fragment: apply it then too.
+window.addEventListener("hashchange", () => {
+  const t = tokenFromLink(); if (!t) return;
+  feed.token = t; $("feedTokIn").placeholder = "Token set from link"; resetFeed(); refreshCollector(); agentRefresh();
+});
 $("feedTokLink").addEventListener("click", async () => {
   const out = $("feedTokLinkOut");
   if (!feed.token) { out.hidden = false; out.textContent = "Set a token first."; return; }
-  const link = location.origin + location.pathname + "#token=" + encodeURIComponent(feed.token);
+  const link = location.origin + "/setup?token=" + encodeURIComponent(feed.token);
   let copied = false;
   try { await navigator.clipboard.writeText(link); copied = true; } catch (e) {}
-  out.hidden = false; out.textContent = (copied ? "Copied. " : "Copy this: ") + link + " — opens the tape set up; the agent page there picks the token up too.";
+  out.hidden = false; out.textContent = (copied ? "Copied. " : "Copy this: ") + link + " — open it once on the other phone; it checks the token, keeps it for this site, and opens the tape set up (agent page included).";
 });
 $("feedAccess").addEventListener("click", () => {
   $("setup").open = true; $("feedTokIn").scrollIntoView({block:"center"}); $("feedTokIn").focus();
