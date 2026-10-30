@@ -2667,6 +2667,11 @@ $("feedTokSet").addEventListener("click", () => {
   resetFeed(); refreshCollector(); agentRefresh();
 });
 $("feedTokIn").addEventListener("keydown", e => { if (e.key === "Enter") $("feedTokSet").click(); });
+// A setup link opened while the tape is already in this tab only changes the fragment: apply it then too.
+window.addEventListener("hashchange", () => {
+  const t = tokenFromLink(); if (!t) return;
+  feed.token = t; $("feedTokIn").placeholder = "Token set from link"; resetFeed(); refreshCollector(); agentRefresh();
+});
 $("feedTokLink").addEventListener("click", async () => {
   const out = $("feedTokLinkOut");
   if (!feed.token) { out.hidden = false; out.textContent = "Set a token first."; return; }

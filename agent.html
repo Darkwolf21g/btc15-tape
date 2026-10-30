@@ -189,6 +189,7 @@ function tokenFromLink() {
   } catch (e) { return null; }
 }
 let token = tokenFromLink() || store.get("feedToken") || "";
+if (typeof window !== "undefined") window.addEventListener("hashchange", () => { const t = tokenFromLink(); if (t) { token = t; refresh(); refreshSession(); } });
 const q = () => token ? "?token=" + encodeURIComponent(token) : "";
 const ET = new Intl.DateTimeFormat("en-US", {timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit"});
 const mmss = l => `${Math.floor((l || 0) / 60)}:${String((l || 0) % 60).padStart(2, "0")}`;
