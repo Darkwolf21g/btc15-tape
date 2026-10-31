@@ -24,14 +24,19 @@ jobs:
           echo "::group::series.json"; cat scan/series.json; echo "::endgroup::"
       - name: Publish results to the scan-results branch
         env:
-          TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          R: ${{ github.repository }}
         run: |
-          set -e
+          set -o pipefail
           stamp=$(date -u +%Y%m%dT%H%M%SZ)
-          tmp=$(mktemp -d); cp -r scan "$tmp/$stamp"; cd "$tmp"
-          git init -q -b scan-results; git config user.name scan-bot; git config user.email scan-bot@users.noreply.github.com
-          git add -A; git commit -q -m "scan $stamp"
-          git push -q -f "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" scan-results
+          gh api -X POST "repos/$R/git/refs" -f ref=refs/heads/scan-results -f sha="$GITHUB_SHA" 2>&1 | tail -c 300 || true
+          for f in SUMMARY.md series.json markets.json; do
+            sha=$(gh api "repos/$R/contents/scan/$f?ref=scan-results" --jq .sha 2>/dev/null || true)
+            base64 -w0 "scan/$f" > /tmp/b64
+            if ! out=$(gh api -X PUT "repos/$R/contents/scan/$f" -f message="scan $stamp: $f" -f branch=scan-results -F content=@/tmp/b64 ${sha:+-f sha=$sha} 2>&1); then
+              echo "::error::publish $f failed: $(echo "$out" | tail -c 400)"; exit 1
+            fi
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: kalshi-scan
