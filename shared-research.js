@@ -2,6 +2,10 @@
 (() => {
 const VERSION = 'settlement-research-v2';
 const BIAS_VERSION = 'btc15-bias-v3';
+// Time-of-day groups in New York time, for the favourite/underdog calibration split.
+const HOUR_GROUPS=[[21,24,'overnight 21–08'],[0,8,'overnight 21–08'],[8,11,'US morning 08–11'],[11,16,'US day 11–16'],[16,21,'US evening 16–21']];
+const etHour=sec=>{try{return Number(new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'numeric',hourCycle:'h23'}).format(new Date(sec*1000)));}catch(e){return null;}};
+const hourGroup=sec=>{const h=etHour(sec);if(!finite(h))return null;const g=HOUR_GROUPS.find(([lo,hi])=>h>=lo&&h<hi);return g?g[2]:null;};
 const LEGACY_SETTLEMENT_CONVENTION = '(close-60s,close]';
 const PRICE_BANDS = [0,10,30,50,70,90,100];
 const CHECKS = [600, 300, 120, 60, 30, 15, 5];
@@ -161,9 +165,9 @@ function report(all) {
 function biasReport(recorded) {
   const groups=new Map(), seen=new Set();let captured=0,settled=0,firstAt=null,lastAt=null;
   const coverage={pending:0,unlisted:0,invalid:0,legacy:0,missingMove:0,missingArrival:0};
-  const add=(hypothesis,checkpoint,side,band,w,k)=>{
-    const key=[hypothesis,checkpoint,side,band??'all'].join(':');
-    if(!groups.has(key))groups.set(key,{hypothesis,checkpoint,side,band,n:0,wins:0,askSum:0,costSum:0,
+  const add=(hypothesis,checkpoint,side,band,w,k,role)=>{
+    const key=[hypothesis,checkpoint,role??side,band??'all'].join(':');
+    if(!groups.has(key))groups.set(key,{hypothesis,checkpoint,side:role??side,band,n:0,wins:0,askSum:0,costSum:0,
       attempts:0,filled:0,fillWins:0,pnlCents:0,feesCents:0,spentCents:0,equity:0,peak:0,maxDrawdownCents:0,
       markoutN:0,markoutSum:0,delaySum:0,days:new Set(),skips:{}});
     const g=groups.get(key),level=(side==='Up'?k.depth.yes:k.depth.no)[0];
@@ -208,6 +212,9 @@ function biasReport(recorded) {
         add('settlement-disagreement',c,k.bias.projectedAbove?'Up':'Down',null,w,k);
       if(!finite(k.bias.move5Z))coverage.missingMove++;
       else if(Math.abs(k.bias.move5Z)>=1)add('index-follow-through',c,k.bias.move5Z>0?'Up':'Down',null,w,k);
+      // Favourite and underdog by New York time of day: is the book calibrated at every hour?
+      const mid=(k.depth.bidCents+k.depth.askCents)/2,group=hourGroup(w.close);
+      if(group&&finite(mid)&&mid!==50){const fav=mid>50?'Up':'Down',dog=fav==='Up'?'Down':'Up';add('time-of-day',c,fav,group,w,k,'favourite');add('time-of-day',c,dog,group,w,k,'underdog');}
     }
   }
   const rows=[...groups.values()].map(g=>{
@@ -222,7 +229,8 @@ function biasReport(recorded) {
     status:captured?'Collecting forward evidence · no validated edge':'Waiting for new captures · no historical reconstruction',
     definitions:{'price-bands':'Each side in fixed ask-price bands, bought independently at the original limit.',
       'settlement-disagreement':'Final-minute spot and projected average disagree; buy the projected-average side.',
-      'index-follow-through':'Five-second BRTI move of at least one short-volatility scale; buy that direction.'},
+      'index-follow-through':'Five-second BRTI move of at least one short-volatility scale; buy that direction.',
+      'time-of-day':'The favourite (mid above 50¢) and the underdog, bought at the ask, grouped by New York time of day. Tests whether the book is calibrated at every hour.'},
     limitations:['Fixed hypotheses start only with version-tagged captures; no fitted thresholds or historical backfill.',
       'Each checkpoint, price band and side is separate. Rows overlap; do not sum P&L or sample sizes.',
       'Win rate covers all eligible quotes; net P&L covers simulated fills only. Fill selection can change outcomes.',
@@ -230,5 +238,5 @@ function biasReport(recorded) {
       'Repeated windows may be dependent. No confidence, significance or automatic promotion claim.',
       'Fee multiplier 1 and depth haircut are assumptions; missing data and rolling retention may bias results.']};
 }
-globalThis.BTC15Research=Object.freeze({DEPTH_POLICY, clockOffsetEstimate, VERSION,BIAS_VERSION,LEGACY_SETTLEMENT_CONVENTION,CHECKS,SETTINGS,currentCohort,depthWanted,depthSnapshot,snapshot,simulate,report,biasReport});
+globalThis.BTC15Research=Object.freeze({DEPTH_POLICY, clockOffsetEstimate, hourGroup, VERSION,BIAS_VERSION,LEGACY_SETTLEMENT_CONVENTION,CHECKS,SETTINGS,currentCohort,depthWanted,depthSnapshot,snapshot,simulate,report,biasReport});
 })();

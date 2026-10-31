@@ -579,3 +579,18 @@ test('Worker replica keeps a ten-minute history for two days and serves it publi
  const cold=harness();const c=await cold.obj.fetch(new cold.context.Request('https://x/replica/public'));
  assert.equal((await c.json()).live.enabled,false,'before the replica runs, the public view says so');
 });
+test('bias research splits favourite and underdog by New York time of day',()=>{
+ const h=harness(),rows=tagged(h,3);
+ // 1800000900 = 2027-01-15T10:15:00Z = 05:15 ET (overnight group); shift two windows into other groups.
+ assert.equal(h.r.hourGroup(1800000900),'overnight 21–08');
+ assert.equal(h.r.hourGroup(1800000900+5*3600),'US morning 08–11');
+ assert.equal(h.r.hourGroup(1800000900+9*3600),'US day 11–16');
+ assert.equal(h.r.hourGroup(1800000900+13*3600),'US evening 16–21');
+ const r=h.r.biasReport(rows),tod=r.rows.filter(x=>x.hypothesis==='time-of-day');
+ assert.ok(tod.length>=2);
+ const fav=tod.find(x=>x.side==='favourite'&&x.checkpoint===60),dog=tod.find(x=>x.side==='underdog'&&x.checkpoint===60);
+ assert.ok(fav&&dog);assert.equal(fav.band,'overnight 21–08');
+ // The fixture book is yes 40c bid / no 50c bid: Up ask 50c, Down ask 60c, Up mid 45c, so Down is the favourite.
+ assert.equal(fav.meanAskCents,60);assert.equal(dog.meanAskCents,50);
+ assert.ok(r.definitions['time-of-day']);
+});
