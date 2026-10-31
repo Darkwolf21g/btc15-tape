@@ -301,3 +301,33 @@ allows at most 250 ms of source-clock lead, records the raw signed source age an
 clocks or permission to use data received later. That correction introduced bias
 version v2, excluding v1 captures. The current settlement-window correction starts
 a separate v3 cohort. No prior captured book is repaired retrospectively.
+
+## Market scan — 31 October 2026
+
+`scripts/scan-markets.mjs`, run by the manual **Kalshi market scan** workflow
+(results on the `scan-results` branch), reads every open Kalshi event closing
+within 14 days from the public API and groups the markets by series with a
+reference-price class. It exists to look for the shape that paid in the public
+esports-arbitrage write-up — a liquid external reference next to a thin book —
+rather than for a better BTC predictor. No key, no orders.
+
+First run (Saturday 10:54–11:16 ET): 15,579 series listed, 22,443 open events,
+5,131 live series, 68,576 markets. Findings:
+
+- Volume sits in sports with tight books: college football, tennis, NFL spreads,
+  EPL, NBA, 1–3¢ median spreads. Those have the sportsbook reference *and* makers
+  already using it; nothing to add.
+- Wide spreads are of two kinds. Far-dated games (more than three days out) show
+  10–80¢ spreads with no volume: nobody quoting is not an opportunity, it is the
+  absence of a counterparty. Match-day books in cricket (ODI 18¢ median on
+  $3M/day across four markets; T20 14¢), CS2 (6.5¢ on 936k/day), Dota 2 (8.5¢)
+  and goalscorer props (6¢) are the only places with both volume and width — the
+  Kalshi counterpart of the write-up's market, pre-game and in-play.
+- Kalshi markets are now fractional (`*_fp` sizes, `*_dollars` prices); the
+  legacy integer fields are empty. The scan reads the new ones.
+
+Nothing here is an edge; it is where one would have to be measured. The
+measurement that would decide it is the one the write-up did: de-vigged
+sportsbook (or exchange) odds against the Kalshi mid on match day, logged over
+weeks, with the fill-conditional outcome of each divergence — the leftover leg
+is where that author lost a third of his gross.
