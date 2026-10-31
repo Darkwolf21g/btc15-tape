@@ -234,6 +234,17 @@ The following definitions are frozen before outcomes arrive:
    received. Missing earlier readings do not become a zero move. The existing
    volatility estimate includes recent observations; this is not an independently
    estimated statistical z-test.
+4. **Time of day:** at each checkpoint, the favourite (the side whose Kalshi
+   mid is above 50¢) and the underdog, each bought at its ask, grouped by New
+   York time of day: overnight 21–08, US morning 08–11, US day 11–16, US evening
+   16–21. Windows with a 50¢ mid are skipped. The question is whether the book
+   is calibrated at every hour, after the 31 October offline look at 654
+   windows found the overnight favourite at the 10-minute checkpoint about 4¢
+   under its win rate before fees — 1.8 standard errors, one cell of 24, which
+   is what noise looks like. Rows are keyed by role (favourite/underdog), not
+   Up/Down, so they sit outside the page's side filter. The rule set in
+   advance: a gap that is still there at three times the sample is worth
+   a prospective test; one that is not was noise. Nothing trades on it.
 
 Each experiment uses the existing delayed one-contract simulation: original ask
 as limit, arrival 1–4 seconds later and strictly before close, valid fresh source

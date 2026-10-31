@@ -99,6 +99,7 @@ pre,.notes {overflow-wrap:anywhere;}
 <p class="notes">Price-band comparison: orange is average ask plus estimated fee; green is observed win rate. A gap is descriptive, not proof of profit. Net results below include delayed simulated fills.</p>
 <svg id="biasChart" viewBox="0 0 620 250" role="img" aria-label="Price-band win rate and cost comparison"></svg>
 <div class="table-scroll"><table><caption class="notes">Independent price-band experiments · never add these returns together</caption><thead><tr><th>Ask band</th><th>Windows</th><th>Win rate</th><th>All-in cost</th><th>Fills</th><th>Net / fill</th></tr></thead><tbody id="biasRows"></tbody></table></div>
+<div class="table-scroll"><table><caption class="notes">Favourite and underdog by New York time of day · selected checkpoint, both sides · a gap between win rate and all-in cost that survives three times the sample is worth a look; one that does not was noise</caption><thead><tr><th>Hours (ET)</th><th>Side</th><th>Windows</th><th>Win rate</th><th>All-in cost</th><th>Edge pre-fill</th><th>Fills</th><th>Net / fill</th></tr></thead><tbody id="biasHourRows"></tbody></table></div>
 <p id="biasCoverage" class="notes"></p>
 <p class="notes">New captures only. Each side and checkpoint is separate; rows can overlap. No automatic model changes. Fees use the general Kalshi multiplier of 1; actual account fees may differ. Depth does not guarantee fills. Export daily: summaries last 10 days and raw inputs 24 hours.</p>
 </div>
@@ -342,6 +343,7 @@ const biasCents=v=>Number.isFinite(v)?(v>0?'+':'')+v.toFixed(2)+'¢':'—';
 function renderBias(){
  const data=biasData,c=Number($('biasCheckpoint').value),side=$('biasSide').value;
  $('biasCards').replaceChildren();$('biasRows').replaceChildren();$('biasChart').replaceChildren();
+ $('biasHourRows').replaceChildren();
  if(!data){$('biasStatus').textContent='Bias report unavailable · refresh after the collector update.';$('biasCoverage').textContent='';return;}
  $('biasStatus').textContent=`${data.status} · ${data.captured} captures · ${data.eligibleSettledCheckpoints} eligible settled checkpoints`;
  const rows=data.rows.filter(r=>r.checkpoint===c&&r.side===side);
@@ -356,6 +358,10 @@ function renderBias(){
  const bands=rows.filter(r=>r.hypothesis==='price-bands').sort((a,b)=>parseFloat(a.band)-parseFloat(b.band));
  for(const r of bands){const tr=document.createElement('tr');for(const value of [r.band,r.n,biasPct(r.winRate),r.meanAllInCents.toFixed(2)+'¢',`${r.filled}/${r.attempts}`,biasCents(r.meanNetCents)]){const td=document.createElement('td');td.textContent=value;tr.append(td);}$('biasRows').append(tr);}
  if(!bands.length){const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=6;td.textContent='Waiting for settled price-band observations.';tr.append(td);$('biasRows').append(tr);}
+ const HOUR_ORDER=['overnight 21–08','US morning 08–11','US day 11–16','US evening 16–21'];
+ const hours=data.rows.filter(r=>r.hypothesis==='time-of-day'&&r.checkpoint===c).sort((a,b)=>(HOUR_ORDER.indexOf(a.band)-HOUR_ORDER.indexOf(b.band))||a.side.localeCompare(b.side));
+ for(const r of hours){const tr=document.createElement('tr');for(const value of [r.band,r.side,r.n,biasPct(r.winRate),r.meanAllInCents.toFixed(2)+'¢',biasCents(100*r.winRate-r.meanAllInCents),`${r.filled}/${r.attempts}`,biasCents(r.meanNetCents)]){const td=document.createElement('td');td.textContent=value;tr.append(td);}$('biasHourRows').append(tr);}
+ if(!hours.length){const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=8;td.textContent='Waiting for settled time-of-day observations.';tr.append(td);$('biasHourRows').append(tr);}
  const svg=$('biasChart'),NS='http://www.w3.org/2000/svg';
  const el=(name,attrs,text)=>{const e=document.createElementNS(NS,name);for(const [k,v]of Object.entries(attrs))e.setAttribute(k,v);if(text!=null)e.textContent=text;svg.append(e);return e;};
  const height=Math.max(110,40+bands.length*34);svg.setAttribute('viewBox',`0 0 620 ${height}`);
