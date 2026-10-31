@@ -46,7 +46,7 @@ async function scanSeries(s){
    const yb=cents(m,'yes_bid'),ya=cents(m,'yes_ask');
    markets.push({ticker:m.ticker,event:m.event_ticker,series:s.ticker,category:s.category,title:m.title,subtitle:m.yes_sub_title||m.subtitle||'',
     yesBid:yb,yesAsk:ya,spread:(yb!=null&&ya!=null)?ya-yb:null,last:cents(m,'last_price'),volume:count(m,'volume'),volume24h:count(m,'volume_24h'),
-    openInterest:count(m,'open_interest'),liquidityCents:cents(m,'liquidity'),closeTime:m.close_time,type:m.market_type,strike:m.strike_type??null,floor:m.floor_strike??null,cap:m.cap_strike??null});
+    openInterest:count(m,'open_interest'),liquidityCents:cents(m,'liquidity'),yesBidSize:count(m,'yes_bid_size'),yesAskSize:count(m,'yes_ask_size'),rules:(m.rules_primary||'').slice(0,400),closeTime:m.close_time,type:m.market_type,strike:m.strike_type??null,floor:m.floor_strike??null,cap:m.cap_strike??null});
   }
   cursor=j.cursor;if(!cursor||!(j.markets||[]).length)break;await sleep(GAP_MS);
  }
@@ -79,18 +79,9 @@ for(const m of markets){
 }
 const series=[...bySeries.values()].map(s=>({...s,medianSpread:median(s.spreads),spreads:undefined,
  thinButActive:(median(s.spreads)??0)>=6&&s.volume24h>=500})).sort((a,b)=>b.volume24h-a.volume24h);
-// 3. Top of book for the widest active markets.
+// 3. The widest active markets; top-of-book size comes with the market object (yes_bid_size_fp / yes_ask_size_fp).
 const candidates=markets.filter(m=>m.spread!=null&&m.spread>=6&&m.yesBid>0&&m.yesAsk<100&&(m.volume24h||0)>=200)
  .sort((a,b)=>(b.volume24h||0)-(a.volume24h||0)).slice(0,150);
-for(const m of candidates){
- if(Date.now()-now>BUDGET_MS+8*60000)break;
- try{const ob=await get(`/markets/${m.ticker}/orderbook?depth=3`);const book=ob.orderbook||{};
-  const side=k=>{const fp=book[k+'_dollars']||book[k+'_fp'];const lv=(fp||book[k]||[]).map(l=>[fp?Math.round(Number(l[0])*100):Number(l[0]),Number(l[1])]);return lv;};
-  const yes=side('yes'),no=side('no'),top=a=>a.length?Math.max(...a.map(l=>l[0])):null,size=(a,p)=>a.filter(l=>l[0]===p).reduce((t,l)=>t+l[1],0);
-  const yb=top(yes),nb=top(no);m.book={yesBid:yb,yesBidSize:yb==null?null:size(yes,yb),noBid:nb,noBidSize:nb==null?null:size(no,nb),impliedSpread:(yb!=null&&nb!=null)?100-yb-nb:null};
- }catch(e){m.book={error:String(e.message||e)};}
- await sleep(120);
-}
 fs.writeFileSync(`${out}/markets.json`,JSON.stringify({at:new Date().toISOString(),horizonDays:HORIZON_DAYS,count:markets.length,markets}));
 fs.writeFileSync(`${out}/series.json`,JSON.stringify({at:new Date().toISOString(),series},null,1));
 const fmt=v=>v==null?'—':Number(v).toLocaleString('en-US',{maximumFractionDigits:0});
@@ -99,6 +90,6 @@ md+=`## Series by 24h volume (top 80)\n\n| Series | Category | Reference | Marke
 for(const s of series.slice(0,80))md+=`| ${s.series} | ${s.category||''} | ${s.reference} | ${s.n} | ${fmt(s.volume24h)} | ${fmt(s.openInterest)} | ${s.medianSpread==null?'—':s.medianSpread+'¢'} (${s.twoSided}) | ${s.thinButActive?'**yes**':''} |\n`;
 md+=`\n## Thin but active series (median two-sided spread ≥ 6¢ and ≥ 500 contracts / 24h)\n\n| Series | Reference | Markets | 24h vol | Median spread | Example |\n|---|---|---|---|---|---|\n`;
 for(const s of series.filter(s=>s.thinButActive))md+=`| ${s.series} | ${s.reference} | ${s.n} | ${fmt(s.volume24h)} | ${s.medianSpread}¢ | ${s.sample} |\n`;
-md+=`\n## Candidate markets with top-of-book depth (spread ≥ 6¢, ≥ 200 / 24h; top 150 by volume)\n\n| Ticker | Title | Bid/Ask | Spread | 24h vol | Yes bid × size | No bid × size | Implied spread |\n|---|---|---|---|---|---|---|---|\n`;
-for(const m of candidates){const b=m.book||{};md+=`| ${m.ticker} | ${(m.title+' '+m.subtitle).slice(0,70)} | ${m.yesBid}/${m.yesAsk} | ${m.spread}¢ | ${fmt(m.volume24h)} | ${b.yesBid==null?'—':b.yesBid+'¢ × '+fmt(b.yesBidSize)} | ${b.noBid==null?'—':b.noBid+'¢ × '+fmt(b.noBidSize)} | ${b.impliedSpread==null?(b.error||'—'):b.impliedSpread+'¢'} |\n`;}
+md+=`\n## Widest active markets (spread ≥ 6¢, ≥ 200 / 24h; top 150 by volume)\n\n| Ticker | Title | Bid × size / Ask × size | Spread | 24h vol | Closes |\n|---|---|---|---|---|---|\n`;
+for(const m of candidates)md+=`| ${m.ticker} | ${(m.title+' '+m.subtitle).slice(0,70)} | ${m.yesBid}¢ × ${fmt(m.yesBidSize)} / ${m.yesAsk}¢ × ${fmt(m.yesAskSize)} | ${m.spread}¢ | ${fmt(m.volume24h)} | ${m.closeTime} |\n`;
 fs.writeFileSync(`${out}/SUMMARY.md`,md);process.stderr.write('done\n');
