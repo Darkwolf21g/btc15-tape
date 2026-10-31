@@ -12,8 +12,6 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
@@ -23,20 +21,13 @@ jobs:
           echo "::group::SUMMARY.md"; cat scan/SUMMARY.md; echo "::endgroup::"
           echo "::group::series.json"; cat scan/series.json; echo "::endgroup::"
       - name: Publish results to the scan-results branch
-        env:
-          GH_TOKEN: ${{ github.token }}
-          R: ${{ github.repository }}
         run: |
-          set -o pipefail
           stamp=$(date -u +%Y%m%dT%H%M%SZ)
-          gh api -X POST "repos/$R/git/refs" -f ref=refs/heads/scan-results -f sha="$GITHUB_SHA" 2>&1 | tail -c 300 || true
-          for f in SUMMARY.md series.json markets.json; do
-            sha=$(gh api "repos/$R/contents/scan/$f?ref=scan-results" --jq .sha 2>/dev/null || true)
-            base64 -w0 "scan/$f" > /tmp/b64
-            if ! out=$(gh api -X PUT "repos/$R/contents/scan/$f" -f message="scan $stamp: $f" -f branch=scan-results -F content=@/tmp/b64 ${sha:+-f sha=$sha} 2>&1); then
-              echo "::error::publish $f failed: $(echo "$out" | tail -c 400)"; exit 1
-            fi
-          done
+          git config user.name scan-bot; git config user.email scan-bot@users.noreply.github.com
+          git checkout -q --orphan scan-results; git rm -rfq --cached . >/dev/null; git clean -fdxq -e scan
+          git add -f scan; git commit -q -m "scan $stamp"
+          if ! out=$(git push -f origin scan-results 2>&1); then echo "::error::push failed: $(echo "$out" | tr '\n' ' ' | tail -c 400)"; exit 1; fi
+          echo "::notice::published scan $stamp"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: kalshi-scan
