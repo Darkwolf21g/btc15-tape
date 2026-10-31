@@ -24,7 +24,15 @@ const count=(m,k)=>{const f=num(m[k+'_fp']);if(f!=null)return f;return num(m[k])
 const now=Date.now(),maxClose=now+HORIZON_DAYS*86400000;
 // 1. Every series, with Kalshi's own category.
 const seriesList=[];{let cursor='';for(let p=0;p<50;p++){const j=await get(`/series?limit=1000${cursor?'&cursor='+encodeURIComponent(cursor):''}`);for(const s of j.series||[])seriesList.push({ticker:s.ticker,title:s.title,category:s.category,frequency:s.frequency,tags:s.tags||[]});cursor=j.cursor;if(!cursor||!(j.series||[]).length)break;await sleep(110);}}
-process.stderr.write(`${seriesList.length} series\n`);
+const seriesByTicker=new Map(seriesList.map(s=>[s.ticker,s]));
+// 1b. Only series with an open event closing inside the horizon: the events list is far
+// shorter than the series list, most of which is dormant.
+const activeSeries=new Map();let eventCount=0;{let cursor='';for(let p=0;p<400;p++){
+ const j=await get(`/events?status=open&limit=200&min_close_ts=${Math.floor(now/1000)}&max_close_ts=${Math.floor(maxClose/1000)}${cursor?'&cursor='+encodeURIComponent(cursor):''}`);
+ for(const e of j.events||[]){eventCount++;const t=e.series_ticker||(e.event_ticker||'').split('-')[0];if(!activeSeries.has(t))activeSeries.set(t,seriesByTicker.get(t)||{ticker:t,category:e.category||'',title:e.title});}
+ cursor=j.cursor;if(!cursor||!(j.events||[]).length)break;await sleep(110);}}
+const diag={seriesListed:seriesList.length,openEventsInHorizon:eventCount,activeSeries:activeSeries.size,startedAt:new Date(now).toISOString()};
+process.stderr.write(JSON.stringify(diag)+'\n');
 const skip=t=>/^KXMVE/.test(t); // multivariate/parlay combinations: hundreds of thousands, no book
 // 2. Open markets per series, closing within the horizon.
 const markets=[];let rawSample=null;
@@ -43,10 +51,12 @@ async function scanSeries(s){
   cursor=j.cursor;if(!cursor||!(j.markets||[]).length)break;await sleep(GAP_MS);
  }
 }
-{const queue=seriesList.filter(s=>!skip(s.ticker));let done=0;const started=Date.now();
- await Promise.all(Array.from({length:WORKERS},async()=>{while(queue.length){const s=queue.shift();await scanSeries(s);done++;if(done%250===0)process.stderr.write(`${done} series, ${markets.length} markets, ${((Date.now()-started)/1000)|0}s\n`);await sleep(GAP_MS);}}));}
+const BUDGET_MS=Number(process.env.SCAN_BUDGET_MS||25*60000);
+{const queue=[...activeSeries.values()].filter(s=>!skip(s.ticker));diag.queued=queue.length;let done=0;const started=Date.now();
+ await Promise.all(Array.from({length:WORKERS},async()=>{while(queue.length&&Date.now()-now<BUDGET_MS){const s=queue.shift();await scanSeries(s);done++;if(done%250===0)process.stderr.write(`${done} series, ${markets.length} markets, ${((Date.now()-started)/1000)|0}s\n`);await sleep(GAP_MS);}}));diag.seriesScanned=done;diag.seriesUnscanned=queue.length;diag.calls=calls;}
 process.stderr.write(`${markets.length} open markets within ${HORIZON_DAYS} days after ${calls} calls\n`);
 fs.writeFileSync(`${out}/raw-sample.json`,JSON.stringify(rawSample,null,1));
+fs.writeFileSync(`${out}/diag.json`,JSON.stringify(diag));
 // Reference class: what public price or feed anchors the market before it settles.
 const CLASSES=[
  [/^KX(BTC|ETH|SOL|XRP|DOGE|CRYPTO|ADA|LTC|BNB|AVAX|HYPE)/,'crypto: exchange spot/perp, live'],
@@ -73,6 +83,7 @@ const series=[...bySeries.values()].map(s=>({...s,medianSpread:median(s.spreads)
 const candidates=markets.filter(m=>m.spread!=null&&m.spread>=6&&m.yesBid>0&&m.yesAsk<100&&(m.volume24h||0)>=200)
  .sort((a,b)=>(b.volume24h||0)-(a.volume24h||0)).slice(0,150);
 for(const m of candidates){
+ if(Date.now()-now>BUDGET_MS+8*60000)break;
  try{const ob=await get(`/markets/${m.ticker}/orderbook?depth=3`);const book=ob.orderbook||{};
   const side=k=>{const fp=book[k+'_dollars']||book[k+'_fp'];const lv=(fp||book[k]||[]).map(l=>[fp?Math.round(Number(l[0])*100):Number(l[0]),Number(l[1])]);return lv;};
   const yes=side('yes'),no=side('no'),top=a=>a.length?Math.max(...a.map(l=>l[0])):null,size=(a,p)=>a.filter(l=>l[0]===p).reduce((t,l)=>t+l[1],0);
@@ -83,7 +94,7 @@ for(const m of candidates){
 fs.writeFileSync(`${out}/markets.json`,JSON.stringify({at:new Date().toISOString(),horizonDays:HORIZON_DAYS,count:markets.length,markets}));
 fs.writeFileSync(`${out}/series.json`,JSON.stringify({at:new Date().toISOString(),series},null,1));
 const fmt=v=>v==null?'—':Number(v).toLocaleString('en-US',{maximumFractionDigits:0});
-let md=`# Kalshi open-market scan · ${new Date().toISOString()}\n\n${markets.length} open markets closing within ${HORIZON_DAYS} days across ${series.length} series (${seriesList.length} series listed; KXMVE* parlays skipped). Public data only.\n\n`;
+let md=`# Kalshi open-market scan · ${new Date().toISOString()}\n\nDiagnostics: ${JSON.stringify(diag)}\n\n${markets.length} open markets closing within ${HORIZON_DAYS} days across ${series.length} series (${seriesList.length} series listed; KXMVE* parlays skipped). Public data only.\n\n`;
 md+=`## Series by 24h volume (top 80)\n\n| Series | Category | Reference | Markets | 24h vol | OI | Median spread (2-sided n) | Thin+active |\n|---|---|---|---|---|---|---|---|\n`;
 for(const s of series.slice(0,80))md+=`| ${s.series} | ${s.category||''} | ${s.reference} | ${s.n} | ${fmt(s.volume24h)} | ${fmt(s.openInterest)} | ${s.medianSpread==null?'—':s.medianSpread+'¢'} (${s.twoSided}) | ${s.thinButActive?'**yes**':''} |\n`;
 md+=`\n## Thin but active series (median two-sided spread ≥ 6¢ and ≥ 500 contracts / 24h)\n\n| Series | Reference | Markets | 24h vol | Median spread | Example |\n|---|---|---|---|---|---|\n`;

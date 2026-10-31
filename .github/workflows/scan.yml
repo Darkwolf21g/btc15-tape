@@ -9,7 +9,7 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -25,7 +25,7 @@ jobs:
           stamp=$(date -u +%Y%m%dT%H%M%SZ)
           git config user.name scan-bot; git config user.email scan-bot@users.noreply.github.com
           git checkout -q --orphan scan-results; git rm -rfq --cached . >/dev/null; git clean -fdxq -e scan
-          gzip -9 scan/markets.json; ls -la scan; echo "::notice::$(head -c 600 scan/raw-sample.json | tr -d "\n")"; git add -f scan; git commit -q -m "scan $stamp"
+          gzip -9 scan/markets.json; ls -la scan; echo "::notice::$(cat scan/diag.json)"; echo "::notice::$(head -c 500 scan/raw-sample.json | tr -d "\n")"; git add -f scan; git commit -q -m "scan $stamp"
           if ! out=$(git push -f origin scan-results 2>&1); then echo "::error::push failed: $(echo "$out" | tr '\n' ' ' | tail -c 400)"; exit 1; fi
           echo "::notice::published scan $stamp"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
