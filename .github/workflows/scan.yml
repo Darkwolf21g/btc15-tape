@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   scan:
@@ -18,6 +18,20 @@ jobs:
         with:
           node-version: '24'
       - run: node scripts/scan-markets.mjs
+      - name: Summary to log
+        run: |
+          echo "::group::SUMMARY.md"; cat scan/SUMMARY.md; echo "::endgroup::"
+          echo "::group::series.json"; cat scan/series.json; echo "::endgroup::"
+      - name: Publish results to the scan-results branch
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          stamp=$(date -u +%Y%m%dT%H%M%SZ)
+          tmp=$(mktemp -d); cp -r scan "$tmp/$stamp"; cd "$tmp"
+          git init -q -b scan-results; git config user.name scan-bot; git config user.email scan-bot@users.noreply.github.com
+          git add -A; git commit -q -m "scan $stamp"
+          git push -q -f "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" scan-results
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: kalshi-scan
