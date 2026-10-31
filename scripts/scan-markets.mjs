@@ -28,8 +28,8 @@ process.stderr.write(`${seriesList.length} series\n`);
 const skip=t=>/^KXMVE/.test(t); // multivariate/parlay combinations: hundreds of thousands, no book
 // 2. Open markets per series, closing within the horizon.
 const markets=[];let rawSample=null;
-for(const s of seriesList){
- if(skip(s.ticker))continue;
+const WORKERS=Number(process.env.SCAN_WORKERS||6),GAP_MS=Number(process.env.SCAN_GAP_MS||130);
+async function scanSeries(s){
  let cursor='';
  for(let p=0;p<20;p++){
   let j;try{j=await get(`/markets?series_ticker=${encodeURIComponent(s.ticker)}&status=open&limit=1000&min_close_ts=${Math.floor(now/1000)}&max_close_ts=${Math.floor(maxClose/1000)}${cursor?'&cursor='+encodeURIComponent(cursor):''}`);}catch(e){process.stderr.write(`${s.ticker}: ${e.message}\n`);break;}
@@ -40,10 +40,11 @@ for(const s of seriesList){
     yesBid:yb,yesAsk:ya,spread:(yb!=null&&ya!=null)?ya-yb:null,last:cents(m,'last_price'),volume:count(m,'volume'),volume24h:count(m,'volume_24h'),
     openInterest:count(m,'open_interest'),liquidityCents:cents(m,'liquidity'),closeTime:m.close_time,type:m.market_type,strike:m.strike_type??null,floor:m.floor_strike??null,cap:m.cap_strike??null});
   }
-  cursor=j.cursor;if(!cursor||!(j.markets||[]).length)break;await sleep(110);
+  cursor=j.cursor;if(!cursor||!(j.markets||[]).length)break;await sleep(GAP_MS);
  }
- await sleep(110);
 }
+{const queue=seriesList.filter(s=>!skip(s.ticker));let done=0;const started=Date.now();
+ await Promise.all(Array.from({length:WORKERS},async()=>{while(queue.length){const s=queue.shift();await scanSeries(s);done++;if(done%250===0)process.stderr.write(`${done} series, ${markets.length} markets, ${((Date.now()-started)/1000)|0}s\n`);await sleep(GAP_MS);}}));}
 process.stderr.write(`${markets.length} open markets within ${HORIZON_DAYS} days after ${calls} calls\n`);
 fs.writeFileSync(`${out}/raw-sample.json`,JSON.stringify(rawSample,null,1));
 // Reference class: what public price or feed anchors the market before it settles.
