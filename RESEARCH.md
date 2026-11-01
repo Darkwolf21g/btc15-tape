@@ -111,6 +111,19 @@ replayed old frame is still rejected regardless of the estimate. Snapshots carry
 under the uncorrected rule. The estimate is visible on `/selftest` as
 `bookClockOffsetMs`. No model, threshold or cohort definition changed.
 
+## Sessions desk and session history (November 1, 2026)
+
+The agent page now opens on a desk: every paper session in a rail on the left
+(strategy, start time, state, realized net), the selected one on the right with
+its tiles, trades and folded run details, and the controls above. When a new
+session starts, the Worker archives the finishing one as a compact summary
+(report and trades, not the five-second looks) under `session.history:<startAt>:<id>`
+and keeps the last 40; `GET /paper-session/history` (token) returns them newest
+first with the live session marked. The full export with looks and attempts is
+still only available for the live session. No rule, model or settlement code
+changed; the pages share one stylesheet system (`public/index.html` and
+`public/agent.html` carry the same tokens, type and spacing).
+
 ## Timed-session strategies (October 25, 2026)
 
 A timed paper session is started with a strategy. `model-edge` is the original

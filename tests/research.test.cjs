@@ -10,7 +10,7 @@ function harness(){
  const source=fs.readFileSync(path.join(__dirname,'../worker.js'),'utf8').replace('export default {','const entry = {').replace('export class KalshiFeed','class KalshiFeed');
  vm.runInContext(source+'\nglobalThis.api={KalshiFeed,entry,research,marketTicker};',context);
  const data=new Map();let alarm=null;
- const storage={get:async k=>structuredClone(data.get(k)),put:async(k,v)=>data.set(k,structuredClone(v)),list:async({prefix})=>new Map([...data].filter(([k])=>k.startsWith(prefix)).map(([k,v])=>[k,structuredClone(v)])),delete:async k=>data.delete(k),getAlarm:async()=>alarm,setAlarm:async a=>{alarm=a;}};
+ const storage={get:async k=>structuredClone(data.get(k)),put:async(k,v)=>data.set(k,structuredClone(v)),list:async({prefix,reverse,limit})=>{let rows=[...data].filter(([k])=>k.startsWith(prefix)).sort(([a],[b])=>a<b?-1:a>b?1:0);if(reverse)rows.reverse();if(limit)rows=rows.slice(0,limit);return new Map(rows.map(([k,v])=>[k,structuredClone(v)]));},delete:async k=>Array.isArray(k)?k.map(x=>data.delete(x)).filter(Boolean).length:data.delete(k),getAlarm:async()=>alarm,setAlarm:async a=>{alarm=a;}};
  storage.transaction=async fn=>fn(storage);
  const tasks=[];const obj=new context.api.KalshiFeed({storage,waitUntil:task=>tasks.push(task)},{KALSHI_KEY_ID:'fixture',KALSHI_PRIVATE_KEY:'fixture'});
  return {context,obj,data,tasks,api:context.api,r:context.api.research,now:()=>now,setTime:v=>now=v,alarm:()=>alarm};
@@ -331,6 +331,12 @@ test('timed session routes require token, reject overlapping runs and keep legac
  const legacy=await h.obj.fetch(new Request('https://test/trade/config',{method:'POST',body:JSON.stringify({mode:'paper'})}));assert.equal(legacy.status,409);
  assert.equal((await h.obj.fetch(req('stop'))).status,200);assert.equal(h.data.get('session.current').status,'complete');
  assert.equal((await h.obj.fetch(req('start'))).status,200);assert.equal(h.data.get('session.previous').id,s.id);
+ // The stopped session is archived, compact, and listed newest-first behind the current one.
+ const history=await (await h.obj.fetch(req('history','GET'))).json();
+ assert.equal(history.current.id,h.data.get('session.current').id);assert.equal(history.sessions.length,1);
+ const archived=history.sessions[0];assert.equal(archived.id,s.id);assert.equal(archived.status,'complete');assert.equal(archived.stopReason,'manual stop');
+ assert.equal(archived.report.strategy,'model-edge');assert.ok(Array.isArray(archived.trades));assert.equal(archived.looks,undefined);
+ assert.equal([...h.data.keys()].filter(k=>k.startsWith('session.history:')).length,1);
 });
 test('manual stop during market read cannot be undone by the pending session tick',async()=>{
  const h=harness();h.obj.env.FEED_TOKEN='unit-token';const S=h.context.BTC15Session,s=S.create(h.now(),'race-test');h.setTime(s.startAt);

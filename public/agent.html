@@ -4,77 +4,143 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>BTC 15 Agent</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <style>
-:root { color-scheme: dark; --ground: #0a0f1c; --panel: #111a2c; --line: #22304d; --ink: #e6ebf5; --dim: #8592ad; --up: #2fd17c; --down: #ff6a3d; --warn: #ffb020; --target: #ffc857;
-        --display: "Barlow Condensed", "Arial Narrow", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace; }
-* { box-sizing: border-box; }
-html, body { margin: 0; background: var(--ground); color: var(--ink); }
-body { font: 14px/1.45 var(--mono); padding: calc(10px + env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-left, 0px)) 32px; max-width: 920px; margin-inline: auto; font-variant-numeric: tabular-nums; }
-h1 { font: 700 28px/1 var(--display); letter-spacing: .02em; margin: 0 0 4px; }
-.label { font: 600 12px/1 var(--display); letter-spacing: .09em; text-transform: uppercase; color: var(--dim); }
-.mode { font: 700 44px/1 var(--display); margin: 8px 0; }
-.mode.off { color: var(--dim); } .mode.paper { color: var(--target); } .mode.demo { color: var(--warn); } .mode.live { color: var(--down); }
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 12px 0; }
-.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 4px; }
-.tile b { font: 600 20px/1.1 var(--mono); }
-.good { color: var(--up); } .bad { color: var(--down); } .meh { color: var(--dim); }
-section { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 12px; }
-h2 { font: 600 14px/1 var(--display); letter-spacing: .08em; text-transform: uppercase; color: var(--dim); margin: 0 0 8px; }
-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-td, th { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
-th { color: var(--dim); font-weight: 500; }
-.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
-input { flex: 1 1 140px; min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; color: var(--ink); font: 15px var(--mono); padding: 8px 10px; }
-button { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; font: 600 14px var(--display); letter-spacing: .06em; text-transform: uppercase; padding: 9px 12px; cursor: pointer; }
-button:disabled {opacity:.45;cursor:default;}
-select {background:var(--panel);color:var(--ink);min-height:44px;max-width:100%;border:1px solid var(--line);border-radius:6px;padding:8px;}
-button.on { border-color: var(--up); color: var(--up); }
-button.danger { border-color: var(--down); color: var(--down); }
-.notes { color: var(--dim); font-size: 12px; }
-pre { white-space: pre-wrap; font: 12px/1.45 var(--mono); color: var(--dim); margin: 6px 0 0; }
-a { color: var(--ink); }
-.research-cards {display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin:12px 0;}
-.research-card {min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;}
-.research-card h3 {margin:0 0 8px;font-size:15px;}
-.research-card strong {display:block;margin:8px 0;font-size:20px;}
-.research-card p {margin:6px 0;}
-.table-scroll {overflow-x:auto;max-width:100%;}
-#biasChart {width:100%;height:auto;display:block;max-width:620px;}
-pre,.notes {overflow-wrap:anywhere;}
+/* One visual system for the tape and the agent desk: a blue-black ground read in the dark next to
+   Robinhood, condensed numerals in the register of a departures board, and the only colour on the
+   page carrying meaning (Up, Down, target, warning). Nothing decorative. */
+:root { color-scheme: dark;
+  --ground:#0d1321; --panel:#151d2f; --raised:#1b2538; --line:#2a3650; --ink:#eef2fa; --dim:#97a3bd;
+  --up:#2fd17c; --down:#ff6a3d; --warn:#ffb020; --target:#ffc857; --link:#a8c2ff;
+  --display:"Barlow Condensed","Arial Narrow",system-ui,sans-serif; --text:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif; --mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --r:10px; --rs:8px; }
+* { box-sizing:border-box; }
+[hidden] { display:none !important; }
+html,body { margin:0; background:var(--ground); color:var(--ink); }
+body { font:14px/1.5 var(--text); font-variant-numeric:tabular-nums; max-width:1200px; margin-inline:auto;
+  padding:calc(16px + env(safe-area-inset-top,0px)) max(16px,env(safe-area-inset-right,0px)) calc(40px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px)); }
+a { color:var(--link); }
+h1 { font:700 30px/1 var(--display); margin:0; letter-spacing:.01em; }
+h2 { font:600 20px/1.1 var(--display); margin:0; letter-spacing:.01em; }
+h3 { font:600 15px/1.3 var(--text); margin:0; }
+p { margin:0; }
+.label { font:500 12px/1.3 var(--text); color:var(--dim); }
+.notes { color:var(--dim); font-size:12px; line-height:1.55; }
+.notes p + p { margin-top:6px; }
+pre { white-space:pre-wrap; overflow-wrap:anywhere; font:12px/1.5 var(--mono); color:var(--dim); margin:0; }
+.good { color:var(--up); } .bad { color:var(--down); } .meh { color:var(--dim); }
 
+/* Page header: who this is, what the relay is doing. */
+.top { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap; padding-bottom:16px; border-bottom:1px solid var(--line); }
+.top .sub { margin-top:6px; }
+.relay { text-align:right; display:grid; gap:4px; justify-items:end; max-width:48ch; }
+.mode { font:700 28px/1 var(--display); }
+.mode.off { color:var(--dim); } .mode.paper { color:var(--target); } .mode.demo { color:var(--warn); } .mode.live { color:var(--down); }
+
+/* Sessions desk: every run on the left, the chosen run on the right. */
+.desk { margin-top:20px; }
+.desk-head { display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+.launch { display:grid; gap:10px; background:var(--panel); border:1px solid var(--line); border-radius:var(--r); padding:14px; margin-bottom:12px; }
+.launch .row { margin:0; }
+.deskgrid { display:grid; grid-template-columns:minmax(0,1fr); gap:12px; align-items:start; } .deskgrid > * { min-width:0; }
+@media (min-width:860px) { .deskgrid { grid-template-columns:272px minmax(0,1fr); } }
+.rail { display:grid; gap:8px; min-width:0; }
+@media (max-width:859px) { .rail { grid-auto-flow:column; grid-auto-columns:minmax(250px,72vw); overflow-x:auto; padding-bottom:6px; scroll-snap-type:x proximity; } .rail > * { scroll-snap-align:start; } }
+.run { display:grid; grid-template-columns:1fr auto; gap:2px 10px; text-align:left; width:100%; background:var(--panel); border:1px solid var(--line); border-radius:var(--r); padding:10px 12px; color:var(--ink); font:inherit; cursor:pointer; min-height:44px; }
+.run[aria-current="true"] { background:var(--raised); border-color:var(--dim); }
+.run .name { grid-column:1; grid-row:1; font-weight:600; display:flex; align-items:center; gap:8px; min-width:0; }
+.run .name::before { content:""; width:8px; height:8px; border-radius:50%; background:var(--line); flex:none; }
+.run.running .name::before { background:var(--up); } .run.scheduled .name::before { background:var(--target); } .run.stopped .name::before { background:var(--down); }
+.run .net { grid-column:2; grid-row:1 / span 2; font:600 18px/1 var(--display); text-align:right; align-self:center; }
+.run .when { grid-column:1; grid-row:2; color:var(--dim); font-size:12px; }
+.rail .empty { color:var(--dim); font-size:12px; padding:10px 12px; border:1px dashed var(--line); border-radius:var(--r); }
+.detail { min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:var(--r); padding:14px; display:grid; gap:12px; }
+.detail-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; flex-wrap:wrap; }
+.detail-head b { font:600 22px/1.1 var(--display); display:block; }
+.state { font-size:12px; color:var(--dim); padding:4px 9px; border:1px solid var(--line); border-radius:999px; white-space:nowrap; }
+.state.running { color:var(--up); border-color:var(--up); } .state.scheduled { color:var(--target); border-color:var(--target); } .state.stopped { color:var(--down); border-color:var(--down); }
+.tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px; }
+.tile { background:var(--ground); border:1px solid var(--line); border-radius:var(--rs); padding:10px 12px; display:grid; gap:4px; min-width:0; }
+.tile b { font:600 22px/1.1 var(--display); overflow-wrap:anywhere; }
+.tile small { color:var(--dim); font-size:12px; }
+.table-scroll { overflow-x:auto; max-width:100%; }
+table { width:100%; border-collapse:collapse; font-size:12px; }
+td,th { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+th { color:var(--dim); font-weight:500; }
+td.num,th.num { text-align:right; }
+caption { text-align:left; caption-side:top; padding:0 0 6px; }
+.fold { border-top:1px solid var(--line); padding-top:4px; }
+.fold summary { cursor:pointer; color:var(--dim); font-size:13px; padding:8px 0; min-height:40px; display:flex; align-items:center; }
+.fold[open] summary { color:var(--ink); }
+.fold > * + * { margin-top:8px; }
+
+/* Everything below the desk: one section per subject, separated by a rule. */
+section { margin-top:28px; padding-top:16px; border-top:1px solid var(--line); }
+section > h2 { margin-bottom:8px; }
+.row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px; min-width:0; }
+.launch > * { min-width:0; }
+input { flex:1 1 150px; min-width:0; background:var(--ground); border:1px solid var(--line); border-radius:var(--rs); color:var(--ink); font:15px var(--text); padding:9px 11px; min-height:44px; }
+select { background:var(--ground); color:var(--ink); min-height:44px; max-width:100%; min-width:0; flex:1 1 220px; border:1px solid var(--line); border-radius:var(--rs); padding:8px 10px; font:14px var(--text); }
+button { background:var(--raised); color:var(--ink); border:1px solid var(--line); border-radius:var(--rs); font:600 14px/1.2 var(--text); padding:10px 14px; min-height:44px; cursor:pointer; }
+button:disabled { opacity:.45; cursor:default; }
+button.on { border-color:var(--up); color:var(--up); }
+button.danger { border-color:var(--down); color:var(--down); }
+button.primary { background:var(--ink); color:var(--ground); border-color:var(--ink); }
+button:focus-visible,input:focus-visible,select:focus-visible,.run:focus-visible { outline:2px solid var(--link); outline-offset:2px; }
+.research-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:10px; margin:12px 0; }
+.research-card { min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:var(--r); padding:14px; }
+.research-card h3 { margin:0 0 8px; }
+.research-card strong { display:block; margin:8px 0; font:600 24px/1.1 var(--display); }
+.research-card p { margin:6px 0; }
+#biasChart { width:100%; height:auto; display:block; max-width:620px; }
+.legacy .tiles .tile { background:var(--panel); }
+@media (prefers-reduced-motion: no-preference) { .run,.tile { transition:none; } }
 </style>
 </head>
 <body>
-<h1>BTC 15 · trading agent</h1>
-<div class="notes"><a href="./">← back to the tape</a> · <span id="when">connecting…</span></div>
-<div class="mode off" id="mode">–</div>
-<div class="notes" id="line">Loading the relay's status…</div>
+<header class="top">
+  <div><h1>BTC 15 trading agent</h1><p class="sub notes"><a href="./">Back to the tape</a> · <span id="when">connecting…</span></p></div>
+  <div class="relay"><span class="mode off" id="mode">–</span><span class="notes" id="line">Loading the relay's status…</span></div>
+</header>
 
-<section id="sessionPanel">
-<h2>One-hour paper session · full windows</h2>
-<p class="notes">Checks every 5 seconds from the start of each of four 15-minute windows. Starts at the next quarter hour; stops automatically after the fourth close. Uses simulated money only.</p>
-<div class="row"><label for="sessionStrategy">Strategy </label><select id="sessionStrategy" aria-label="Paper session strategy"><option value="model-edge">Model edge · 1 contract · 3¢ edge rule</option><option value="distance-v1">Distance · $100 per trade · enter ±$15, hold ≥$10, re-enter +$25</option></select></div>
-<div class="row"><button id="sessionStart" type="button">Start one-hour paper test</button><button id="sessionStop" type="button" class="danger">Stop session</button><button id="sessionExport" type="button">Download session</button></div>
+<div class="desk" id="sessionPanel">
+<div class="desk-head"><h2>Paper sessions</h2><p class="notes">One hour, four full windows, a check every 5 seconds. Simulated money; open positions settle on Kalshi's official result.</p></div>
+<div class="launch">
+<div class="row"><label for="sessionStrategy">Strategy</label><select id="sessionStrategy" aria-label="Paper session strategy"><option value="model-edge">Model edge · 1 contract · 3¢ edge rule</option><option value="distance-v1">Distance · $100 per trade · enter ±$15, hold ≥$10, re-enter +$25</option></select>
+<button id="sessionStart" type="button" class="primary">Start a one-hour session</button><button id="sessionStop" type="button" class="danger">Stop session</button><button id="sessionExport" type="button">Download selected</button></div>
 <p id="sessionMessage" class="notes" role="status"></p>
+</div>
+<div class="deskgrid">
+<nav class="rail" id="sessionRail" aria-label="Sessions"><div class="empty">Sessions appear here as they run.</div></nav>
+<div class="detail">
+<div class="detail-head"><div><b id="deskTitle">No session yet</b><span class="notes" id="deskWhen">Start one above; it begins at the next quarter hour.</span></div><span class="state" id="deskState">idle</span></div>
+<div class="tiles"><div class="tile"><span class="label">Realized net</span><b id="sessionPnl">—</b></div><div class="tile"><span class="label">Entries / early exits</span><b id="sessionFills">—</b></div><div class="tile"><span class="label">Open / pending</span><b id="sessionOpen">—</b></div><div class="tile"><span class="label">Won / lost</span><b id="deskWinLoss">—</b></div><div class="tile"><span class="label">Fees paid</span><b id="deskFees">—</b></div><div class="tile"><span class="label">Worst drawdown</span><b id="deskDrawdown">—</b></div></div>
+<div class="table-scroll"><table id="deskTrades"><caption class="notes" id="deskTradesCaption">Trades</caption><thead><tr><th>Entered</th><th>Side</th><th class="num">Contracts</th><th class="num">Entry</th><th class="num">Exit</th><th>Resolution</th><th class="num">Net</th></tr></thead><tbody></tbody></table></div>
+<details class="fold"><summary>Run details · looks, coverage, skipped reasons</summary>
 <pre id="sessionStatus" aria-live="polite">Checking session…</pre>
 <pre id="sessionCoverage"></pre>
-<div class="tiles"><div class="tile"><span class="label">Realized net</span><b id="sessionPnl">—</b></div><div class="tile"><span class="label">Entries / early exits</span><b id="sessionFills">—</b></div><div class="tile"><span class="label">Open / pending</span><b id="sessionOpen">—</b></div></div>
 <pre id="sessionReasons"></pre>
-<p class="notes"><b>Distance</b> ignores the model: it buys the side the official index is $15 or more past the target on, spending $100 at the ask (partial fills if the book is thin); holds while the distance stays at least $10; sells at the bid when it shrinks below $10 or the index crosses; after a sell it buys the same side again only once the index is $25 further out than where it sold; a cross restarts on the other side. No trades in the last 60 s of a window; 6 entry attempts per window, 10-second cooldown, $200 realized loss stop. Expect it to pay the spread and fees on every stop-out; the question the session answers is whether the rides to settlement cover them.</p>
-<p class="notes"><b>Model edge</b> (original rule): buy the side with the largest estimated edge of at least 3¢ after fees. Sell when the bid after fees beats estimated hold value by 3¢. One contract at a time; 1–4 second arrival, original limit, 50% depth, 3 entry attempts per window, 30-second entry cooldown, $3 realized loss stop. The uncalibrated model can be wrong. Zero fills is a valid result.</p>
-<p class="notes">Stop cancels pending simulations and prevents further entries or exits. Open positions remain pending until Kalshi officially settles them. Sessions are separate from the legacy agent and checkpoint research below.</p>
-</section>
-<h2 style="margin-top:24px">Legacy agent · separate experiment</h2>
-<div class="tiles">
-  <div class="tile"><span class="label">Today</span><b id="tToday">–</b><small class="notes" id="tTodayNote"></small></div>
-  <div class="tile"><span class="label">Recent trades · all modes</span><b id="tAll">–</b><small class="notes" id="tAllNote"></small></div>
-  <div class="tile"><span class="label">Stream</span><b id="tStream">–</b><small class="notes" id="tStreamNote"></small></div>
-  <div class="tile"><span class="label">Limits</span><b id="tLimits">–</b><small class="notes" id="tLimitsNote"></small></div>
+</details>
+<details class="fold"><summary>How each strategy trades</summary>
+<div class="notes">
+<p><b>Distance</b> ignores the model: it buys the side the official index is $15 or more past the target on, spending $100 at the ask (partial fills if the book is thin); holds while the distance stays at least $10; sells at the bid when it shrinks below $10 or the index crosses; after a sell it buys the same side again only once the index is $25 further out than where it sold; a cross restarts on the other side. No trades in the last 60 s of a window; 6 entry attempts per window, 10-second cooldown, $200 realized loss stop. Expect it to pay the spread and fees on every stop-out; the question the session answers is whether the rides to settlement cover them.</p>
+<p><b>Model edge</b> (original rule): buy the side with the largest estimated edge of at least 3¢ after fees. Sell when the bid after fees beats estimated hold value by 3¢. One contract at a time; 1–4 second arrival, original limit, 50% depth, 3 entry attempts per window, 30-second entry cooldown, $3 realized loss stop. The uncalibrated model can be wrong. Zero fills is a valid result.</p>
+<p>Stop cancels pending simulations and prevents further entries or exits. Open positions remain pending until Kalshi officially settles them. Sessions are separate from the legacy agent and checkpoint research below. The last 40 sessions are kept on the relay.</p>
+</div>
+</details>
+</div>
+</div>
 </div>
 
-<section>
-  <h2>Controls</h2>
+<section class="legacy"><h2>Legacy agent</h2><p class="notes">A separate, older experiment: one contract per window on the model's own edge call.</p>
+<div class="tiles" style="margin-top:10px">
+  <div class="tile"><span class="label">Today</span><b id="tToday">–</b><small id="tTodayNote"></small></div>
+  <div class="tile"><span class="label">Recent trades · all modes</span><b id="tAll">–</b><small id="tAllNote"></small></div>
+  <div class="tile"><span class="label">Stream</span><b id="tStream">–</b><small id="tStreamNote"></small></div>
+  <div class="tile"><span class="label">Limits</span><b id="tLimits">–</b><small id="tLimitsNote"></small></div>
+</div>
+  <h3 style="margin-top:16px">Controls</h3>
   <div class="row">
     <button id="bOff" type="button">Off</button><button id="bPaper" type="button">Paper</button><button id="bDemo" type="button">Demo test panel</button><button id="bLive" type="button" disabled>Live · deferred</button>
   </div>
@@ -88,10 +154,10 @@ pre,.notes {overflow-wrap:anywhere;}
 <section id="researchPanel"><h2>Settlement research</h2>
 <p class="notes">Records official index inputs and market depth at 10m, 5m, 2m, 60s, 30s, 15s and 5s before close, even while paper trading is off.</p>
 <div class="row"><button id="researchRefresh" type="button">Refresh research</button><button id="researchExport" type="button">Download research data</button></div>
-<pre id="researchStatus" aria-live="polite">Loading research status…</pre>
+<pre id="researchStatus" aria-live="polite" style="margin-top:10px">Loading research status…</pre>
 <pre id="researchScores"></pre>
 <div id="biasPanel">
-<h2 style="margin-top:20px">Pricing bias lab · forward tests</h2>
+<h2 style="margin-top:24px">Pricing bias lab</h2>
 <p id="biasStatus" class="notes" aria-live="polite">Waiting for the research report…</p>
 <div class="row"><label for="biasCheckpoint">Time before close</label><select id="biasCheckpoint"><option value="600">10 minutes</option><option value="300">5 minutes</option><option value="120">2 minutes</option><option value="60">60 seconds</option><option value="30" selected>30 seconds</option><option value="15">15 seconds</option><option value="5">5 seconds</option></select>
 <label for="biasSide">Side</label><select id="biasSide"><option value="Up">YES / Up</option><option value="Down">NO / Down</option></select></div>
@@ -110,8 +176,8 @@ pre,.notes {overflow-wrap:anywhere;}
 <div class="row"><button id="demoLoad">Load demo markets</button><select id="demoMarket" aria-label="Demo market"><option value="">Load markets first</option></select></div>
 <div class="row"><select id="demoSide" aria-label="Demo side"><option value="yes">Buy YES</option><option value="no">Buy NO</option></select><input id="demoPrice" aria-label="Demo limit price in cents" inputmode="decimal" placeholder="Limit price ¢ (1–99)"><button id="demoSubmit" disabled>Submit 1 demo contract</button></div>
 <div class="row"><button id="demoReconcile" disabled>Reconcile last order</button><button id="demoCancel" disabled>Cancel last order</button></div>
-<pre id="demoResult">Demo not connected. Requires separate demo credentials in Worker secrets.</pre></section>
-<section><h2>Paper research · current model only</h2><pre id="paperReport">Waiting for status…</pre><p class="notes">Forward simulation, not actual fills. No automatic promotion to real trading. Results from older models are excluded below.</p></section>
+<pre id="demoResult" style="margin-top:10px">Demo not connected. Requires separate demo credentials in Worker secrets.</pre></section>
+<section><h2>Paper research · current model only</h2><pre id="paperReport">Waiting for status…</pre><p class="notes" style="margin-top:8px">Forward simulation, not actual fills. No automatic promotion to real trading. Results from older models are excluded below.</p></section>
 <section>
   <h2>Trades</h2>
   <div class="table-scroll"><table id="trades"><thead><tr><th>When</th><th>Mode</th><th>Side · price</th><th>Filled</th><th>Edge · chance</th><th>Result</th></tr></thead><tbody></tbody></table></div>
@@ -131,7 +197,7 @@ pre,.notes {overflow-wrap:anywhere;}
 <section>
   <h2>Collector and record</h2>
   <pre id="collector">–</pre>
-  <div class="notes">Full record: <a href="./record.csv" id="csv">record.csv</a> · JSON: <a href="./record" id="json">record</a></div>
+  <div class="notes" style="margin-top:8px">Full record: <a href="./record.csv" id="csv">record.csv</a> · JSON: <a href="./record" id="json">record</a></div>
 </section>
 
 <section>
@@ -198,7 +264,45 @@ const pct = v => v == null ? "–" : Math.round(v * 100);
 const money = c => (c >= 0 ? "+" : "−") + "$" + (Math.abs(c) / 100).toFixed(2);
 const cents = v => (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + "¢";
 const escapeHtml = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let sessionData=null,sessionSending=false,sessionRefreshing=false;
+let sessionData=null,sessionSending=false,sessionRefreshing=false,historyData=null,selectedSessionId=null;
+const STRATEGY_NAMES={'model-edge':'Model edge','distance-v1':'Distance'};
+const strategyName=id=>STRATEGY_NAMES[id]||id||'Model edge';
+// One shape for the desk, whether the run is the live one (status + report) or an archived summary.
+function summaryOfCurrent(d){const s=d?.session,r=d?.report;if(!s||!r)return null;return {id:s.id,status:s.status,startAt:s.startAt,endAt:s.endAt,stoppedAt:s.stoppedAt??null,stopReason:s.stopReason??null,strategy:r.strategy,model:r.model,settlementConvention:r.settlementConvention,report:r,trades:s.trades||[],pending:!!s.pending,current:true};}
+function stateOf(x,now){if(x.stopReason==='manual stop')return 'stopped';if(x.status==='complete'||x.stoppedAt||now>=x.endAt&&!x.report?.open)return 'complete';if(now<x.startAt)return 'scheduled';return 'running';}
+function deskList(){const current=summaryOfCurrent(sessionData),rest=(historyData?.sessions||[]).filter(x=>!current||x.id!==current.id);return current?[current,...rest]:rest;}
+function renderDesk(){
+ if(typeof document==='undefined')return;
+ const now=sessionData?.now||Date.now(),list=deskList();
+ if(!list.some(x=>x.id===selectedSessionId))selectedSessionId=list[0]?.id??null;
+ const rail=$('sessionRail');rail.replaceChildren();
+ if(!list.length){const e=document.createElement('div');e.className='empty';e.textContent='Sessions appear here as they run.';rail.append(e);}
+ for(const x of list){const b=document.createElement('button');b.type='button';const st=stateOf(x,now);b.className='run '+st;b.setAttribute('aria-current',String(x.id===selectedSessionId));
+  const name=document.createElement('span');name.className='name';name.textContent=strategyName(x.strategy)+(x.current?' · now':'');
+  const net=document.createElement('span');net.className='net '+(x.report.pnlCents>0?'good':x.report.pnlCents<0?'bad':'');net.textContent=st==='scheduled'?'—':money(x.report.pnlCents);
+  const when=document.createElement('span');when.className='when';when.textContent=ET.format(new Date(x.startAt))+' ET · '+(st==='scheduled'?'starts soon':st==='running'?'running':st==='stopped'?'stopped':x.report.open?'awaiting settlement':`${x.report.entryFills} fill${x.report.entryFills===1?'':'s'}`);
+  b.append(name,net,when);b.onclick=()=>{selectedSessionId=x.id;renderDesk();};rail.append(b);}
+ const x=list.find(x=>x.id===selectedSessionId);
+ const tb=$('deskTrades').querySelector('tbody');tb.replaceChildren();
+ if(!x){$('deskTitle').textContent='No session yet';$('deskWhen').textContent='Start one above; it begins at the next quarter hour.';$('deskState').textContent='idle';$('deskState').className='state';for(const id of ['deskWinLoss','deskFees','deskDrawdown'])$(id).textContent='—';$('deskTradesCaption').textContent='Trades';$('sessionExport').disabled=true;return;}
+ const st=stateOf(x,now),r=x.report;
+ $('deskTitle').textContent=strategyName(x.strategy)+(x.current?'':' · archived');
+ $('deskWhen').textContent=`${ET.format(new Date(x.startAt))} → ${ET.format(new Date(x.endAt))} ET`+(x.stopReason?' · stopped: '+x.stopReason:'');
+ $('deskState').textContent=st;$('deskState').className='state '+st;
+ if(!x.current){$('sessionPnl').textContent=money(r.pnlCents);$('sessionFills').textContent=`${r.entryFills} / ${r.exitFills}`;$('sessionOpen').textContent=`${r.open} / 0`;
+  $('sessionStatus').textContent=`${(x.status||'').toUpperCase()} · ${x.version||''} · ${x.strategy}\n${r.looks} looks · ${r.eligible} eligible · ${r.attempts} attempts${r.contractsFilled>r.entryFills?` · ${r.contractsFilled} contracts, $${(r.spentCents/100).toFixed(2)} spent`:''}`;
+  const c=r.coverage;$('sessionCoverage').textContent=c?`${x.model||''} · ${x.settlementConvention||''}\nCoverage: ${c.observedSlots}/${c.elapsedSlots} finished 5s slots observed · ${c.missedSlots} missed`:'';
+  $('sessionReasons').textContent=Object.entries(r.reasons||{}).map(([reason,n])=>`${n} · ${reason}`).join('\n');}
+ $('sessionPnl').className=r.pnlCents>0?'good':r.pnlCents<0?'bad':'';
+ $('deskWinLoss').textContent=`${r.wins} / ${r.losses}`;$('deskFees').textContent='$'+(r.feesCents/100).toFixed(2);$('deskDrawdown').textContent='$'+(r.drawdownCents/100).toFixed(2);
+ $('sessionExport').disabled=false;
+ const trades=[...x.trades].sort((a,b)=>b.entryAt-a.entryAt);
+ $('deskTradesCaption').textContent=trades.length?`${trades.length} trade${trades.length===1?'':'s'} · simulated fills`:(st==='scheduled'?'No trades yet; the session has not started.':st==='running'?'No fills yet.':'No fills in this session.');
+ for(const t of trades){const tr=document.createElement('tr');const n=t.n||1,open=t.pnlCents==null;
+  const cells=[[ET.format(new Date(t.entryAt))+' ET'],[t.side,t.side==='Up'?'good':'bad'],[String(n),'num'],[t.entryCents.toFixed(n>1?2:0)+'¢','num'],[open?'—':t.exitCents.toFixed(n>1?2:0)+'¢','num'],[open?'open':t.resolution==='official settlement'?`settled ${t.officialResult}`:t.resolution],[open?'—':money(t.pnlCents),'num '+(t.pnlCents>0?'good':t.pnlCents<0?'bad':'')]];
+  for(const [text,cls] of cells){const td=document.createElement('td');td.textContent=text;if(cls)td.className=cls;tr.append(td);}tb.append(tr);}
+}
+async function refreshHistory(){try{historyData=await sessionCall('history');}catch(e){historyData=historyData||null;}renderDesk();}
 async function sessionCall(action,post=false,params={}){
  const u=new URL('./paper-session/'+action,location.href);if(token)u.searchParams.set('token',token);for(const [k,v] of Object.entries(params))u.searchParams.set(k,v);
  const r=await fetch(u,{method:post?'POST':'GET',cache:'no-store',signal:AbortSignal.timeout(15000)});
@@ -216,6 +320,7 @@ async function refreshSession(){
  $('sessionReasons').textContent=r?Object.entries(r.reasons).map(([reason,n])=>`${n} · ${reason}`).join('\n'):'';
  const c=r?.coverage,d=r?.fillDelayMs;
  $('sessionCoverage').textContent=c?`${r.model} · ${r.settlementConvention}\nCoverage: ${c.observedSlots}/${c.elapsedSlots} finished 5s slots observed · ${c.missedSlots} missed · ${r.skippedDecisions} evaluated without intent\nLargest evaluation gap: ${c.maxEvaluationGapMs==null?'—':(c.maxEvaluationGapMs/1000).toFixed(2)+'s'} · fill delay: ${d?(d.mean/1000).toFixed(2)+'s mean / '+(d.max/1000).toFixed(2)+'s max':'no fills'}\n`+c.windows.map(w=>`${ET.format(new Date(w.startAt))} ET · ${w.observedSlots}/${w.elapsedSlots} slots observed · ${w.missedSlots} missed`).join('\n'):'';
+ renderDesk();
  }catch(e){$('sessionStatus').textContent='STALE · '+e.message;$('sessionCoverage').textContent='Session coverage unavailable.';for(const id of ['sessionPnl','sessionFills','sessionOpen'])$(id).textContent='—';$('sessionStart').disabled=true;}
  finally{sessionRefreshing=false;}
 }
@@ -226,10 +331,13 @@ for(const action of ['Start','Stop'])$('session'+action).onclick=async()=>{
    $('sessionMessage').textContent=got===want?`Scheduled (${got}). Starts ${ET.format(new Date(d.session.startAt))} ET; you can close this page.`:`The Worker scheduled a ${got} session, not ${want}: it is probably still running an older build. Stop this session and start again in a few minutes.`;}
   else $('sessionMessage').textContent='Stopped. Any open position will await official settlement.';}
  catch(e){$('sessionMessage').textContent=e.message;}
- finally{sessionSending=false;await refreshSession();}
+ finally{sessionSending=false;await refreshSession();refreshHistory();}
 };
 $('sessionExport').onclick=async()=>{
- if(!sessionData?.session)return;let exported;try{exported=await sessionCall('export');}catch(e){$('sessionMessage').textContent=e.message;return;}const blob=new Blob([JSON.stringify(exported,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='btc15-paper-session-'+sessionData.session.id+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+ // The live session exports in full (looks and attempts); an archived one exports its summary.
+ const x=deskList().find(x=>x.id===selectedSessionId);if(!x)return;let exported;
+ if(x.current){try{exported=await sessionCall('export');}catch(e){$('sessionMessage').textContent=e.message;return;}}else exported={session:x,archived:true,now:Date.now()};
+ const blob=new Blob([JSON.stringify(exported,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='btc15-paper-session-'+x.id+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 };
 let cfg = null, refreshing = false;
 async function refresh() {
@@ -400,9 +508,10 @@ $('researchExport').onclick=async()=>{
  }catch(e){$('researchStatus').textContent=e.message;}finally{b.disabled=false;}
 };
 refreshSession(); setInterval(refreshSession, 5000);
+refreshHistory(); setInterval(refreshHistory, 60000);
 refreshResearch(); setInterval(refreshResearch, 60000);
 refresh(); setInterval(refresh, 10000);
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") {refreshSession();refresh();refreshResearch();} });
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") {refreshSession();refreshHistory();refresh();refreshResearch();} });
 </script>
 </body>
 </html>

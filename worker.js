@@ -1124,6 +1124,14 @@ globalThis.BTC15Depth = Object.freeze({DEPTH_VENUES, CONSTITUENTS, REPLICA_BAND,
 })();
 // END SHARED BTC15 DEPTH
 const paperSession = globalThis.BTC15Session;
+const SESSION_HISTORY_KEEP=40;
+function sessionSummary(s,now){
+  const r=paperSession.report(s,now);
+  return {id:s.id,version:s.version,status:s.status,startAt:s.startAt,endAt:s.endAt,stoppedAt:s.stoppedAt??null,stopReason:s.stopReason??null,
+    strategy:r.strategy,strategyParams:r.strategyParams,model:r.model,settlementConvention:r.settlementConvention,
+    report:{...r,coverage:r.coverage?{observedSlots:r.coverage.observedSlots,elapsedSlots:r.coverage.elapsedSlots,missedSlots:r.coverage.missedSlots,maxEvaluationGapMs:r.coverage.maxEvaluationGapMs,windows:r.coverage.windows}:null},
+    trades:s.trades.map(t=>({id:t.id,mk:t.mk,close:t.close,side:t.side,n:t.n||1,entryAt:t.entryAt,entryCents:t.entryCents,entryFeeCents:t.entryFeeCents,entryDistanceUsd:t.entryDistanceUsd??null,exitAt:t.exitAt??null,exitCents:t.exitCents??null,exitFeeCents:t.exitFeeCents??null,pnlCents:t.pnlCents,resolution:t.resolution??null,officialResult:t.officialResult??null}))};
+}
 const {tailCdf,volsFrom,projectFrom} = globalThis.BTC15Model;
 function feeCents(p) { return globalThis.BTC15Model.feesCents(p*100); }
 async function signedGet(env, apiPath, query, options) { return signedCall(env,"live","GET",apiPath+(query||""),undefined,options); }
@@ -1366,6 +1374,12 @@ export class KalshiFeed {
     let s=await this.loadSession();
     if(url.pathname==='/paper-session/status'&&request.method==='GET')return reply({session:s?{...s,looks:undefined,attempts:undefined}:null,report:s?paperSession.report(s):null,error:this.sessionError??null,now:Date.now()});
     if(url.pathname==='/paper-session/export'&&request.method==='GET')return reply({session:s||null,report:s?paperSession.report(s):null,now:Date.now()});
+    if(url.pathname==='/paper-session/history'&&request.method==='GET'){
+      // Archived sessions, newest first, plus the current one: the desk's left rail.
+      const rows=[...(await this.state.storage.list({prefix:'session.history:',reverse:true,limit:SESSION_HISTORY_KEEP})).values()];
+      const current=s?sessionSummary(s,Date.now()):null;
+      return reply({current,sessions:rows.filter(r=>!current||r.id!==current.id),now:Date.now()});
+    }
     if(request.method!=='POST')return reply({error:'POST required'},405);
     if(url.pathname==='/paper-session/stop'){
       if(s){paperSession.stop(s,Date.now(),'manual stop');if(!await this.saveSession(s))return reply({error:'Session changed while stopping; refresh status and retry.'},409);}
@@ -1379,7 +1393,7 @@ export class KalshiFeed {
     if(s&&paperSession.reconcile(s,Date.now())&&!await this.saveSession(s))return reply({error:'Session changed during version transition; refresh status and retry.'},409);
     if(cfg.mode!=='off'||old.some(w=>w.pendingPaper||(!w.settled&&w.trades?.some(t=>t.filled>0))))return reply({error:'Turn the legacy agent off and let its open paper positions settle first.'},409);
     if(s&&(paperSession.active(s,Date.now())||s.trades.some(t=>t.pnlCents==null)))return reply({error:'A session is already scheduled, running or awaiting settlement.'},409);
-    if(s)await this.state.storage.put('session.previous',await this.state.storage.get('session.current'));
+    if(s){await this.state.storage.put('session.previous',await this.state.storage.get('session.current'));await this.archiveSession(s);}
     const strategy=url.searchParams.get('strategy')||'model-edge';
     if(!paperSession.STRATEGIES[strategy])return reply({error:'unknown strategy'},400);
     s=paperSession.create(Date.now(),crypto.randomUUID(),strategy);
@@ -1387,6 +1401,13 @@ export class KalshiFeed {
     this.agentActive=true;this.ensureUpstream();if(this.up)this.subscribeTickers();
     await this.scheduleAlarm(Date.now()+1000);
     return reply({session:s});
+  }
+  async archiveSession(s) {
+    // A compact record (report and trades, not the 5-second looks) keyed by start time so
+    // storage.list returns them in order; the oldest beyond SESSION_HISTORY_KEEP are dropped.
+    await this.state.storage.put(`session.history:${String(s.startAt).padStart(15,'0')}:${s.id}`,sessionSummary(s,Date.now()));
+    const keys=[...(await this.state.storage.list({prefix:'session.history:'})).keys()];
+    if(keys.length>SESSION_HISTORY_KEEP)await this.state.storage.delete(keys.slice(0,keys.length-SESSION_HISTORY_KEEP));
   }
   startSessionTask() {
     // waitUntil keeps I/O alive without holding the alarm-handler lock. Single flight
