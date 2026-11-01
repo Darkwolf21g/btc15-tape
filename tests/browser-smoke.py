@@ -103,7 +103,7 @@ with sync_playwright() as p:
     assert page.locator("#collector").inner_text() == "Collector unavailable · token required"
     fail_session = True
     page.evaluate("refreshSession()")
-    assert "STALE" in page.locator("#sessionStatus").inner_text()
+    assert "STALE" in page.locator("#sessionStatus").text_content()  # folded under Run details
     assert page.locator("#sessionPnl").inner_text() == "—"
     assert page.locator("#sessionStart").is_disabled()
     assert page.locator("#sessionStop").is_enabled()
